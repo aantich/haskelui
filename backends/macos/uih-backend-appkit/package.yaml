@@ -1,0 +1,56 @@
+name: uih-backend-appkit
+version: 0.1.0.0
+github: aantich/uih
+license: BSD-3-Clause
+author: UIH contributors
+maintainer: UIH contributors
+copyright: 2026 UIH contributors
+
+extra-source-files:
+  - cbits/include/UIHAppKit.h
+  - cbits/compat/UIHAppKitCompatibility.h
+
+dependencies:
+  - base >= 4.20.2 && < 4.21
+  - bytestring
+  - containers
+  - text
+  - uih-core
+  - uih-runtime
+
+ghc-options:
+  - -Wall
+  - -Wcompat
+
+library:
+  source-dirs: src
+  exposed-modules:
+    - UIH.Backend.AppKit
+  other-modules:
+    - UIH.Backend.AppKit.Internal.Capabilities
+    - UIH.Backend.AppKit.Internal.FFI
+  when:
+    - condition: os(darwin)
+      c-sources:
+        - cbits/UIHAppKit.m
+      include-dirs:
+        - cbits/include
+      install-includes:
+        - UIHAppKit.h
+      frameworks:
+        - AppKit
+        - Foundation
+      cc-options:
+        - -fobjc-arc
+    - condition: '!os(darwin)'
+      buildable: false
+
+tests:
+  uih-backend-appkit-test:
+    main: Spec.hs
+    source-dirs: test
+    dependencies:
+      - uih-backend-appkit
+    when:
+      - condition: '!os(darwin)'
+        buildable: false

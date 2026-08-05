@@ -1,0 +1,31 @@
+name: uih-public-api-spike
+version: 0.1.0.0
+github: aantich/uih
+license: BSD-3-Clause
+author: UIH contributors
+maintainer: UIH contributors
+copyright: 2026 UIH contributors
+
+extra-source-files:
+  - README.md
+
+dependencies:
+  - base >= 4.20.2 && < 4.21
+  - containers
+  - text
+  - uih-property-spike
+
+ghc-options:
+  - -Wall
+  - -Wcompat
+
+library:
+  source-dirs: src
+
+tests:
+  public-api-test:
+    main: Spec.hs
+    source-dirs: test
+    dependencies:
+      - uih-public-api-spike
+

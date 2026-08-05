@@ -1,0 +1,14 @@
+resolver: lts-24.50
+
+packages:
+  - packages/uih-core
+  - packages/uih-runtime
+  - backends/headless/uih-backend-headless
+  - backends/macos/uih-backend-appkit
+  - examples/appkit-vertical
+  - spikes/property-api
+  - spikes/public-api
+
+system-ghc: true
+install-ghc: false
+compiler-check: match-exact

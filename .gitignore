@@ -1,0 +1,40 @@
+# Haskell build products
+.stack-work/
+**/.stack-work/
+dist/
+dist-newstyle/
+.cabal-sandbox/
+cabal.sandbox.config
+.ghc.environment.*
+.hpc/
+*.hi
+*.o
+*.dyn_hi
+*.dyn_o
+*.prof
+*.aux
+*.hp
+*.eventlog
+
+# Native build products
+build/
+DerivedData/
+*.dSYM/
+*.a
+*.dylib
+compile_commands.json
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Local-only configuration and secrets
+cabal.project.local
+cabal.project.local~
+.env
+.env.*
+!.env.example

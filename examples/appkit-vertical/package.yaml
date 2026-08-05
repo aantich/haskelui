@@ -1,0 +1,26 @@
+name: uih-example-appkit-vertical
+version: 0.1.0.0
+github: aantich/uih
+license: BSD-3-Clause
+author: UIH contributors
+maintainer: UIH contributors
+copyright: 2026 UIH contributors
+
+dependencies:
+  - base >= 4.20.2 && < 4.21
+  - text
+  - uih-backend-appkit
+  - uih-core
+  - uih-runtime
+
+executables:
+  uih-appkit-vertical:
+    main: Main.hs
+    source-dirs: app
+    ghc-options:
+      - -Wall
+      - -Wcompat
+      - -threaded
+    when:
+      - condition: '!os(darwin)'
+        buildable: false
