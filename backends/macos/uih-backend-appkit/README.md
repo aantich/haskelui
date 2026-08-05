@@ -44,6 +44,10 @@ Implemented:
 - Multiple retained native windows
 - Native labels, buttons, and text fields
 - Native scrolling multiline text editors
+- Native split-view workspace composition with semantic sidebar, content, and inspector pane hosts
+- Independently keyed movable workspace item hosts
+- Native document tab strip, selected content hosts, tab selection, and close requests
+- Shared native workspace status area
 - Revision-bound portable text-style layers, scalar-to-UTF-16 range translation, and temporary native presentation attributes
 - File-menu commands and key equivalents
 - Native multiple-selection text-file Open panel

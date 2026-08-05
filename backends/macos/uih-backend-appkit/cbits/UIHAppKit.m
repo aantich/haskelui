@@ -14,6 +14,8 @@ typedef NS_ENUM(NSInteger, UIHMacControlKind) {
 
 @class UIHMacWindowHandle;
 @class UIHMacControlHandle;
+@class UIHMacTabGroupHandle;
+@class UIHMacTabHandle;
 
 @interface UIHMacApplicationState : NSObject
 @property(nonatomic, assign) UIHMacEventCallback callback;
@@ -114,6 +116,17 @@ static void UIHEmit(int32_t kind, uint64_t identity, NSString *text) {
 @property(nonatomic, assign) uint64_t identity;
 @property(nonatomic, strong) NSWindow *window;
 @property(nonatomic, strong) UIHMacWindowDelegate *delegate;
+@property(nonatomic, strong) NSView *workspaceRoot;
+@property(nonatomic, strong) NSSplitView *workspaceSplit;
+@property(nonatomic, strong) NSView *workspaceStatus;
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSView *> *workspacePanes;
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSNumber *> *workspacePaneRoles;
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSNumber *> *workspacePaneExtents;
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSView *> *workspaceItems;
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *, UIHMacTabGroupHandle *> *tabGroups;
+@property(nonatomic, strong) NSMutableSet<NSNumber *> *seenPanes;
+@property(nonatomic, strong) NSMutableSet<NSNumber *> *seenItems;
+@property(nonatomic, strong) NSMutableSet<NSNumber *> *seenTabGroups;
 @end
 
 @implementation UIHMacWindowHandle
@@ -128,6 +141,33 @@ static void UIHEmit(int32_t kind, uint64_t identity, NSString *text) {
 - (void)dealloc {
   UIHLiveWindows -= 1;
 }
+@end
+
+@interface UIHMacTabHandle : NSObject
+@property(nonatomic, assign) uint64_t identity;
+@property(nonatomic, strong) NSStackView *tabHeader;
+@property(nonatomic, strong) NSButton *selectButton;
+@property(nonatomic, strong) NSButton *closeButton;
+@property(nonatomic, strong) NSView *contentView;
+@property(nonatomic, strong) UIHMacActionTarget *selectTarget;
+@property(nonatomic, strong) UIHMacActionTarget *closeTarget;
+@end
+
+@implementation UIHMacTabHandle
+@end
+
+@interface UIHMacTabGroupHandle : NSObject
+@property(nonatomic, assign) uint64_t identity;
+@property(nonatomic, strong) NSView *rootView;
+@property(nonatomic, strong) NSScrollView *tabScrollView;
+@property(nonatomic, strong) NSStackView *tabBar;
+@property(nonatomic, strong) NSView *contentHost;
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *, UIHMacTabHandle *> *tabs;
+@property(nonatomic, strong) NSMutableSet<NSNumber *> *seenTabs;
+@property(nonatomic, strong) NSNumber *selectedTab;
+@end
+
+@implementation UIHMacTabGroupHandle
 @end
 
 @interface UIHMacControlHandle : NSObject
@@ -283,6 +323,14 @@ UIHMacWindowRef uih_macos_window_create(
   handle.identity = identity;
   handle.window = window;
   handle.delegate = delegate;
+  handle.workspacePanes = [[NSMutableDictionary alloc] init];
+  handle.workspacePaneRoles = [[NSMutableDictionary alloc] init];
+  handle.workspacePaneExtents = [[NSMutableDictionary alloc] init];
+  handle.workspaceItems = [[NSMutableDictionary alloc] init];
+  handle.tabGroups = [[NSMutableDictionary alloc] init];
+  handle.seenPanes = [[NSMutableSet alloc] init];
+  handle.seenItems = [[NSMutableSet alloc] init];
+  handle.seenTabGroups = [[NSMutableSet alloc] init];
   UIHState.windows[@(identity)] = handle;
   return (__bridge_retained void *)handle;
 }
@@ -302,6 +350,29 @@ void uih_macos_window_show(UIHMacWindowRef reference) {
   [UIHWindow(reference).window makeKeyAndOrderFront:nil];
 }
 
+static void UIHReleaseTab(UIHMacTabHandle *tab) {
+  [tab.tabHeader removeFromSuperview];
+  [tab.contentView removeFromSuperview];
+  if (tab.selectTarget != nil) {
+    tab.selectButton.target = nil;
+    tab.selectTarget = nil;
+    UIHLiveActionTargets -= 1;
+  }
+  if (tab.closeTarget != nil) {
+    tab.closeButton.target = nil;
+    tab.closeTarget = nil;
+    UIHLiveActionTargets -= 1;
+  }
+}
+
+static void UIHReleaseTabGroup(UIHMacTabGroupHandle *group) {
+  for (UIHMacTabHandle *tab in group.tabs.allValues) {
+    UIHReleaseTab(tab);
+  }
+  [group.tabs removeAllObjects];
+  [group.rootView removeFromSuperview];
+}
+
 void uih_macos_window_destroy(UIHMacWindowRef reference) {
   UIHAssertMainThread();
   if (reference == NULL) {
@@ -309,6 +380,11 @@ void uih_macos_window_destroy(UIHMacWindowRef reference) {
   }
   UIHMacWindowHandle *handle = (__bridge_transfer UIHMacWindowHandle *)reference;
   [UIHState.windows removeObjectForKey:@(handle.identity)];
+  for (UIHMacTabGroupHandle *group in handle.tabGroups.allValues) {
+    UIHReleaseTabGroup(group);
+  }
+  [handle.tabGroups removeAllObjects];
+  [handle.workspaceRoot removeFromSuperview];
   handle.window.delegate = nil;
   [handle.window orderOut:nil];
   [handle.window close];
@@ -317,6 +393,343 @@ void uih_macos_window_destroy(UIHMacWindowRef reference) {
     UIHLiveWindowDelegates -= 1;
   }
   handle.window = nil;
+}
+
+static NSView *UIHWorkspacePaneView(int32_t role) {
+  if (role == 0 || role == 2) {
+    NSVisualEffectView *view = [[NSVisualEffectView alloc] initWithFrame:NSZeroRect];
+    view.material = role == 0 ? NSVisualEffectMaterialSidebar : NSVisualEffectMaterialContentBackground;
+    view.blendingMode = NSVisualEffectBlendingModeWithinWindow;
+    view.state = NSVisualEffectStateFollowsWindowActiveState;
+    return view;
+  }
+  return [[NSView alloc] initWithFrame:NSZeroRect];
+}
+
+static void UIHFillView(NSView *view, NSView *parent) {
+  if (view.superview != parent) {
+    [view removeFromSuperview];
+    [parent addSubview:view];
+  }
+  view.frame = parent.bounds;
+  view.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+}
+
+void uih_macos_workspace_begin(
+    UIHMacWindowRef reference,
+    int32_t sideBySide,
+    double statusHeight) {
+  UIHAssertMainThread();
+  UIHMacWindowHandle *handle = UIHWindow(reference);
+  NSView *content = handle.window.contentView;
+  CGFloat safeStatusHeight = (CGFloat)MAX(0.0, statusHeight);
+  if (handle.workspaceRoot == nil) {
+    NSView *root = [[NSView alloc] initWithFrame:content.bounds];
+    root.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    root.accessibilityElement = YES;
+    root.accessibilityRole = NSAccessibilityGroupRole;
+    root.accessibilityIdentifier =
+        [NSString stringWithFormat:@"uih-workspace-%llu", handle.identity];
+
+    NSSplitView *split = [[NSSplitView alloc] initWithFrame:NSZeroRect];
+    split.dividerStyle = NSSplitViewDividerStyleThin;
+    split.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+
+    NSVisualEffectView *status = [[NSVisualEffectView alloc] initWithFrame:NSZeroRect];
+    status.material = NSVisualEffectMaterialHeaderView;
+    status.blendingMode = NSVisualEffectBlendingModeWithinWindow;
+    status.state = NSVisualEffectStateFollowsWindowActiveState;
+    status.autoresizingMask = NSViewWidthSizable | NSViewMaxYMargin;
+    status.accessibilityElement = YES;
+    status.accessibilityRole = NSAccessibilityGroupRole;
+    status.accessibilityIdentifier =
+        [NSString stringWithFormat:@"uih-workspace-status-%llu", handle.identity];
+
+    NSBox *separator = [[NSBox alloc] initWithFrame:NSMakeRect(0, 0, content.bounds.size.width, 1)];
+    separator.boxType = NSBoxSeparator;
+    separator.autoresizingMask = NSViewWidthSizable | NSViewMinYMargin;
+    [status addSubview:separator];
+
+    [root addSubview:split];
+    [root addSubview:status];
+    [content addSubview:root];
+    handle.workspaceRoot = root;
+    handle.workspaceSplit = split;
+    handle.workspaceStatus = status;
+  }
+
+  handle.workspaceSplit.vertical = sideBySide != 0;
+  handle.workspaceStatus.frame = NSMakeRect(0, 0, content.bounds.size.width, safeStatusHeight);
+  handle.workspaceSplit.frame =
+      NSMakeRect(0, safeStatusHeight, content.bounds.size.width,
+                 MAX(0, content.bounds.size.height - safeStatusHeight));
+  [handle.seenPanes removeAllObjects];
+  [handle.seenItems removeAllObjects];
+  [handle.seenTabGroups removeAllObjects];
+  for (UIHMacTabGroupHandle *group in handle.tabGroups.allValues) {
+    [group.seenTabs removeAllObjects];
+    group.selectedTab = nil;
+  }
+}
+
+void uih_macos_workspace_pane_set(
+    UIHMacWindowRef reference,
+    uint64_t paneIdentity,
+    int32_t paneRole,
+    double preferredExtent,
+    int32_t collapsed) {
+  UIHAssertMainThread();
+  UIHMacWindowHandle *handle = UIHWindow(reference);
+  NSNumber *key = @(paneIdentity);
+  NSView *pane = handle.workspacePanes[key];
+  NSNumber *oldRole = handle.workspacePaneRoles[key];
+  if (pane == nil || oldRole.intValue != paneRole) {
+    NSView *oldPane = pane;
+    pane = UIHWorkspacePaneView(paneRole);
+    pane.accessibilityElement = YES;
+    pane.accessibilityRole = NSAccessibilityGroupRole;
+    pane.accessibilityIdentifier =
+        [NSString stringWithFormat:@"uih-workspace-pane-%llu", paneIdentity];
+    for (NSView *child in oldPane.subviews.copy) {
+      UIHFillView(child, pane);
+    }
+    [oldPane removeFromSuperview];
+    handle.workspacePanes[key] = pane;
+  }
+  handle.workspacePaneRoles[key] = @(paneRole);
+  handle.workspacePaneExtents[key] = @(MAX(0.0, preferredExtent));
+  pane.hidden = collapsed != 0;
+  if (pane.superview != handle.workspaceSplit) {
+    [handle.workspaceSplit addSubview:pane];
+  }
+  [handle.seenPanes addObject:key];
+}
+
+void uih_macos_workspace_item_set(
+    UIHMacWindowRef reference,
+    uint64_t paneIdentity,
+    uint64_t itemIdentity) {
+  UIHAssertMainThread();
+  UIHMacWindowHandle *handle = UIHWindow(reference);
+  NSNumber *paneKey = @(paneIdentity);
+  NSNumber *itemKey = @(itemIdentity);
+  NSView *pane = handle.workspacePanes[paneKey];
+  if (pane == nil) {
+    return;
+  }
+  NSView *item = handle.workspaceItems[itemKey];
+  if (item == nil) {
+    item = [[NSView alloc] initWithFrame:pane.bounds];
+    item.accessibilityElement = YES;
+    item.accessibilityRole = NSAccessibilityGroupRole;
+    item.accessibilityIdentifier =
+        [NSString stringWithFormat:@"uih-workspace-item-%llu", itemIdentity];
+    handle.workspaceItems[itemKey] = item;
+  }
+  UIHFillView(item, pane);
+  [handle.seenItems addObject:itemKey];
+}
+
+static UIHMacTabGroupHandle *UIHEnsureTabGroup(
+    UIHMacWindowHandle *window,
+    uint64_t identity) {
+  NSNumber *key = @(identity);
+  UIHMacTabGroupHandle *group = window.tabGroups[key];
+  if (group != nil) {
+    return group;
+  }
+  group = [[UIHMacTabGroupHandle alloc] init];
+  group.identity = identity;
+  group.tabs = [[NSMutableDictionary alloc] init];
+  group.seenTabs = [[NSMutableSet alloc] init];
+
+  NSView *root = [[NSView alloc] initWithFrame:NSZeroRect];
+  root.accessibilityElement = YES;
+  root.accessibilityRole = NSAccessibilityGroupRole;
+  root.accessibilityIdentifier = [NSString stringWithFormat:@"uih-tab-group-%llu", identity];
+  NSStackView *bar = [[NSStackView alloc] initWithFrame:NSMakeRect(0, 0, 100, 32)];
+  bar.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+  bar.alignment = NSLayoutAttributeCenterY;
+  bar.spacing = 2;
+  bar.edgeInsets = NSEdgeInsetsMake(3, 6, 3, 6);
+  bar.autoresizingMask = NSViewWidthSizable | NSViewMinYMargin;
+  NSView *content = [[NSView alloc] initWithFrame:NSZeroRect];
+  content.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+  [root addSubview:bar];
+  [root addSubview:content];
+  group.rootView = root;
+  group.tabBar = bar;
+  group.contentHost = content;
+  window.tabGroups[key] = group;
+  return group;
+}
+
+static void UIHLayoutTabGroup(UIHMacTabGroupHandle *group) {
+  CGFloat barHeight = 34;
+  NSRect bounds = group.rootView.bounds;
+  group.tabBar.frame = NSMakeRect(0, MAX(0, bounds.size.height - barHeight), bounds.size.width, barHeight);
+  group.contentHost.frame = NSMakeRect(0, 0, bounds.size.width, MAX(0, bounds.size.height - barHeight));
+  for (UIHMacTabHandle *tab in group.tabs.allValues) {
+    tab.contentView.frame = group.contentHost.bounds;
+  }
+}
+
+void uih_macos_workspace_tab_group_set(
+    UIHMacWindowRef reference,
+    uint64_t itemIdentity,
+    uint64_t groupIdentity) {
+  UIHAssertMainThread();
+  UIHMacWindowHandle *handle = UIHWindow(reference);
+  NSView *item = handle.workspaceItems[@(itemIdentity)];
+  if (item == nil) {
+    return;
+  }
+  UIHMacTabGroupHandle *group = UIHEnsureTabGroup(handle, groupIdentity);
+  UIHFillView(group.rootView, item);
+  UIHLayoutTabGroup(group);
+  for (UIHMacTabHandle *tab in group.tabs.allValues) {
+    [group.tabBar removeArrangedSubview:tab.tabHeader];
+    [tab.tabHeader removeFromSuperview];
+  }
+  [handle.seenTabGroups addObject:@(groupIdentity)];
+}
+
+static UIHMacTabHandle *UIHEnsureTab(
+    UIHMacTabGroupHandle *group,
+    uint64_t identity) {
+  NSNumber *key = @(identity);
+  UIHMacTabHandle *tab = group.tabs[key];
+  if (tab != nil) {
+    return tab;
+  }
+  tab = [[UIHMacTabHandle alloc] init];
+  tab.identity = identity;
+
+  UIHMacActionTarget *selectTarget = [[UIHMacActionTarget alloc] init];
+  UIHLiveActionTargets += 1;
+  selectTarget.identity = identity;
+  selectTarget.eventKind = UIHMacEventTabSelected;
+  NSButton *selectButton = [NSButton buttonWithTitle:@"" target:selectTarget action:@selector(performAction:)];
+  selectButton.bezelStyle = NSBezelStyleTexturedRounded;
+
+  UIHMacActionTarget *closeTarget = [[UIHMacActionTarget alloc] init];
+  UIHLiveActionTargets += 1;
+  closeTarget.identity = identity;
+  closeTarget.eventKind = UIHMacEventTabCloseRequested;
+  NSButton *closeButton = [NSButton buttonWithTitle:@"×" target:closeTarget action:@selector(performAction:)];
+  closeButton.bezelStyle = NSBezelStyleInline;
+  closeButton.toolTip = @"Close";
+
+  NSStackView *header = [NSStackView stackViewWithViews:@[selectButton, closeButton]];
+  header.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+  header.alignment = NSLayoutAttributeCenterY;
+  header.spacing = 1;
+  NSView *content = [[NSView alloc] initWithFrame:group.contentHost.bounds];
+  content.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+  content.accessibilityElement = YES;
+  content.accessibilityRole = NSAccessibilityGroupRole;
+  content.accessibilityIdentifier = [NSString stringWithFormat:@"uih-tab-content-%llu", identity];
+  [group.tabBar addArrangedSubview:header];
+  [group.contentHost addSubview:content];
+
+  tab.tabHeader = header;
+  tab.selectButton = selectButton;
+  tab.closeButton = closeButton;
+  tab.contentView = content;
+  tab.selectTarget = selectTarget;
+  tab.closeTarget = closeTarget;
+  group.tabs[key] = tab;
+  return tab;
+}
+
+void uih_macos_workspace_tab_set(
+    UIHMacWindowRef reference,
+    uint64_t groupIdentity,
+    uint64_t tabIdentity,
+    const char *utf8Title,
+    int32_t modified,
+    int32_t closeable,
+    int32_t selected) {
+  UIHAssertMainThread();
+  UIHMacWindowHandle *handle = UIHWindow(reference);
+  UIHMacTabGroupHandle *group = handle.tabGroups[@(groupIdentity)];
+  if (group == nil) {
+    return;
+  }
+  UIHMacTabHandle *tab = UIHEnsureTab(group, tabIdentity);
+  if (tab.tabHeader.superview != group.tabBar) {
+    [group.tabBar addArrangedSubview:tab.tabHeader];
+  }
+  NSString *title = UIHString(utf8Title);
+  tab.selectButton.title = modified != 0 ? [@"● " stringByAppendingString:title] : title;
+  tab.selectButton.toolTip = title;
+  tab.closeButton.hidden = closeable == 0;
+  tab.selectButton.state = selected != 0 ? NSControlStateValueOn : NSControlStateValueOff;
+  tab.contentView.hidden = selected == 0;
+  if (selected != 0) {
+    group.selectedTab = @(tabIdentity);
+  }
+  [group.seenTabs addObject:@(tabIdentity)];
+}
+
+void uih_macos_workspace_end(UIHMacWindowRef reference) {
+  UIHAssertMainThread();
+  UIHMacWindowHandle *handle = UIHWindow(reference);
+
+  for (NSNumber *groupKey in handle.tabGroups.allKeys.copy) {
+    UIHMacTabGroupHandle *group = handle.tabGroups[groupKey];
+    if (![handle.seenTabGroups containsObject:groupKey]) {
+      UIHReleaseTabGroup(group);
+      [handle.tabGroups removeObjectForKey:groupKey];
+      continue;
+    }
+    for (NSNumber *tabKey in group.tabs.allKeys.copy) {
+      if (![group.seenTabs containsObject:tabKey]) {
+        UIHReleaseTab(group.tabs[tabKey]);
+        [group.tabs removeObjectForKey:tabKey];
+      }
+    }
+    UIHLayoutTabGroup(group);
+  }
+  for (NSNumber *itemKey in handle.workspaceItems.allKeys.copy) {
+    if (![handle.seenItems containsObject:itemKey]) {
+      [handle.workspaceItems[itemKey] removeFromSuperview];
+      [handle.workspaceItems removeObjectForKey:itemKey];
+    }
+  }
+  for (NSNumber *paneKey in handle.workspacePanes.allKeys.copy) {
+    if (![handle.seenPanes containsObject:paneKey]) {
+      [handle.workspacePanes[paneKey] removeFromSuperview];
+      [handle.workspacePanes removeObjectForKey:paneKey];
+      [handle.workspacePaneRoles removeObjectForKey:paneKey];
+      [handle.workspacePaneExtents removeObjectForKey:paneKey];
+    }
+  }
+
+  [handle.workspaceSplit adjustSubviews];
+  NSArray<NSView *> *visiblePanes =
+      [handle.workspaceSplit.subviews filteredArrayUsingPredicate:
+          [NSPredicate predicateWithBlock:^BOOL(NSView *pane, NSDictionary *bindings) {
+            (void)bindings;
+            return !pane.hidden;
+          }]];
+  if (handle.workspaceSplit.vertical && visiblePanes.count >= 2) {
+    NSView *first = visiblePanes.firstObject;
+    NSNumber *firstKey = [handle.workspacePanes allKeysForObject:first].firstObject;
+    CGFloat firstExtent = handle.workspacePaneExtents[firstKey].doubleValue;
+    if (firstExtent > 0) {
+      [handle.workspaceSplit setPosition:firstExtent ofDividerAtIndex:0];
+    }
+    if (visiblePanes.count >= 3) {
+      NSView *last = visiblePanes.lastObject;
+      NSNumber *lastKey = [handle.workspacePanes allKeysForObject:last].firstObject;
+      CGFloat lastExtent = handle.workspacePaneExtents[lastKey].doubleValue;
+      if (lastExtent > 0) {
+        CGFloat position = MAX(firstExtent, handle.workspaceSplit.bounds.size.width - lastExtent);
+        [handle.workspaceSplit setPosition:position ofDividerAtIndex:visiblePanes.count - 2];
+      }
+    }
+  }
 }
 
 static UIHMacControlRef UIHRetainControl(
@@ -730,6 +1143,58 @@ void uih_macos_control_set_next_key(
   UIHControl(reference).focusView.nextKeyView = UIHControl(nextReference).focusView;
 }
 
+static void UIHAttachControl(
+    UIHMacControlHandle *control,
+    NSView *parent,
+    int32_t fillParent) {
+  if (control == nil || parent == nil) {
+    return;
+  }
+  if (control.view.superview != parent) {
+    [control.view removeFromSuperview];
+    [parent addSubview:control.view];
+  }
+  if (fillParent != 0) {
+    control.view.frame = parent.bounds;
+    control.view.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+  }
+}
+
+void uih_macos_control_set_parent_item(
+    UIHMacWindowRef windowReference,
+    UIHMacControlRef controlReference,
+    uint64_t itemIdentity,
+    int32_t fillParent) {
+  UIHAssertMainThread();
+  UIHMacWindowHandle *window = UIHWindow(windowReference);
+  UIHAttachControl(
+      UIHControl(controlReference),
+      window.workspaceItems[@(itemIdentity)],
+      fillParent);
+}
+
+void uih_macos_control_set_parent_tab(
+    UIHMacWindowRef windowReference,
+    UIHMacControlRef controlReference,
+    uint64_t groupIdentity,
+    uint64_t tabIdentity,
+    int32_t fillParent) {
+  UIHAssertMainThread();
+  UIHMacWindowHandle *window = UIHWindow(windowReference);
+  UIHMacTabGroupHandle *group = window.tabGroups[@(groupIdentity)];
+  UIHMacTabHandle *tab = group.tabs[@(tabIdentity)];
+  UIHAttachControl(UIHControl(controlReference), tab.contentView, fillParent);
+}
+
+void uih_macos_control_set_parent_status(
+    UIHMacWindowRef windowReference,
+    UIHMacControlRef controlReference,
+    int32_t fillParent) {
+  UIHAssertMainThread();
+  UIHMacWindowHandle *window = UIHWindow(windowReference);
+  UIHAttachControl(UIHControl(controlReference), window.workspaceStatus, fillParent);
+}
+
 void uih_macos_control_destroy(UIHMacControlRef reference) {
   UIHAssertMainThread();
   if (reference == NULL) {
@@ -990,19 +1455,33 @@ void uih_macos_test_schedule_vertical_script(
 void uih_macos_test_schedule_text_editor_script(
     uint64_t documentWindowIdentity,
     uint64_t editorIdentity,
+    uint64_t tabIdentity,
     uint64_t saveCommandIdentity) {
   UIHAssertMainThread();
 
   UIHTestAfter(0.10, ^{
     UIHMacWindowHandle *documentWindow = UIHState.windows[@(documentWindowIdentity)];
     UIHMacControlHandle *editorHandle = UIHState.controls[@(editorIdentity)];
+    UIHMacTabHandle *tabHandle = nil;
+    for (UIHMacTabGroupHandle *group in documentWindow.tabGroups.allValues) {
+      tabHandle = group.tabs[@(tabIdentity)];
+      if (tabHandle != nil) {
+        break;
+      }
+    }
     NSMenuItem *saveItem = UIHState.commandItems[@(saveCommandIdentity)];
-    if (documentWindow == nil || editorHandle == nil || saveItem == nil ||
+    if (documentWindow == nil || editorHandle == nil || tabHandle == nil || saveItem == nil ||
         editorHandle.kind != UIHMacControlKindTextEditor) {
-      UIHTestFail(@"native text editor scene was not registered");
+      UIHTestFail(@"native workspace, document tab, or text editor was not registered");
       [NSApplication.sharedApplication stop:nil];
       return;
     }
+    if (documentWindow.workspaceSplit == nil ||
+        documentWindow.workspaceSplit.subviews.count != 3 ||
+        documentWindow.workspaceStatus == nil || tabHandle.contentView.hidden) {
+      UIHTestFail(@"native workspace split, status area, or selected tab is incorrect");
+    }
+    [tabHandle.selectButton performClick:nil];
 
     NSTextView *editor = (NSTextView *)editorHandle.focusView;
     NSString *expectedIdentifier =
@@ -1097,16 +1576,43 @@ void uih_macos_test_schedule_text_editor_script(
         if ([savedWindow.window.title containsString:@"Edited"] || disabledSaveItem.enabled) {
           UIHTestFail(@"successful file write did not reconcile saved document state");
         }
-        [savedWindow.window performClose:nil];
-
-        UIHTestAfter(0.30, ^{
-          if (UIHState != nil && UIHState.windows[@(documentWindowIdentity)] != nil) {
-            UIHTestFail(@"saved document close request did not remove its native window");
-            [NSApplication.sharedApplication stop:nil];
-          } else if (UIHState != nil) {
-            UIHTestFail(@"last document closed but the application did not stop");
-            [NSApplication.sharedApplication stop:nil];
+        UIHMacTabHandle *savedTab = nil;
+        for (UIHMacTabGroupHandle *group in savedWindow.tabGroups.allValues) {
+          savedTab = group.tabs[@(tabIdentity)];
+          if (savedTab != nil) {
+            break;
           }
+        }
+        if (savedTab == nil) {
+          UIHTestFail(@"saved document tab disappeared before close-button validation");
+          [NSApplication.sharedApplication stop:nil];
+          return;
+        }
+        [savedTab.closeButton performClick:nil];
+
+        UIHTestAfter(0.12, ^{
+          UIHMacWindowHandle *emptyWorkspace = UIHState.windows[@(documentWindowIdentity)];
+          BOOL tabStillPresent = NO;
+          for (UIHMacTabGroupHandle *group in emptyWorkspace.tabGroups.allValues) {
+            if (group.tabs[@(tabIdentity)] != nil) {
+              tabStillPresent = YES;
+            }
+          }
+          if (emptyWorkspace == nil || tabStillPresent) {
+            UIHTestFail(@"clean tab close did not retain the workspace and remove only the tab");
+            [NSApplication.sharedApplication stop:nil];
+            return;
+          }
+          [emptyWorkspace.window performClose:nil];
+
+          UIHTestAfter(0.30, ^{
+            if (UIHState != nil && UIHState.windows[@(documentWindowIdentity)] != nil) {
+              UIHTestFail(@"empty workspace close request did not remove its native window");
+              [NSApplication.sharedApplication stop:nil];
+            } else if (UIHState != nil) {
+              [NSApplication.sharedApplication stop:nil];
+            }
+          });
         });
       });
     });

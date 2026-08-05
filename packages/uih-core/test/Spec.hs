@@ -1,3 +1,4 @@
+{-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Main (main) where
@@ -66,7 +67,51 @@ main = do
     case attributedTextFromSpans "short" [TextSpan (TextRange 4 2) mempty] of
       Left _ -> True
       Right _ -> False
-  putStrLn "uih-core: transaction and generic text-layer tests passed"
+
+  let sourceItem =
+        WorkspaceItemSpec
+          (WorkspaceItemKey 1)
+          (WorkspaceItemControls [Label (ElementKey 10) (Rect 0 0 100 20) "Source"])
+      typesItem =
+        WorkspaceItemSpec
+          (WorkspaceItemKey 2)
+          (WorkspaceItemControls [Label (ElementKey 20) (Rect 0 0 100 20) "Types"])
+      paneFor key role item =
+        WorkspacePaneSpec
+          key
+          role
+          (PaneSizing (Just 100) (Just 240) Nothing 1)
+          (PaneState PaneVisible Nothing)
+          item
+      sourceCenter = paneFor (PaneKey 1) ContentPane sourceItem
+      typesRight = paneFor (PaneKey 2) InspectorPane typesItem
+      typesCenter = sourceCenter {workspacePaneItem = typesItem}
+      sourceRight = typesRight {workspacePaneItem = sourceItem}
+      beforeSwap =
+        WorkspaceSpec
+          (WorkspaceSplit (SplitKey 1) SideBySide (WorkspacePane sourceCenter) (WorkspacePane typesRight) [])
+          []
+      afterSwap =
+        WorkspaceSpec
+          (WorkspaceSplit (SplitKey 1) SideBySide (WorkspacePane typesCenter) (WorkspacePane sourceRight) [])
+          []
+      beforeWindow = WorkspaceWindowSpec (WindowKey 1) "Before" (Rect 0 0 800 600) beforeSwap
+      afterWindow = WorkspaceWindowSpec (WindowKey 1) "After" (Rect 0 0 800 600) afterSwap
+  assert "workspace item identities survive pane swaps" $
+    validateWorkspaceSpec beforeSwap == []
+      && validateWorkspaceSpec afterSwap == []
+      && fmap controlIdentity (windowLeafControls beforeWindow) == [ElementKey 10, ElementKey 20]
+      && fmap controlIdentity (windowLeafControls afterWindow) == [ElementKey 20, ElementKey 10]
+  assert "tab successor prefers the following tab" $
+    nextTabAfterRemoval (TabKey 2) [TabKey 1, TabKey 2, TabKey 3] == Just (TabKey 3)
+      && nextTabAfterRemoval (TabKey 3) [TabKey 1, TabKey 2, TabKey 3] == Just (TabKey 2)
+  putStrLn "uih-core: transactions, text layers, and workspace identity tests passed"
+
+controlIdentity :: Control -> ElementKey
+controlIdentity (Label key _ _) = key
+controlIdentity (Button key _ _ _ _) = key
+controlIdentity (TextField key _ _ _ _) = key
+controlIdentity (TextEditor editor) = editor.textEditorKey
 
 assert :: String -> Bool -> IO ()
 assert label condition =

@@ -9,6 +9,7 @@ import qualified Data.Text as Text
 import Example.TextEditor
   ( applicationWithDocument
   , firstDocumentEditorKey
+  , firstDocumentTabKey
   , firstDocumentWindowKey
   , saveCommand
   )
@@ -45,11 +46,12 @@ main =
           AppKitTextEditorTestSpec
             { testDocumentWindow = firstDocumentWindowKey
             , testTextEditor = firstDocumentEditorKey
+            , testDocumentTab = firstDocumentTabKey
             , testEditorSaveCommand = saveCommand
             }
         testApplication = applicationWithDocument path (Text.pack "😀 module Initial where\n")
     unless (length (testApplication.appView testApplication.appInitialModel).appWindows == 1) $
-      error "native text editor fixture must begin with exactly one document window"
+      error "native text editor fixture must begin with exactly one workspace window"
     runApp (appKitBackendWithTextEditorTest testSpec) testApplication
     actualContents <- readFile path
     counters <- queryAppKitDebugCounters

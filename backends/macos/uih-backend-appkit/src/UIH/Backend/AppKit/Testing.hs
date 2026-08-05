@@ -29,6 +29,7 @@ import UIH.Backend.AppKit.Internal.FFI
 import UIH.Core
   ( CommandId (..)
   , ElementKey (..)
+  , TabKey (..)
   , WindowKey (..)
   )
 import UIH.Runtime
@@ -46,6 +47,7 @@ data AppKitVerticalTestSpec = AppKitVerticalTestSpec
 data AppKitTextEditorTestSpec = AppKitTextEditorTestSpec
   { testDocumentWindow :: !WindowKey
   , testTextEditor :: !ElementKey
+  , testDocumentTab :: !TabKey
   , testEditorSaveCommand :: !CommandId
   }
   deriving stock (Eq, Show)
@@ -78,6 +80,7 @@ appKitBackendWithTextEditorTest spec =
     c_testScheduleTextEditorScript
       spec.testDocumentWindow.unWindowKey
       spec.testTextEditor.unElementKey
+      spec.testDocumentTab.unTabKey
       spec.testEditorSaveCommand.unCommandId
     pure session
 

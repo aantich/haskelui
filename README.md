@@ -33,7 +33,7 @@ stack exec uih-appkit-vertical
 
 It opens two native windows and exercises retained native controls, shared menu/button commands, model-driven updates, declarative window lifetime, and close veto.
 
-The macOS multi-window text editor opens multiple UTF-8 files into independent native `NSTextView` windows and supports editing, dirty tracking, Command-S, file writes, deferred dirty close, and pure Haskell syntax highlighting for `.hs` and `.lhs` files:
+The macOS workspace text editor opens multiple UTF-8 files as document tabs in one native split-view workspace. It includes a left open-documents pane, central editors, a right inspector, a shared status area, dirty tracking, Command-S, deferred dirty-tab close, and pure Haskell syntax highlighting for `.hs` and `.lhs` files:
 
 ```console
 stack exec uih-text-editor
@@ -50,6 +50,7 @@ tests/macos/validate-deployment-target.sh 13.0
 ## Design documents
 
 - [Architecture proposal](docs/design/architecture.md)
+- [Document/workspace window surface API](docs/design/window-workspace-surface-api.md)
 - [ADR 0001: pure bindings, transactions, and async validation](docs/adr/0001-pure-bindings-transactions-and-async-validation.md)
 - [ADR 0002: backend layout and the AppKit C bridge](docs/adr/0002-backend-layout-and-appkit-c-bridge.md)
 - [ADR 0003: explicit file effects and the native text-editor slice](docs/adr/0003-file-effects-and-native-text-editor.md)

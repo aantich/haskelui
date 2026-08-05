@@ -12,12 +12,19 @@ module UIH.Core
   , CommandId (..)
   , CommandSpec (..)
   , Control (..)
+  , DocumentKey (..)
   , Effect (..)
   , EffectKey (..)
   , ElementKey (..)
   , FontFamily (..)
   , FontSlant (..)
   , FontWeight (..)
+  , PaneKey (..)
+  , PaneRole (..)
+  , PaneSizing (..)
+  , PaneState (..)
+  , PaneTree (..)
+  , PaneVisibility (..)
   , Rect (..)
   , TextEditorSpec (..)
   , TextLayer (..)
@@ -27,6 +34,8 @@ module UIH.Core
   , TextRun (..)
   , TextSpan (..)
   , TextStyle (..)
+  , TabGroupKey (..)
+  , TabKey (..)
   , Transaction (..)
   , UIEvent (..)
   , UnderlineStyle (..)
@@ -34,6 +43,15 @@ module UIH.Core
   , UndoPolicy (..)
   , WindowKey (..)
   , WindowSpec (..)
+  , WorkspaceItemContent (..)
+  , WorkspaceItemKey (..)
+  , WorkspaceItemSpec (..)
+  , WorkspacePaneSpec (..)
+  , WorkspaceSpec (..)
+  , WorkspaceTabGroupSpec (..)
+  , WorkspaceTabSpec (..)
+  , SplitKey (..)
+  , SplitOrientation (..)
   , action
   , applyTransaction
   , attributedTextFromRuns
@@ -44,6 +62,11 @@ module UIH.Core
   , noTransaction
   , requestEffect
   , resolveTextLayers
+  , nextTabAfterRemoval
+  , validateWorkspaceSpec
+  , windowLeafControls
+  , windowWorkspace
+  , workspaceTabKeys
   , transaction
   , transactionWithEffects
   ) where
@@ -58,7 +81,25 @@ import Data.Word (Word64)
 newtype WindowKey = WindowKey {unWindowKey :: Word64}
   deriving stock (Eq, Ord, Show)
 
+newtype DocumentKey = DocumentKey {unDocumentKey :: Word64}
+  deriving stock (Eq, Ord, Show)
+
 newtype ElementKey = ElementKey {unElementKey :: Word64}
+  deriving stock (Eq, Ord, Show)
+
+newtype PaneKey = PaneKey {unPaneKey :: Word64}
+  deriving stock (Eq, Ord, Show)
+
+newtype SplitKey = SplitKey {unSplitKey :: Word64}
+  deriving stock (Eq, Ord, Show)
+
+newtype WorkspaceItemKey = WorkspaceItemKey {unWorkspaceItemKey :: Word64}
+  deriving stock (Eq, Ord, Show)
+
+newtype TabGroupKey = TabGroupKey {unTabGroupKey :: Word64}
+  deriving stock (Eq, Ord, Show)
+
+newtype TabKey = TabKey {unTabKey :: Word64}
   deriving stock (Eq, Ord, Show)
 
 newtype CommandId = CommandId {unCommandId :: Word64}
@@ -360,13 +401,197 @@ mergeAdjacent = foldr merge []
     rangeEnd :: TextRange -> Int
     rangeEnd range = range.textRangeStart + range.textRangeLength
 
-data WindowSpec = WindowSpec
-  { windowKey :: !WindowKey
-  , windowTitle :: !Text
-  , windowFrame :: !Rect
-  , windowControls :: ![Control]
+data PaneRole
+  = SidebarPane
+  | ContentPane
+  | InspectorPane
+  | AuxiliaryPane
+  deriving stock (Eq, Ord, Show)
+
+data SplitOrientation
+  = SideBySide
+  | Stacked
+  deriving stock (Eq, Ord, Show)
+
+data PaneVisibility
+  = PaneVisible
+  | PaneCollapsed
+  deriving stock (Eq, Ord, Show)
+
+data PaneSizing = PaneSizing
+  { paneMinimumExtent :: !(Maybe Double)
+  , panePreferredExtent :: !(Maybe Double)
+  , paneMaximumExtent :: !(Maybe Double)
+  , paneStretchWeight :: !Double
   }
   deriving stock (Eq, Show)
+
+data PaneState = PaneState
+  { paneVisibility :: !PaneVisibility
+  , paneExtent :: !(Maybe Double)
+  }
+  deriving stock (Eq, Show)
+
+data WorkspaceTabSpec = WorkspaceTabSpec
+  { workspaceTabKey :: !TabKey
+  , workspaceTabDocument :: !(Maybe DocumentKey)
+  , workspaceTabTitle :: !Text
+  , workspaceTabModified :: !Bool
+  , workspaceTabCloseable :: !Bool
+  , workspaceTabControls :: ![Control]
+  }
+  deriving stock (Eq, Show)
+
+data WorkspaceTabGroupSpec = WorkspaceTabGroupSpec
+  { workspaceTabGroupKey :: !TabGroupKey
+  , workspaceSelectedTab :: !(Maybe TabKey)
+  , workspaceTabs :: ![WorkspaceTabSpec]
+  }
+  deriving stock (Eq, Show)
+
+data WorkspaceItemContent
+  = WorkspaceItemControls ![Control]
+  | WorkspaceItemTabGroup !WorkspaceTabGroupSpec
+  deriving stock (Eq, Show)
+
+data WorkspaceItemSpec = WorkspaceItemSpec
+  { workspaceItemKey :: !WorkspaceItemKey
+  , workspaceItemContent :: !WorkspaceItemContent
+  }
+  deriving stock (Eq, Show)
+
+data WorkspacePaneSpec = WorkspacePaneSpec
+  { workspacePaneKey :: !PaneKey
+  , workspacePaneRole :: !PaneRole
+  , workspacePaneSizing :: !PaneSizing
+  , workspacePaneState :: !PaneState
+  , workspacePaneItem :: !WorkspaceItemSpec
+  }
+  deriving stock (Eq, Show)
+
+data PaneTree
+  = WorkspacePane !WorkspacePaneSpec
+  | WorkspaceSplit !SplitKey !SplitOrientation !PaneTree !PaneTree ![PaneTree]
+  deriving stock (Eq, Show)
+
+data WorkspaceSpec = WorkspaceSpec
+  { workspaceRoot :: !PaneTree
+  , workspaceStatusControls :: ![Control]
+  }
+  deriving stock (Eq, Show)
+
+data WindowSpec
+  = WindowSpec
+      { windowKey :: !WindowKey
+      , windowTitle :: !Text
+      , windowFrame :: !Rect
+      , windowControls :: ![Control]
+      }
+  | WorkspaceWindowSpec
+      { windowKey :: !WindowKey
+      , windowTitle :: !Text
+      , windowFrame :: !Rect
+      , windowWorkspaceSpec :: !WorkspaceSpec
+      }
+  deriving stock (Eq, Show)
+
+windowWorkspace :: WindowSpec -> Maybe WorkspaceSpec
+windowWorkspace WindowSpec {} = Nothing
+windowWorkspace WorkspaceWindowSpec {windowWorkspaceSpec = spec} = Just spec
+
+windowLeafControls :: WindowSpec -> [Control]
+windowLeafControls WindowSpec {windowControls = controls} = controls
+windowLeafControls WorkspaceWindowSpec {windowWorkspaceSpec = spec} = workspaceControls spec
+
+workspaceControls :: WorkspaceSpec -> [Control]
+workspaceControls spec = paneTreeControls spec.workspaceRoot <> spec.workspaceStatusControls
+
+paneTreeControls :: PaneTree -> [Control]
+paneTreeControls (WorkspacePane pane) = workspaceItemControls pane.workspacePaneItem
+paneTreeControls (WorkspaceSplit _ _ first second rest) =
+  foldMap paneTreeControls (first : second : rest)
+
+workspaceItemControls :: WorkspaceItemSpec -> [Control]
+workspaceItemControls item =
+  case item.workspaceItemContent of
+    WorkspaceItemControls controls -> controls
+    WorkspaceItemTabGroup tabGroup -> foldMap workspaceTabControls tabGroup.workspaceTabs
+
+workspaceTabKeys :: WorkspaceSpec -> [TabKey]
+workspaceTabKeys = foldMap (fmap workspaceTabKey . workspaceTabs) . workspaceTabGroups
+
+workspaceTabGroups :: WorkspaceSpec -> [WorkspaceTabGroupSpec]
+workspaceTabGroups = paneTreeTabGroups . workspaceRoot
+
+paneTreeTabGroups :: PaneTree -> [WorkspaceTabGroupSpec]
+paneTreeTabGroups (WorkspacePane pane) =
+  case pane.workspacePaneItem.workspaceItemContent of
+    WorkspaceItemControls _ -> []
+    WorkspaceItemTabGroup tabGroup -> [tabGroup]
+paneTreeTabGroups (WorkspaceSplit _ _ first second rest) =
+  foldMap paneTreeTabGroups (first : second : rest)
+
+nextTabAfterRemoval :: TabKey -> [TabKey] -> Maybe TabKey
+nextTabAfterRemoval removed keys =
+  case break (== removed) keys of
+    (_, []) -> listToMaybe keys
+    (before, _ : after) -> listToMaybe after <|> listToMaybe (reverse before)
+
+validateWorkspaceSpec :: WorkspaceSpec -> [Text]
+validateWorkspaceSpec spec =
+  duplicateDiagnostics "workspace item" itemIdentities
+    <> duplicateDiagnostics "tab" tabIdentities
+    <> concatMap validateGroup groups
+    <> validatePaneTree spec.workspaceRoot
+  where
+    panes = paneTreePanes spec.workspaceRoot
+    groups = workspaceTabGroups spec
+    itemIdentities = fmap (show . unWorkspaceItemKey . workspaceItemKey . workspacePaneItem) panes
+    tabIdentities = fmap (show . unTabKey) (workspaceTabKeys spec)
+    validateGroup :: WorkspaceTabGroupSpec -> [Text]
+    validateGroup tabGroup =
+      case tabGroup.workspaceSelectedTab of
+        Nothing -> []
+        Just selected
+          | selected `elem` fmap workspaceTabKey tabGroup.workspaceTabs -> []
+          | otherwise -> ["Workspace tab group selects an undeclared tab: " <> Text.pack (show selected)]
+
+paneTreePanes :: PaneTree -> [WorkspacePaneSpec]
+paneTreePanes (WorkspacePane pane) = [pane]
+paneTreePanes (WorkspaceSplit _ _ first second rest) =
+  foldMap paneTreePanes (first : second : rest)
+
+validatePaneTree :: PaneTree -> [Text]
+validatePaneTree (WorkspacePane pane) = validatePane pane
+validatePaneTree (WorkspaceSplit _ _ first second rest) =
+  foldMap validatePaneTree (first : second : rest)
+
+validatePane :: WorkspacePaneSpec -> [Text]
+validatePane pane =
+  [ "Pane extents and stretch weights must be nonnegative: " <> Text.pack (show pane.workspacePaneKey)
+  | any (< 0) extents || pane.workspacePaneSizing.paneStretchWeight < 0
+  ]
+    <> [ "Pane minimum extent exceeds its maximum extent: " <> Text.pack (show pane.workspacePaneKey)
+       | Just minimumValue <- [pane.workspacePaneSizing.paneMinimumExtent]
+       , Just maximumValue <- [pane.workspacePaneSizing.paneMaximumExtent]
+       , minimumValue > maximumValue
+       ]
+  where
+    extents =
+      mapMaybe
+        id
+        [ pane.workspacePaneSizing.paneMinimumExtent
+        , pane.workspacePaneSizing.panePreferredExtent
+        , pane.workspacePaneSizing.paneMaximumExtent
+        , pane.workspacePaneState.paneExtent
+        ]
+
+duplicateDiagnostics :: Text -> [String] -> [Text]
+duplicateDiagnostics label values =
+  [ "Duplicate " <> label <> " identity: " <> Text.pack value
+  | duplicates <- group (sort values)
+  , value : _ : _ <- [duplicates]
+  ]
 
 data CommandSpec = CommandSpec
   { commandId :: !CommandId
@@ -385,6 +610,9 @@ data AppView = AppView
 data UIEvent
   = CommandInvoked !CommandId
   | TextChanged !ElementKey !Text
+  | TabSelected !TabKey
+  | TabCloseRequested !TabKey
+  | PaneStateChanged !PaneKey !PaneState
   | WindowCloseRequested !WindowKey
   | WindowActivated !WindowKey
   | TextFileChosen !FilePath

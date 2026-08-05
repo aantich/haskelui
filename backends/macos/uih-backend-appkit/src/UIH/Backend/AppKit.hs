@@ -15,6 +15,7 @@ import Control.Monad
   , unless
   , when
   )
+import Control.Applicative ((<|>))
 import qualified Data.ByteString as ByteString
 import Data.Char (ord)
 import Data.IORef
@@ -25,7 +26,7 @@ import Data.IORef
   )
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
@@ -105,6 +106,8 @@ receiveEvent dispatch _ eventKind identity textPointer =
     5 -> do
       path <- decodeText textPointer
       dispatch (TextFileChosen (Text.unpack path))
+    6 -> dispatch (TabSelected (TabKey identity))
+    7 -> dispatch (TabCloseRequested (TabKey identity))
     _ -> pure ()
 
 reconcile :: IORef AppKitState -> AppView -> IO ()
@@ -155,8 +158,17 @@ reconcileWindows current desiredList = do
       native <-
         case Map.lookup spec.windowKey current of
           Nothing -> createWindow spec
-          Just existing -> updateWindow existing spec
+          Just existing
+            | windowKindsCompatible existing.nativeWindowSpec spec ->
+                updateWindow existing spec
+            | otherwise -> do
+                destroyWindow existing
+                createWindow spec
       pure (Map.insert spec.windowKey native accumulated)
+
+windowKindsCompatible :: WindowSpec -> WindowSpec -> Bool
+windowKindsCompatible old new =
+  isJust (windowWorkspace old) == isJust (windowWorkspace new)
 
 createWindow :: WindowSpec -> IO NativeWindow
 createWindow spec =
@@ -164,9 +176,12 @@ createWindow spec =
     withMacRect spec.windowFrame $ \frame -> do
       handle <- c_createWindow spec.windowKey.unWindowKey title frame
       when (handle == nullPtr) (error "UIH AppKit failed to create NSWindow")
-      controls <- foldM (createAndInsertControl handle) Map.empty spec.windowControls
+      forM_ (windowWorkspace spec) (configureWorkspaceStructure handle)
+      let desiredControls = windowLeafControls spec
+      controls <- foldM (createAndInsertControl handle) Map.empty desiredControls
+      forM_ (windowWorkspace spec) (configureWorkspaceParents handle controls)
       c_windowShow handle
-      configureControlNavigation handle controls spec.windowControls
+      configureControlNavigation handle controls desiredControls
       pure
         NativeWindow
           { nativeWindowHandle = handle
@@ -178,17 +193,152 @@ updateWindow :: NativeWindow -> WindowSpec -> IO NativeWindow
 updateWindow native desired = do
   when (native.nativeWindowSpec.windowTitle /= desired.windowTitle) $
     withText desired.windowTitle (c_windowSetTitle native.nativeWindowHandle)
+  forM_ (windowWorkspace desired) (configureWorkspaceStructure native.nativeWindowHandle)
+  let desiredControls = windowLeafControls desired
   controls <-
     reconcileControls
       native.nativeWindowHandle
       native.nativeWindowControls
-      desired.windowControls
-  configureControlNavigation native.nativeWindowHandle controls desired.windowControls
+      desiredControls
+  forM_ (windowWorkspace desired) (configureWorkspaceParents native.nativeWindowHandle controls)
+  configureControlNavigation native.nativeWindowHandle controls desiredControls
   pure
     native
       { nativeWindowSpec = desired
       , nativeWindowControls = controls
       }
+
+data ControlParent
+  = ParentItem !WorkspaceItemKey !Bool
+  | ParentTab !TabGroupKey !TabKey !Bool
+  | ParentStatus !Bool
+
+configureWorkspaceStructure :: Ptr MacWindowHandle -> WorkspaceSpec -> IO ()
+configureWorkspaceStructure window spec = do
+  case validateWorkspaceSpec spec of
+    [] -> pure ()
+    diagnostics ->
+      error ("Invalid UIH workspace: " <> Text.unpack (Text.intercalate "; " diagnostics))
+  (orientation, panes) <-
+    either (error . Text.unpack) pure (flattenWorkspaceRoot spec.workspaceRoot)
+  c_workspaceBegin window (booleanInt (orientation == SideBySide)) 28
+  forM_ panes $ \pane -> do
+    c_workspacePaneSet
+      window
+      pane.workspacePaneKey.unPaneKey
+      (encodePaneRole pane.workspacePaneRole)
+      (realToFrac (paneExtentForLayout pane))
+      (booleanInt (pane.workspacePaneState.paneVisibility == PaneCollapsed))
+    c_workspaceItemSet
+      window
+      pane.workspacePaneKey.unPaneKey
+      pane.workspacePaneItem.workspaceItemKey.unWorkspaceItemKey
+    case pane.workspacePaneItem.workspaceItemContent of
+      WorkspaceItemControls _ -> pure ()
+      WorkspaceItemTabGroup tabGroup -> do
+        c_workspaceTabGroupSet
+          window
+          pane.workspacePaneItem.workspaceItemKey.unWorkspaceItemKey
+          tabGroup.workspaceTabGroupKey.unTabGroupKey
+        forM_ tabGroup.workspaceTabs $ \tab ->
+          withText tab.workspaceTabTitle $ \title ->
+            c_workspaceTabSet
+              window
+              tabGroup.workspaceTabGroupKey.unTabGroupKey
+              tab.workspaceTabKey.unTabKey
+              title
+              (booleanInt tab.workspaceTabModified)
+              (booleanInt tab.workspaceTabCloseable)
+              (booleanInt (tabGroup.workspaceSelectedTab == Just tab.workspaceTabKey))
+  c_workspaceEnd window
+
+flattenWorkspaceRoot
+  :: PaneTree
+  -> Either Text (SplitOrientation, [WorkspacePaneSpec])
+flattenWorkspaceRoot (WorkspacePane pane) = Right (SideBySide, [pane])
+flattenWorkspaceRoot (WorkspaceSplit _ orientation first second rest) =
+  case traverse directPane (first : second : rest) of
+    Just panes -> Right (orientation, panes)
+    Nothing ->
+      Left
+        "The AppKit vertical slice currently supports one split level; nested PaneTree rendering is not implemented"
+
+directPane :: PaneTree -> Maybe WorkspacePaneSpec
+directPane (WorkspacePane pane) = Just pane
+directPane WorkspaceSplit {} = Nothing
+
+paneExtentForLayout :: WorkspacePaneSpec -> Double
+paneExtentForLayout pane =
+  fromMaybe 0 $
+    pane.workspacePaneState.paneExtent
+      <|> pane.workspacePaneSizing.panePreferredExtent
+
+encodePaneRole :: PaneRole -> CInt
+encodePaneRole SidebarPane = 0
+encodePaneRole ContentPane = 1
+encodePaneRole InspectorPane = 2
+encodePaneRole AuxiliaryPane = 3
+
+configureWorkspaceParents
+  :: Ptr MacWindowHandle
+  -> Map ElementKey NativeControl
+  -> WorkspaceSpec
+  -> IO ()
+configureWorkspaceParents window controls spec =
+  forM_ (Map.toList (workspaceControlParents spec)) $ \(key, parent) ->
+    forM_ (Map.lookup key controls) $ \native ->
+      case parent of
+        ParentItem item fill ->
+          c_controlSetParentItem
+            window
+            native.nativeControlHandle
+            item.unWorkspaceItemKey
+            (booleanInt fill)
+        ParentTab tabGroup tab fill ->
+          c_controlSetParentTab
+            window
+            native.nativeControlHandle
+            tabGroup.unTabGroupKey
+            tab.unTabKey
+            (booleanInt fill)
+        ParentStatus fill ->
+          c_controlSetParentStatus window native.nativeControlHandle (booleanInt fill)
+
+workspaceControlParents :: WorkspaceSpec -> Map ElementKey ControlParent
+workspaceControlParents spec =
+  Map.fromList
+    (paneTreeControlParents spec.workspaceRoot <> statusParents)
+  where
+    statusParents =
+      [ (controlKey control, ParentStatus False)
+      | control <- spec.workspaceStatusControls
+      ]
+
+paneTreeControlParents :: PaneTree -> [(ElementKey, ControlParent)]
+paneTreeControlParents (WorkspacePane pane) =
+  case pane.workspacePaneItem.workspaceItemContent of
+    WorkspaceItemControls controls ->
+      let fill = singleFillControl controls
+       in [ (controlKey control, ParentItem pane.workspacePaneItem.workspaceItemKey fill)
+          | control <- controls
+          ]
+    WorkspaceItemTabGroup tabGroup ->
+      concatMap
+        (\tab ->
+          let fill = singleFillControl tab.workspaceTabControls
+           in [ ( controlKey control
+                , ParentTab tabGroup.workspaceTabGroupKey tab.workspaceTabKey fill
+                )
+              | control <- tab.workspaceTabControls
+              ]
+        )
+        tabGroup.workspaceTabs
+paneTreeControlParents (WorkspaceSplit _ _ first second rest) =
+  foldMap paneTreeControlParents (first : second : rest)
+
+singleFillControl :: [Control] -> Bool
+singleFillControl [TextEditor {}] = True
+singleFillControl _ = False
 
 destroyWindow :: NativeWindow -> IO ()
 destroyWindow native = do

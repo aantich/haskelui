@@ -18,6 +18,9 @@ module UIH.Backend.AppKit.Internal.FFI
   , c_controlSetEnabled
   , c_controlSetFrame
   , c_controlSetText
+  , c_controlSetParentItem
+  , c_controlSetParentStatus
+  , c_controlSetParentTab
   , c_textEditorApplyStyle
   , c_textEditorBeginPresentation
   , c_textEditorEndPresentation
@@ -42,6 +45,12 @@ module UIH.Backend.AppKit.Internal.FFI
   , c_windowDestroy
   , c_windowSetTitle
   , c_windowShow
+  , c_workspaceBegin
+  , c_workspaceEnd
+  , c_workspaceItemSet
+  , c_workspacePaneSet
+  , c_workspaceTabGroupSet
+  , c_workspaceTabSet
   , makeEventCallback
   , withCTextStyle
   , withMacRect
@@ -324,6 +333,24 @@ foreign import ccall unsafe "uih_macos_window_show"
 foreign import ccall unsafe "uih_macos_window_destroy"
   c_windowDestroy :: Ptr MacWindowHandle -> IO ()
 
+foreign import ccall unsafe "uih_macos_workspace_begin"
+  c_workspaceBegin :: Ptr MacWindowHandle -> CInt -> CDouble -> IO ()
+
+foreign import ccall unsafe "uih_macos_workspace_pane_set"
+  c_workspacePaneSet :: Ptr MacWindowHandle -> Word64 -> CInt -> CDouble -> CInt -> IO ()
+
+foreign import ccall unsafe "uih_macos_workspace_item_set"
+  c_workspaceItemSet :: Ptr MacWindowHandle -> Word64 -> Word64 -> IO ()
+
+foreign import ccall unsafe "uih_macos_workspace_tab_group_set"
+  c_workspaceTabGroupSet :: Ptr MacWindowHandle -> Word64 -> Word64 -> IO ()
+
+foreign import ccall unsafe "uih_macos_workspace_tab_set"
+  c_workspaceTabSet :: Ptr MacWindowHandle -> Word64 -> Word64 -> CString -> CInt -> CInt -> CInt -> IO ()
+
+foreign import ccall unsafe "uih_macos_workspace_end"
+  c_workspaceEnd :: Ptr MacWindowHandle -> IO ()
+
 foreign import ccall unsafe "uih_macos_label_create"
   c_createLabel :: Ptr MacWindowHandle -> Word64 -> CString -> Ptr CMacRect -> IO (Ptr MacControlHandle)
 
@@ -363,6 +390,15 @@ foreign import ccall unsafe "uih_macos_control_focus"
 foreign import ccall unsafe "uih_macos_control_set_next_key"
   c_controlSetNextKey :: Ptr MacControlHandle -> Ptr MacControlHandle -> IO ()
 
+foreign import ccall unsafe "uih_macos_control_set_parent_item"
+  c_controlSetParentItem :: Ptr MacWindowHandle -> Ptr MacControlHandle -> Word64 -> CInt -> IO ()
+
+foreign import ccall unsafe "uih_macos_control_set_parent_tab"
+  c_controlSetParentTab :: Ptr MacWindowHandle -> Ptr MacControlHandle -> Word64 -> Word64 -> CInt -> IO ()
+
+foreign import ccall unsafe "uih_macos_control_set_parent_status"
+  c_controlSetParentStatus :: Ptr MacWindowHandle -> Ptr MacControlHandle -> CInt -> IO ()
+
 foreign import ccall unsafe "uih_macos_control_destroy"
   c_controlDestroy :: Ptr MacControlHandle -> IO ()
 
@@ -385,4 +421,4 @@ foreign import ccall unsafe "uih_macos_test_schedule_vertical_script"
   c_testScheduleVerticalScript :: Word64 -> Word64 -> Word64 -> Word64 -> IO ()
 
 foreign import ccall unsafe "uih_macos_test_schedule_text_editor_script"
-  c_testScheduleTextEditorScript :: Word64 -> Word64 -> Word64 -> IO ()
+  c_testScheduleTextEditorScript :: Word64 -> Word64 -> Word64 -> Word64 -> IO ()

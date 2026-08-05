@@ -15,7 +15,9 @@ typedef enum UIHMacEventKind {
   UIHMacEventTextChanged = 2,
   UIHMacEventWindowCloseRequested = 3,
   UIHMacEventWindowActivated = 4,
-  UIHMacEventTextFileChosen = 5
+  UIHMacEventTextFileChosen = 5,
+  UIHMacEventTabSelected = 6,
+  UIHMacEventTabCloseRequested = 7
 } UIHMacEventKind;
 
 typedef void (*UIHMacEventCallback)(
@@ -94,6 +96,34 @@ void uih_macos_window_set_frame(UIHMacWindowRef window, const UIHMacRect *frame)
 void uih_macos_window_show(UIHMacWindowRef window);
 void uih_macos_window_destroy(UIHMacWindowRef window);
 
+void uih_macos_workspace_begin(
+    UIHMacWindowRef window,
+    int32_t side_by_side,
+    double status_height);
+void uih_macos_workspace_pane_set(
+    UIHMacWindowRef window,
+    uint64_t pane_identity,
+    int32_t pane_role,
+    double preferred_extent,
+    int32_t collapsed);
+void uih_macos_workspace_item_set(
+    UIHMacWindowRef window,
+    uint64_t pane_identity,
+    uint64_t item_identity);
+void uih_macos_workspace_tab_group_set(
+    UIHMacWindowRef window,
+    uint64_t item_identity,
+    uint64_t group_identity);
+void uih_macos_workspace_tab_set(
+    UIHMacWindowRef window,
+    uint64_t group_identity,
+    uint64_t tab_identity,
+    const char *utf8_title,
+    int32_t modified,
+    int32_t closeable,
+    int32_t selected);
+void uih_macos_workspace_end(UIHMacWindowRef window);
+
 UIHMacControlRef uih_macos_label_create(
     UIHMacWindowRef window,
     uint64_t identity,
@@ -135,6 +165,21 @@ void uih_macos_control_focus(UIHMacWindowRef window, UIHMacControlRef control);
 void uih_macos_control_set_next_key(
     UIHMacControlRef control,
     UIHMacControlRef next_control);
+void uih_macos_control_set_parent_item(
+    UIHMacWindowRef window,
+    UIHMacControlRef control,
+    uint64_t item_identity,
+    int32_t fill_parent);
+void uih_macos_control_set_parent_tab(
+    UIHMacWindowRef window,
+    UIHMacControlRef control,
+    uint64_t group_identity,
+    uint64_t tab_identity,
+    int32_t fill_parent);
+void uih_macos_control_set_parent_status(
+    UIHMacWindowRef window,
+    UIHMacControlRef control,
+    int32_t fill_parent);
 void uih_macos_control_destroy(UIHMacControlRef control);
 
 void uih_macos_command_set(
@@ -156,6 +201,7 @@ void uih_macos_test_schedule_vertical_script(
 void uih_macos_test_schedule_text_editor_script(
     uint64_t document_window_identity,
     uint64_t editor_identity,
+    uint64_t tab_identity,
     uint64_t save_command_identity);
 
 #ifdef __cplusplus

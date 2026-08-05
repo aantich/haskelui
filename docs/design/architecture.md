@@ -1,6 +1,6 @@
 # UIH Architecture Proposal
 
-Status: Draft for discussion, architecture revision 12
+Status: Draft for discussion, architecture revision 13
 Audience: UIH users, contributors, and backend implementers  
 Scope: Public API, runtime architecture, backend boundaries, and initial delivery plan
 
@@ -194,6 +194,9 @@ Total model properties use lenses as their construction and composition foundati
 
 `ElementProperty`
 : A typed handle to a retained element-owned value. Its lifetime follows the element rather than the application model.
+
+`StateSource`
+: An explicit ownership declaration for already-typed control state such as tab selection or committed pane geometry. It may be retained, restored, callback-controlled, or model-property-owned; unlike `Binding`, it has no parsing, invalid draft, validation, or undo protocol.
 
 `Event`
 : A typed domain operation interpreted by a subsystem reducer when assignment would lose important intent.
@@ -542,6 +545,15 @@ UIH distinguishes:
 
 Controls may offer controlled and uncontrolled forms. State that must be persisted, coordinated, undone, synchronized, or reasoned about by the application belongs in model properties. Runtime-local state must not be duplicated into the model without a clear ownership transfer.
 
+Already-typed control state that needs these ownership choices uses an opaque
+`StateSource model value`: `retainedState`, `restoredState`, `controlledState`,
+or `propertyState`. The consuming control defines its publication boundary. For
+example, tab selection publishes immediately while a splitter publishes its
+committed pane geometry at the end of a live drag. Editable values continue to
+use `Binding`; `StateSource` does not acquire parsing, validation, draft, or undo
+semantics. Restored values require a stable `Restorable` codec or an explicit
+`Codec value`; restoration never falls back to implicit `Show`/`Read` formats.
+
 ### 8.4 Stable typed keys
 
 Identity-bearing resources use typed keys:
@@ -576,16 +588,16 @@ Example:
 
 ```haskell
 appScenes model =
-  [ documentGroup documentsScene (openDocuments model) documentWindow
+  [ documentGroup documentsScene (openDocuments model) documentScene
   , settingsScene (settingsWindow model.settings)
   ]
 
-documentWindow document =
-  window (documentWindowKey document.id)
-    [ title document.title
-    , restorationKey (documentRestorationKey document.id)
-    , onCloseRequest
-        (properties.documents.at document.id.closeRequested .= True)
+documentScene document =
+  documentWindow (documentWindowKey document.id) document.id
+    [ windowTitle document.title
+    , windowRestorationKey (documentRestorationKey document.id)
+    , onWindowCloseRequest $ \_ ->
+        properties.documents.at document.id.closeRequested .= True
     ]
     (documentWorkspace document)
 ```
@@ -1377,6 +1389,9 @@ Applying presentation must not mutate characters, authored attributes, selection
 
 ## 20. Documents, tabs, and workspaces
 
+The detailed accepted surface design is recorded in
+[Document windows and workspace windows](window-workspace-surface-api.md).
+
 ### 20.1 Documents
 
 A document model should eventually coordinate:
@@ -1401,6 +1416,11 @@ UIH distinguishes:
 - Window tabbing: operating-system grouping of scene instances
 - `TabWorkspace`: application-managed documents/tools that can move among panes and windows
 
+The concrete surface names the last concept `workspaceTabGroup`. It uses separate
+`TabKey`, `DocumentKey`, `TabGroupKey`, and `WindowKey` identities. A tab close or
+transfer is a request interpreted by application state; controls never directly
+destroy a document, tab, or window.
+
 ### 20.3 Workspace model
 
 A rich application may use:
@@ -1411,19 +1431,44 @@ data Workspace = Workspace
   }
 
 data WindowWorkspace = WindowWorkspace
-  { workspacePaneTree :: PaneTree
-  , workspaceTabs     :: Map TabKey Tab
-  , workspaceActive   :: Maybe TabKey
+  { workspacePaneState :: PaneLayoutState
+  , workspaceTabGroups :: Map TabGroupKey TabGroupState
+  , workspaceActive    :: Maybe TabGroupKey
+  }
+
+data TabGroupState = TabGroupState
+  { orderedTabs :: [TabKey]
+  , selectedTab :: Maybe TabKey
   }
 ```
 
-Tab tear-out is a semantic state transition:
+Tab close and transfer are semantic requests. The application updates this
+state, after which scene and view reconciliation performs resource changes.
+Transfer destinations use window/group identities and key-relative insertion;
+a missing neighbor rejects the stale gesture instead of applying a numeric
+index to a changed list.
 
-```haskell
-MoveTab tabKey sourceWindow destinationWindow destinationPane
-```
+AppKit system window tabbing may group complete `documentWindow` scenes. An
+in-window `workspaceTabGroup` instead lowers to an AppKit view-controller/native
+view composition, WinUI `TabView`, or a UIH custom realization. CSS-like layout
+is not responsible for this application-level behavior.
 
-The adapter may use native macOS window tabbing, a WinUI tab control, or a custom workspace. CSS-like layout is not responsible for this application-level behavior.
+That early sketch is refined as follows:
+
+- `documentWindow` represents one primary document per operating-system window.
+- `workspaceWindow` represents a shared shell containing a semantic pane tree,
+  application-managed tab groups, and an optional shared status area.
+- System window tabbing is distinct from in-window workspace tabbing.
+- Panes carry sidebar, content, inspector, or auxiliary roles so native backends
+  can preserve platform behavior without leaking platform types.
+- Pane hosts and movable `WorkspaceItem` content have separate identities, so
+  arbitrary views can swap pane locations without inheriting slot geometry or
+  losing retained descendant state.
+- Tab selection and pane state use an explicit `StateSource` that may be retained,
+  restored, callback-controlled, or property-owned.
+- Live splitter geometry remains runtime-local and commits once at gesture end.
+- Tab moves use stable key-relative insertion rather than list indices.
+- Inactive declared tab content remains logically retained by `TabKey`.
 
 ## 21. Effects, subscriptions, and concurrency
 
@@ -1674,6 +1719,8 @@ The follow-up text-editor slice adds explicit file effects, a native multiple-se
 
 The syntax-highlighting follow-up adds generic portable text styles, authored rich-text runs, scalar-indexed spans, revision-bound ordered presentation layers, and a pure Haskell lexer outside Core. The AppKit adapter resolves layer overlap, translates scalar offsets to UTF-16, and applies temporary layout attributes. Its native test places a keyword after a non-BMP character, confirms the correct native range is styled after initial render and editing, and verifies that presentation preserves selection and creates no undo action.
 
+The workspace follow-up adds distinct document, tab, tab-group, pane-host, movable-item, and window identities to the compiled Core IR. The editor now realizes one native AppKit split-view workspace with left sidebar information, a central native document tab group, a right inspector, and a shared status area. Native tab selection and close requests enter the pure Haskell model; clean tab close leaves the workspace alive, dirty tab close defers through Save, and clean workspace close removes the OS window. AppKit retains unchanged pane subtrees across reconciliation and reparents keyed item hosts independently of pane geometry. Core, headless, model, and native tests cover workspace validation, item swaps, multiple document tabs, native tab events, retained text selection/undo/presentation, and zero-resource shutdown. The current leaf IR still uses concrete `[Control]` values; the final opaque `View model`/`StateSource` surface will lower into these proven contracts.
+
 ### Phase 3: Common layout and display list
 
 - Implement core measurement and arrangement
@@ -1904,6 +1951,16 @@ The following are accepted unless later superseded by an ADR:
 60. AppKit owns the process main event loop and all AppKit object access occurs on the main thread. The blocking event-loop FFI call is `safe`; short nonblocking bridge operations use `unsafe` calls.
 61. Native callbacks carry stable UIH identities and normalized payloads. The Objective-C shim schedules shallow callbacks onto the main queue; Haskell actions and reconciliation run after the originating AppKit callback returns.
 62. Native handles have explicit create/update/destroy ownership. Reconciliation, not garbage-collector finalization, performs ordinary resource release and unregisters callbacks before peer destruction.
+63. UIH exposes distinct `documentWindow` and `workspaceWindow` surfaces on the same scene runtime; traditional document windows and IDE-style shared workspaces are both first-class.
+64. System window tabbing is separate from application-managed `workspaceTabGroup` state and lifecycle.
+65. Documents, document views/tabs, tab groups, panes, and windows use distinct typed identities; multiple tabs may present the same document.
+66. Pane trees carry semantic sidebar, content, inspector, and auxiliary roles in addition to generic nesting and sizing constraints.
+67. Already-typed selection and pane state use `StateSource`, with explicit retained, restored, controlled, or property ownership; editable values continue to use `Binding`.
+68. Tab selection and pane live resize publish at control-specific boundaries. Splitter pointer tracking stays runtime-local and commits pane state at gesture end.
+69. Tab close, move, and detach are requests. Application state transitions decide document lifecycle and scene/view reconciliation performs resource changes.
+70. Tab transfers use window/group identity and key-relative insertion. Missing neighbor keys reject a stale request rather than guessing with an obsolete index.
+71. Collapsed panes and inactive declared tabs retain logical keyed state while leaving layout, focus traversal, or accessibility exposure as appropriate; omission removes and disposes them.
+72. `PaneKey` identifies a layout host while application-global `WorkspaceItemKey` identifies movable arbitrary view content. Swapping items between panes reparents logical content; pane role, size, and collapse state remain with the host unless whole pane nodes move.
 
 ## 32. Research influences
 

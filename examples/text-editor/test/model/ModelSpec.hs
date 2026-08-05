@@ -6,6 +6,7 @@ module Main (main) where
 import Example.TextEditor
   ( application
   , firstDocumentEditorKey
+  , firstDocumentTabKey
   , firstDocumentWindowKey
   , openCommand
   , saveCommand
@@ -29,17 +30,27 @@ main = do
     )
 
   let initial = application.appInitialModel
+      initialView = application.appView initial
       openRequest = application.appHandleEvent (CommandInvoked openCommand) initial
   assertEqual "Open command effect" [RequestOpenTextFiles] openRequest.transactionEffects
+  assert "editor starts with one workspace window" (length initialView.appWindows == 1)
+  assert "empty workspace validates" (all (null . validateWindowWorkspace) initialView.appWindows)
 
   let opened = applyEvent (TextFileRead "/tmp/example.hs" (Right "module Old where\n")) initial
       openedTwice = applyEvent (TextFileRead "/tmp/notes.txt" (Right "notes\n")) opened
-      activated = applyEvent (WindowActivated firstDocumentWindowKey) opened
-      edited = applyEvent (TextChanged firstDocumentEditorKey "module New where\n") activated
+      twiceView = application.appView openedTwice
+  assert "two reads stay in one workspace window" (length twiceView.appWindows == 1)
+  assertEqual "two document tabs" [TabKey 1000, TabKey 1001] (concatMap windowTabKeys twiceView.appWindows)
+  assert "workspace exposes a shared status area" $
+    case twiceView.appWindows of
+      [window] -> maybe False (not . null . workspaceStatusControls) (windowWorkspace window)
+      _ -> False
+
+  let selectedFirst = applyEvent (TabSelected firstDocumentTabKey) openedTwice
+      edited = applyEvent (TextChanged firstDocumentEditorKey "module New where\n") selectedFirst
       editedView = application.appView edited
-  assert "two reads create two document windows" (length (application.appView openedTwice).appWindows == 3)
-  assert "edited window title" (any windowIsEdited editedView.appWindows)
-  assert "Save enabled for active edited document" (isCommandEnabled saveCommand editedView.appCommands)
+  assert "edited active tab updates shared window title" (any windowIsEdited editedView.appWindows)
+  assert "Save enabled for selected edited document" (isCommandEnabled saveCommand editedView.appCommands)
   assert "Haskell document receives a generic syntax presentation layer" $
     case textEditorSpecs editedView.appWindows of
       editor : _ ->
@@ -63,14 +74,20 @@ main = do
           (TextFileWritten (EffectKey 1000) "/tmp/example.hs" "module New where\n" (Right ()))
           saving
       savedView = application.appView saved
-  assert "saved window title" (not (any windowIsEdited savedView.appWindows))
+  assert "saved workspace title" (not (any windowIsEdited savedView.appWindows))
   assert "Save disabled after successful write" (not (isCommandEnabled saveCommand savedView.appCommands))
-  let closedCleanly = applyEvent (WindowCloseRequested firstDocumentWindowKey) saved
-  assert "clean close removes document" (not (hasWindow firstDocumentWindowKey (application.appView closedCleanly).appWindows))
 
-  let editedAgain = applyEvent (TextChanged firstDocumentEditorKey "changed again") saved
-      closeDeferred = applyEvent (WindowCloseRequested firstDocumentWindowKey) editedAgain
-  assert "dirty close is vetoed" (hasWindow firstDocumentWindowKey (application.appView closeDeferred).appWindows)
+  let closedCleanly = applyEvent (TabCloseRequested firstDocumentTabKey) saved
+      cleanCloseView = application.appView closedCleanly
+  assert "clean tab close removes only that tab" $
+    not (firstDocumentTabKey `elem` concatMap windowTabKeys cleanCloseView.appWindows)
+      && length cleanCloseView.appWindows == 1
+
+  let reopened = applyEvent (TextFileRead "/tmp/example.hs" (Right "module Old where\n")) initial
+      dirtyAgain = applyEvent (TextChanged firstDocumentEditorKey "changed again") reopened
+      closeDeferred = applyEvent (TabCloseRequested firstDocumentTabKey) dirtyAgain
+  assert "dirty tab close is vetoed" $
+    firstDocumentTabKey `elem` concatMap windowTabKeys (application.appView closeDeferred).appWindows
 
   let closeSaveRequest = application.appHandleEvent (CommandInvoked saveCommand) closeDeferred
       closeSaving = applyTransaction closeSaveRequest closeDeferred
@@ -78,17 +95,25 @@ main = do
         applyEvent
           (TextFileWritten (EffectKey 1000) "/tmp/example.hs" "changed again" (Right ()))
           closeSaving
-  assert "save after dirty close removes document" (not (hasWindow firstDocumentWindowKey (application.appView closed).appWindows))
-  putStrLn "uih-text-editor: pure multi-document model/effect test passed"
+  assert "save after dirty tab close removes the tab but retains workspace" $
+    null (concatMap windowTabKeys (application.appView closed).appWindows)
+      && length (application.appView closed).appWindows == 1
+
+  let workspaceClosed = applyEvent (WindowCloseRequested firstDocumentWindowKey) closed
+  assert "clean workspace close removes the OS window" (null (application.appView workspaceClosed).appWindows)
+  putStrLn "uih-text-editor: pure workspace/tab/document model test passed"
   where
     applyEvent event model =
       applyTransaction (application.appHandleEvent event model) model
 
+validateWindowWorkspace :: WindowSpec -> [Text.Text]
+validateWindowWorkspace window = maybe [] validateWorkspaceSpec (windowWorkspace window)
+
 windowIsEdited :: WindowSpec -> Bool
 windowIsEdited window = window.windowKey == firstDocumentWindowKey && "Edited" `textIn` window.windowTitle
 
-hasWindow :: WindowKey -> [WindowSpec] -> Bool
-hasWindow key = any ((== key) . (.windowKey))
+windowTabKeys :: WindowSpec -> [TabKey]
+windowTabKeys window = maybe [] workspaceTabKeys (windowWorkspace window)
 
 isCommandEnabled :: CommandId -> [CommandSpec] -> Bool
 isCommandEnabled identifier commands =
@@ -100,7 +125,7 @@ textEditorSpecs :: [WindowSpec] -> [TextEditorSpec]
 textEditorSpecs windows =
   [ editor
   | window <- windows
-  , TextEditor editor <- window.windowControls
+  , TextEditor editor <- windowLeafControls window
   ]
 
 textIn :: String -> Text.Text -> Bool
