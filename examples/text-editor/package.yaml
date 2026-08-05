@@ -17,6 +17,7 @@ library:
   source-dirs: src
   exposed-modules:
     - Example.TextEditor
+    - Example.TextEditor.Highlighting
 
 executables:
   uih-text-editor:

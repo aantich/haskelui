@@ -3,6 +3,8 @@
 
 #import <dispatch/dispatch.h>
 
+_Static_assert(sizeof(UIHMacTextStyle) == 120, "UIHMacTextStyle ABI must match its Haskell Storable instance");
+
 typedef NS_ENUM(NSInteger, UIHMacControlKind) {
   UIHMacControlKindLabel,
   UIHMacControlKindButton,
@@ -483,6 +485,226 @@ void uih_macos_control_set_text(UIHMacControlRef reference, const char *utf8_tex
   }
 }
 
+static CGFloat UIHClampUnit(double value) {
+  return (CGFloat)MIN(1.0, MAX(0.0, value));
+}
+
+static NSColor *UIHColor(double red, double green, double blue, double alpha) {
+  return [NSColor colorWithSRGBRed:UIHClampUnit(red)
+                             green:UIHClampUnit(green)
+                              blue:UIHClampUnit(blue)
+                             alpha:UIHClampUnit(alpha)];
+}
+
+static NSFontWeight UIHFontWeight(int32_t weight) {
+  switch (weight) {
+    case 100: return NSFontWeightThin;
+    case 200: return NSFontWeightUltraLight;
+    case 300: return NSFontWeightLight;
+    case 500: return NSFontWeightMedium;
+    case 600: return NSFontWeightSemibold;
+    case 700: return NSFontWeightBold;
+    case 800: return NSFontWeightHeavy;
+    case 900: return NSFontWeightBlack;
+    case 400:
+    default: return NSFontWeightRegular;
+  }
+}
+
+static NSFont *UIHFontForStyle(NSTextView *editor, const UIHMacTextStyle *style) {
+  uint32_t fontFields =
+      UIHMacTextStyleFontFamily |
+      UIHMacTextStyleFontSize |
+      UIHMacTextStyleFontWeight |
+      UIHMacTextStyleFontSlant;
+  if ((style->fields & fontFields) == 0) {
+    return nil;
+  }
+
+  NSFont *existing = editor.font ?: [NSFont systemFontOfSize:13.0];
+  CGFloat size =
+      (style->fields & UIHMacTextStyleFontSize) != 0
+          ? (CGFloat)MAX(1.0, style->font_size)
+          : existing.pointSize;
+  NSFontWeight weight =
+      (style->fields & UIHMacTextStyleFontWeight) != 0
+          ? UIHFontWeight(style->font_weight)
+          : NSFontWeightRegular;
+  NSFont *font = existing;
+
+  if ((style->fields & UIHMacTextStyleFontFamily) != 0) {
+    switch (style->font_family_kind) {
+      case 1:
+        font = [NSFont systemFontOfSize:size weight:weight];
+        break;
+      case 2:
+        font = [NSFont monospacedSystemFontOfSize:size weight:weight];
+        break;
+      case 3: {
+        NSString *name = UIHString(style->utf8_font_family);
+        font = [NSFont fontWithName:name size:size] ?: existing;
+        break;
+      }
+      default:
+        break;
+    }
+  } else if ((style->fields & UIHMacTextStyleFontSize) != 0) {
+    font = [NSFont fontWithDescriptor:existing.fontDescriptor size:size] ?: existing;
+  }
+
+  if ((style->fields & UIHMacTextStyleFontWeight) != 0 &&
+      (style->fields & UIHMacTextStyleFontFamily) == 0) {
+    NSFontDescriptor *weightedDescriptor =
+        [font.fontDescriptor fontDescriptorByAddingAttributes:@{
+          NSFontTraitsAttribute: @{NSFontWeightTrait: @(weight)}
+        }];
+    font = [NSFont fontWithDescriptor:weightedDescriptor size:size] ?: font;
+  }
+
+  if ((style->fields & UIHMacTextStyleFontSlant) != 0) {
+    NSFontTraitMask trait = style->font_slant == 1 ? 0 : NSItalicFontMask;
+    font = trait == 0
+        ? [NSFontManager.sharedFontManager convertFont:font toNotHaveTrait:NSItalicFontMask]
+        : [NSFontManager.sharedFontManager convertFont:font toHaveTrait:trait];
+  }
+  return font;
+}
+
+static NSUnderlineStyle UIHUnderlineStyle(int32_t style) {
+  switch (style) {
+    case 0: return (NSUnderlineStyle)0;
+    case 2: return NSUnderlineStyleDouble;
+    case 3: return NSUnderlineStyleThick;
+    case 4: return NSUnderlineStyleSingle | NSUnderlinePatternDot;
+    case 5: return NSUnderlineStyleSingle | NSUnderlinePatternDash;
+    case 6: return NSUnderlineStyleSingle | NSUnderlinePatternDashDotDot;
+    case 1:
+    default: return NSUnderlineStyleSingle;
+  }
+}
+
+void uih_macos_text_editor_begin_presentation(UIHMacControlRef reference) {
+  UIHAssertMainThread();
+  UIHMacControlHandle *handle = UIHControl(reference);
+  if (handle.kind != UIHMacControlKindTextEditor) {
+    return;
+  }
+  NSTextView *editor = (NSTextView *)handle.focusView;
+  if (editor.string.length > 0) {
+    [editor.layoutManager
+        setTemporaryAttributes:@{}
+              forCharacterRange:NSMakeRange(0, editor.string.length)];
+  }
+}
+
+void uih_macos_text_editor_set_base_style(
+    UIHMacControlRef reference,
+    const UIHMacTextStyle *style) {
+  UIHAssertMainThread();
+  UIHMacControlHandle *handle = UIHControl(reference);
+  if (handle.kind != UIHMacControlKindTextEditor || style == NULL) {
+    return;
+  }
+  NSTextView *editor = (NSTextView *)handle.focusView;
+  editor.font = [NSFont monospacedSystemFontOfSize:13 weight:NSFontWeightRegular];
+  editor.textColor = NSColor.textColor;
+  editor.backgroundColor = NSColor.textBackgroundColor;
+  if ((style->fields & UIHMacTextStyleForeground) != 0) {
+    editor.textColor =
+        UIHColor(
+            style->foreground_red,
+            style->foreground_green,
+            style->foreground_blue,
+            style->foreground_alpha);
+  }
+  if ((style->fields & UIHMacTextStyleBackground) != 0) {
+    editor.backgroundColor =
+        UIHColor(
+            style->background_red,
+            style->background_green,
+            style->background_blue,
+            style->background_alpha);
+  }
+  NSFont *font = UIHFontForStyle(editor, style);
+  if (font != nil) {
+    editor.font = font;
+  }
+}
+
+int32_t uih_macos_text_editor_apply_style(
+    UIHMacControlRef reference,
+    uint64_t utf16Location,
+    uint64_t utf16Length,
+    const UIHMacTextStyle *style) {
+  UIHAssertMainThread();
+  UIHMacControlHandle *handle = UIHControl(reference);
+  if (handle.kind != UIHMacControlKindTextEditor || style == NULL ||
+      utf16Location > NSUIntegerMax || utf16Length > NSUIntegerMax) {
+    return 0;
+  }
+  NSTextView *editor = (NSTextView *)handle.focusView;
+  NSUInteger location = (NSUInteger)utf16Location;
+  NSUInteger length = (NSUInteger)utf16Length;
+  if (location > editor.string.length || length > editor.string.length - location) {
+    return 0;
+  }
+
+  NSMutableDictionary<NSAttributedStringKey, id> *attributes =
+      [[NSMutableDictionary alloc] init];
+  if ((style->fields & UIHMacTextStyleForeground) != 0) {
+    attributes[NSForegroundColorAttributeName] =
+        UIHColor(
+            style->foreground_red,
+            style->foreground_green,
+            style->foreground_blue,
+            style->foreground_alpha);
+  }
+  if ((style->fields & UIHMacTextStyleBackground) != 0) {
+    attributes[NSBackgroundColorAttributeName] =
+        UIHColor(
+            style->background_red,
+            style->background_green,
+            style->background_blue,
+            style->background_alpha);
+  }
+  NSFont *font = UIHFontForStyle(editor, style);
+  if (font != nil) {
+    attributes[NSFontAttributeName] = font;
+  }
+  if ((style->fields & UIHMacTextStyleUnderline) != 0) {
+    attributes[NSUnderlineStyleAttributeName] = @(UIHUnderlineStyle(style->underline_style));
+  }
+  if ((style->fields & UIHMacTextStyleStrikethrough) != 0) {
+    attributes[NSStrikethroughStyleAttributeName] =
+        style->strikethrough != 0 ? @(NSUnderlineStyleSingle) : @0;
+  }
+  if ((style->fields & UIHMacTextStyleLetterSpacing) != 0) {
+    attributes[NSKernAttributeName] = @(style->letter_spacing);
+  }
+  if ((style->fields & UIHMacTextStyleBaselineOffset) != 0) {
+    attributes[NSBaselineOffsetAttributeName] = @(style->baseline_offset);
+  }
+
+  if (length > 0 && attributes.count > 0) {
+    [editor.layoutManager
+        addTemporaryAttributes:attributes
+              forCharacterRange:NSMakeRange(location, length)];
+  }
+  return 1;
+}
+
+void uih_macos_text_editor_end_presentation(UIHMacControlRef reference) {
+  UIHAssertMainThread();
+  UIHMacControlHandle *handle = UIHControl(reference);
+  if (handle.kind != UIHMacControlKindTextEditor) {
+    return;
+  }
+  NSTextView *editor = (NSTextView *)handle.focusView;
+  if (editor.string.length > 0) {
+    [editor.layoutManager invalidateDisplayForCharacterRange:NSMakeRange(0, editor.string.length)];
+  }
+}
+
 void uih_macos_control_set_frame(UIHMacControlRef reference, const UIHMacRect *frame) {
   UIHAssertMainThread();
   UIHControl(reference).view.frame = UIHRect(frame);
@@ -789,6 +1011,19 @@ void uih_macos_test_schedule_text_editor_script(
         ![editor.accessibilityRole isEqualToString:NSAccessibilityTextAreaRole]) {
       UIHTestFail(@"native text editor accessibility identity or role is incorrect");
     }
+    if (![editor.string isEqualToString:@"😀 module Initial where\n"]) {
+      UIHTestFail(@"native text editor did not retain the Unicode fixture");
+    } else {
+      NSDictionary<NSAttributedStringKey, id> *baseAttributes =
+          [editor.layoutManager temporaryAttributesAtCharacterIndex:2 effectiveRange:NULL];
+      NSDictionary<NSAttributedStringKey, id> *keywordAttributes =
+          [editor.layoutManager temporaryAttributesAtCharacterIndex:3 effectiveRange:NULL];
+      NSColor *baseColor = baseAttributes[NSForegroundColorAttributeName];
+      NSColor *keywordColor = keywordAttributes[NSForegroundColorAttributeName];
+      if (baseColor == nil || keywordColor == nil || [baseColor isEqual:keywordColor]) {
+        UIHTestFail(@"Unicode scalar ranges were not translated to the highlighted AppKit range");
+      }
+    }
     uih_macos_open_text_files();
     if (UIHState.openPanel == nil || !UIHState.openPanel.visible) {
       UIHTestFail(@"native multi-file Open panel did not become visible");
@@ -801,6 +1036,9 @@ void uih_macos_test_schedule_text_editor_script(
     }
 
     editor.string = @"module Saved where\nanswer = 42\n";
+    NSRange expectedSelection = NSMakeRange(7, 5);
+    editor.selectedRange = expectedSelection;
+    [editor.undoManager removeAllActions];
     [editor.delegate textDidChange:
         [NSNotification notificationWithName:NSTextDidChangeNotification object:editor]];
 
@@ -814,6 +1052,23 @@ void uih_macos_test_schedule_text_editor_script(
       }
       if (![editedWindow.window.title containsString:@"Edited"] || !enabledSaveItem.enabled) {
         UIHTestFail(@"native text edit did not reconcile dirty document state");
+      }
+      UIHMacControlHandle *editedEditorHandle = UIHState.controls[@(editorIdentity)];
+      NSTextView *editedEditor = (NSTextView *)editedEditorHandle.focusView;
+      NSDictionary<NSAttributedStringKey, id> *baseAttributes =
+          [editedEditor.layoutManager temporaryAttributesAtCharacterIndex:6 effectiveRange:NULL];
+      NSDictionary<NSAttributedStringKey, id> *keywordAttributes =
+          [editedEditor.layoutManager temporaryAttributesAtCharacterIndex:0 effectiveRange:NULL];
+      NSColor *baseColor = baseAttributes[NSForegroundColorAttributeName];
+      NSColor *keywordColor = keywordAttributes[NSForegroundColorAttributeName];
+      if (baseColor == nil || keywordColor == nil || [baseColor isEqual:keywordColor]) {
+        UIHTestFail(@"syntax presentation was not refreshed after a native edit");
+      }
+      if (!NSEqualRanges(editedEditor.selectedRange, expectedSelection)) {
+        UIHTestFail(@"syntax presentation changed the native selection");
+      }
+      if (editedEditor.undoManager.canUndo) {
+        UIHTestFail(@"syntax presentation created a native undo action");
       }
 
       NSEvent *commandS =

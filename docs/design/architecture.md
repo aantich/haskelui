@@ -1,6 +1,6 @@
 # UIH Architecture Proposal
 
-Status: Draft for discussion, architecture revision 11
+Status: Draft for discussion, architecture revision 12
 Audience: UIH users, contributors, and backend implementers  
 Scope: Public API, runtime architecture, backend boundaries, and initial delivery plan
 
@@ -1336,25 +1336,44 @@ Editable controls additionally require:
 
 Native backends should use native text controls when they satisfy the requested behavior and styling. The custom backend needs an explicit text-editing runtime; wrapping SDL_ttf is not sufficient.
 
-### 19.3 Syntax highlighting
+### 19.3 Generic attributed text and presentation
 
-Syntax highlighting is presentation over an immutable text snapshot, not attributed authoritative content. A highlighter returns semantic, revisioned spans:
+Core text styling is generic and contains no syntax-specific vocabulary:
 
 ```haskell
-data HighlightSpan = HighlightSpan
-  { highlightRange :: TextRange
-  , highlightClass :: SyntaxClass
+data TextSpan a = TextSpan
+  { textSpanRange :: TextRange
+  , textSpanValue :: a
   }
 
-data TextPresentation = TextPresentation
-  { presentationRevision :: TextRevision
-  , presentationSpans :: [HighlightSpan]
+data TextRun = TextRun
+  { textRunValue :: Text
+  , textRunStyle :: TextStyle
+  }
+
+data TextLayer = TextLayer
+  { textLayerKey      :: TextLayerKey
+  , textLayerRevision :: TextRevision
+  , textLayerSpans    :: [TextSpan TextStyle]
   }
 ```
 
-`SyntaxClass` expresses meaning such as keyword, string, comment, type, function, or number; themes decide colors and font traits. `TextRange` is validated against its originating snapshot. Parser byte offsets, AppKit/Windows UTF-16 units, and custom-renderer indices are backend/index-cache details and do not leak into the surface API.
+`TextStyle` is a partial portable set of foreground/background colors, font family, size, weight and slant, underline, strikethrough, letter spacing, and baseline offset. `TextRun` is the safe construction form for continuous authored styled strings; opaque `AttributedText` normalizes those runs into one character snapshot plus validated spans.
 
-Applying presentation must not mutate characters, move selection, replace marked IME text, or create undo entries. AppKit therefore updates `NSTextStorage` attributes in a batch; a custom backend emits equivalent styled text runs. Results carrying an obsolete `TextRevision` are discarded. V2 may start with pure whole-document highlighting, then move large inputs to the explicit task executor and incremental changed-range processing without changing the document model.
+Authored rich-text spans and derived presentation layers share range and style primitives but not ownership. Authored styles participate in persistence, clipboard, dirty state, and undo. Presentation layers are revision-bound, non-authoritative overlays for syntax, diagnostics, search, spellchecking, or annotations. Ordered layers merge property-by-property, so a search background does not erase a syntax foreground. Stale layers and invalid ranges are ignored.
+
+Public `TextRange` uses Unicode scalar boundaries. Parser byte offsets, AppKit/Windows UTF-16 units, and custom-renderer indices remain backend or adapter details.
+
+### 19.4 Syntax highlighting
+
+Syntax highlighting is a producer of generic presentation layers, not a Core feature. A language package defines its own semantic vocabulary and resolves it through a theme before constructing a `TextLayer`:
+
+```haskell
+highlightHaskell :: Text -> [TextSpan SyntaxClass]
+syntaxStyle      :: SyntaxClass -> TextStyle
+```
+
+Applying presentation must not mutate characters, authored attributes, selection, marked IME text, or undo. AppKit uses `NSLayoutManager` temporary attributes after converting scalar ranges to UTF-16; a custom renderer merges the same layers into shaped glyph runs. The first editor implementation uses a pure full-document Haskell lexer. Large inputs can later move revisioned work to the explicit task executor and incremental changed-range processing without changing the Core representation.
 
 ## 20. Documents, tabs, and workspaces
 
@@ -1652,6 +1671,8 @@ These are architectural experiments, not production backends. Their purpose is t
 The initial AppKit vertical slice now builds and renders two native windows through an Objective-C ARC shim, native label/button/text-field peers, command menu items and shortcuts, stable keyed reconciliation, and declarative window removal. Its deterministic native suite validates accessibility identity/role, explicit focus transfer, dirty close veto, text delegate delivery, Haskell reconciliation, Command-S through `NSMenu`, final window removal, and zero backend-owned resources or queued callbacks at shutdown. An isolated macOS 13-targeted build runs the suite and verifies `minos 13.0` on the final executable plus project Objective-C/Haskell objects, with compatible `minos 11.0` objects sampled from the selected GHC 9.10.3 runtime. DPI/scale transitions, multi-monitor placement, IME, out-of-process Accessibility behavior, and actual execution on macOS 13 remain production conformance work.
 
 The follow-up text-editor slice adds explicit file effects, a native multiple-selection Open panel, window activation, scrolling multiline `NSTextView` peers, active-document command routing, snapshot-correlated Save completion, and dirty-close negotiation. Its pure test opens two documents and exercises clean/dirty transitions; its native test displays and cancels the Open panel, edits a real text view, writes an actual fixture through Command-S, closes the final window, and asserts zero backend-owned resources and callbacks. File I/O is currently synchronous and UTF-8-only; the slice proves ownership and effect boundaries rather than the final asynchronous document service.
+
+The syntax-highlighting follow-up adds generic portable text styles, authored rich-text runs, scalar-indexed spans, revision-bound ordered presentation layers, and a pure Haskell lexer outside Core. The AppKit adapter resolves layer overlap, translates scalar offsets to UTF-16, and applies temporary layout attributes. Its native test places a keyword after a non-BMP character, confirms the correct native range is styled after initial render and editing, and verifies that presentation preserves selection and creates no undo action.
 
 ### Phase 3: Common layout and display list
 

@@ -19,22 +19,18 @@ stack exec uih-text-editor
 
 The V1 file interpreter reads and writes UTF-8, strips an input UTF-8 BOM, and performs file I/O synchronously. It does not yet provide Save As, atomic replacement, external-change detection, encoding selection, app-level Quit negotiation, restoration, or background I/O. Those are production document-runtime concerns, not AppKit-specific editor behavior.
 
-## V2 syntax highlighting contract
+## V2 syntax highlighting
 
-Syntax highlighting will extend editor presentation without changing document ownership:
+Haskell source files (`.hs` and `.lhs`) are highlighted by a synchronous, pure lexer. Syntax concepts stay in the example rather than UIH Core:
 
 ```haskell
-data HighlightSpan = HighlightSpan
-  { highlightRange :: TextRange
-  , highlightClass :: SyntaxClass
-  }
+highlightHaskell :: Text -> [TextSpan SyntaxClass]
 
-data TextPresentation = TextPresentation
-  { presentationRevision :: TextRevision
-  , presentationSpans :: [HighlightSpan]
-  }
+syntaxStyle :: SyntaxClass -> TextStyle
 ```
 
-The highlighter consumes an immutable text snapshot and returns semantic classes such as keyword, string, comment, type, and number. Themes map those classes to platform text styles. Ranges are validated against the originating snapshot; native UTF-16, parser-byte, and custom-renderer offsets remain internal conversion details.
+The example theme resolves those semantic spans into generic, revision-bound `TextLayer` values. UIH Core knows only portable `TextStyle`, generic `TextSpan a`, authored `TextRun`/`AttributedText`, and ordered presentation layers. The same primitives can represent rich text, search results, diagnostics, spellchecking, or another application's annotations.
 
-The AppKit adapter will apply foreground/font attributes to `NSTextStorage` in one editing batch while preserving characters, selection, marked IME text, and the native undo stack. A result whose text revision is no longer current is discarded. V2 may begin with a pure full-document highlighter; larger files can later move the same revisioned request to the asynchronous effect executor and then to incremental changed-range highlighting.
+The AppKit adapter resolves overlapping layers property-by-property, converts public Unicode scalar ranges to native UTF-16 ranges, and applies temporary layout attributes. Presentation does not modify characters, authored attributes, selection, or the native undo stack. Layers carrying an obsolete revision are discarded.
+
+This first highlighter reparses the complete document after each edit and intentionally supports only a useful lexical subset of Haskell. Large-file background highlighting, incremental changed-range processing, parser-grade language coverage, theme selection, and a language-provider registry are later optimizations and extensions behind the same generic layer contract.

@@ -16,6 +16,7 @@ import Control.Monad
   , when
   )
 import qualified Data.ByteString as ByteString
+import Data.Char (ord)
 import Data.IORef
   ( IORef
   , newIORef
@@ -248,14 +249,17 @@ createControl window spec = do
                 c_createTextField window key.unElementKey text placeholder
         when focused (c_controlFocus window created)
         pure created
-      TextEditor key frame editorText focused -> do
+      TextEditor editor -> do
         created <-
-          withText editorText $ \text ->
-            withMacRect frame $
-              c_createTextEditor window key.unElementKey text
-        when focused (c_controlFocus window created)
+          withText editor.textEditorText $ \text ->
+            withMacRect editor.textEditorFrame $
+              c_createTextEditor window editor.textEditorKey.unElementKey text
+        when editor.textEditorFocused (c_controlFocus window created)
         pure created
   when (handle == nullPtr) (error "UIH AppKit failed to create native control")
+  case spec of
+    TextEditor editor -> applyTextEditorPresentation handle editor
+    _ -> pure ()
   pure (NativeControl handle spec)
 
 updateControl
@@ -266,13 +270,17 @@ updateControl
 updateControl window native desired = do
   withMacRect (controlFrame desired) (c_controlSetFrame native.nativeControlHandle)
   withText (controlText desired) (c_controlSetText native.nativeControlHandle)
+  when (textEditorPresentationChanged native.nativeControlSpec desired) $
+    case desired of
+      TextEditor editor -> applyTextEditorPresentation native.nativeControlHandle editor
+      _ -> pure ()
   case desired of
     Button _ _ _ _ enabled ->
       c_controlSetEnabled native.nativeControlHandle (booleanInt enabled)
     TextField _ _ _ _ focused ->
       when focused (c_controlFocus window native.nativeControlHandle)
-    TextEditor _ _ _ focused ->
-      when focused (c_controlFocus window native.nativeControlHandle)
+    TextEditor editor ->
+      when editor.textEditorFocused (c_controlFocus window native.nativeControlHandle)
     Label {} -> pure ()
   pure native {nativeControlSpec = desired}
 
@@ -295,9 +303,10 @@ configureControlNavigation window controls desired = do
     TextField key _ _ _ True ->
       forM_ (Map.lookup key controls) $ \native ->
         c_controlFocus window native.nativeControlHandle
-    TextEditor key _ _ True ->
-      forM_ (Map.lookup key controls) $ \native ->
-        c_controlFocus window native.nativeControlHandle
+    TextEditor editor
+      | editor.textEditorFocused ->
+          forM_ (Map.lookup editor.textEditorKey controls) $ \native ->
+            c_controlFocus window native.nativeControlHandle
     _ -> pure ()
   where
     navigationHandles =
@@ -318,21 +327,21 @@ controlKey = \case
   Label key _ _ -> key
   Button key _ _ _ _ -> key
   TextField key _ _ _ _ -> key
-  TextEditor key _ _ _ -> key
+  TextEditor editor -> editor.textEditorKey
 
 controlFrame :: Control -> Rect
 controlFrame = \case
   Label _ frame _ -> frame
   Button _ frame _ _ _ -> frame
   TextField _ frame _ _ _ -> frame
-  TextEditor _ frame _ _ -> frame
+  TextEditor editor -> editor.textEditorFrame
 
 controlText :: Control -> Text
 controlText = \case
   Label _ _ text -> text
   Button _ _ text _ _ -> text
   TextField _ _ text _ _ -> text
-  TextEditor _ _ text _ -> text
+  TextEditor editor -> editor.textEditorText
 
 controlsCompatible :: Control -> Control -> Bool
 controlsCompatible (Label {}) (Label {}) = True
@@ -342,6 +351,49 @@ controlsCompatible (TextField _ _ _ oldPlaceholder _) (TextField _ _ _ newPlaceh
   oldPlaceholder == newPlaceholder
 controlsCompatible (TextEditor {}) (TextEditor {}) = True
 controlsCompatible _ _ = False
+
+textEditorPresentationChanged :: Control -> Control -> Bool
+textEditorPresentationChanged (TextEditor old) (TextEditor new) =
+  old.textEditorText /= new.textEditorText
+    || old.textEditorRevision /= new.textEditorRevision
+    || old.textEditorBaseStyle /= new.textEditorBaseStyle
+    || old.textEditorLayers /= new.textEditorLayers
+textEditorPresentationChanged _ _ = False
+
+applyTextEditorPresentation :: Ptr MacControlHandle -> TextEditorSpec -> IO ()
+applyTextEditorPresentation handle editor = do
+  c_textEditorBeginPresentation handle
+  withCTextStyle editor.textEditorBaseStyle (c_textEditorSetBaseStyle handle)
+  let scalarLength = Text.length editor.textEditorText
+      offsets =
+        Map.fromDistinctAscList $
+          zip [0 ..] (scanl advanceUtf16 0 (Text.unpack editor.textEditorText))
+      resolved =
+        resolveTextLayers
+          scalarLength
+          editor.textEditorBaseStyle
+          editor.textEditorRevision
+          editor.textEditorLayers
+  forM_ resolved $ \textSpan -> do
+    let range = textSpan.textSpanRange
+        start = range.textRangeStart
+        end = start + range.textRangeLength
+    case (Map.lookup start offsets, Map.lookup end offsets) of
+      (Just utf16Start, Just utf16End) ->
+        withCTextStyle textSpan.textSpanValue $ \style -> do
+          applied <-
+            c_textEditorApplyStyle
+              handle
+              utf16Start
+              (utf16End - utf16Start)
+              style
+          unless (applied /= 0) $
+            error "UIH AppKit rejected a validated text presentation range"
+      _ -> error "UIH AppKit could not translate a validated Unicode text range"
+  c_textEditorEndPresentation handle
+  where
+    advanceUtf16 offset character =
+      offset + if ord character > 0xFFFF then 2 else 1
 
 shutdown :: IORef AppKitState -> FunPtr EventCallback -> IO ()
 shutdown stateReference callback = do

@@ -27,9 +27,9 @@ The current file interpreter is deliberately synchronous and UTF-8-only. This pr
 
 ## Syntax-highlighting direction
 
-Highlighting is editor presentation, not attributed document content. A highlighter consumes an immutable text snapshot and returns revisioned semantic spans. Themes map semantic token classes to styles; backends convert the snapshot's abstract ranges to native units.
+Highlighting is editor presentation, not attributed document content. A highlighter consumes an immutable text snapshot and returns semantic spans, then a theme resolves them into generic UIH text-style layers. Syntax types stay outside Core; see ADR 0004.
 
-AppKit applies attributes through `NSTextStorage` without changing characters, selection, marked IME ranges, or undo history. Stale revisions are discarded. Full-document pure highlighting is acceptable for the V2 proof; incremental and asynchronous highlighting are later optimizations behind the same contract.
+AppKit applies derived styles as temporary layout attributes without changing characters, authored attributes, selection, marked IME ranges, or undo history. Stale revisions are discarded. Full-document pure highlighting is acceptable for the V2 proof; incremental and asynchronous highlighting are later optimizations behind the same contract.
 
 ## Consequences
 

@@ -44,6 +44,7 @@ Implemented:
 - Multiple retained native windows
 - Native labels, buttons, and text fields
 - Native scrolling multiline text editors
+- Revision-bound portable text-style layers, scalar-to-UTF-16 range translation, and temporary native presentation attributes
 - File-menu commands and key equivalents
 - Native multiple-selection text-file Open panel
 - Window activation events for focused command routing

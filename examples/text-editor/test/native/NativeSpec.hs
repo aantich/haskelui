@@ -47,7 +47,7 @@ main =
             , testTextEditor = firstDocumentEditorKey
             , testEditorSaveCommand = saveCommand
             }
-        testApplication = applicationWithDocument path (Text.pack "module Initial where\n")
+        testApplication = applicationWithDocument path (Text.pack "😀 module Initial where\n")
     unless (length (testApplication.appView testApplication.appInitialModel).appWindows == 1) $
       error "native text editor fixture must begin with exactly one document window"
     runApp (appKitBackendWithTextEditorTest testSpec) testApplication
@@ -65,7 +65,7 @@ main =
 createFixture :: IO FilePath
 createFixture = do
   temporaryDirectory <- getTemporaryDirectory
-  (path, handle) <- openTempFile temporaryDirectory "uih-text-editor.txt"
-  hPutStr handle "module Initial where\n"
+  (path, handle) <- openTempFile temporaryDirectory "uih-text-editor.hs"
+  hPutStr handle "😀 module Initial where\n"
   hClose handle
   pure path

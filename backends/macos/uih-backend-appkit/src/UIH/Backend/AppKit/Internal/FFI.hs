@@ -1,9 +1,12 @@
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE ForeignFunctionInterface #-}
+{-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 module UIH.Backend.AppKit.Internal.FFI
   ( CDebugCounters (..)
   , CMacRect (..)
+  , CTextStyle
   , EventCallback
   , MacControlHandle
   , MacWindowHandle
@@ -15,6 +18,10 @@ module UIH.Backend.AppKit.Internal.FFI
   , c_controlSetEnabled
   , c_controlSetFrame
   , c_controlSetText
+  , c_textEditorApplyStyle
+  , c_textEditorBeginPresentation
+  , c_textEditorEndPresentation
+  , c_textEditorSetBaseStyle
   , c_createButton
   , c_createLabel
   , c_createTextField
@@ -36,9 +43,16 @@ module UIH.Backend.AppKit.Internal.FFI
   , c_windowSetTitle
   , c_windowShow
   , makeEventCallback
+  , withCTextStyle
   , withMacRect
   ) where
 
+import Data.Bits ((.|.))
+import qualified Data.ByteString as ByteString
+import Data.Maybe (fromMaybe)
+import Data.Text (Text)
+import qualified Data.Text.Encoding as TextEncoding
+import Data.Word (Word32, Word64)
 import Foreign
   ( FunPtr
   , Ptr
@@ -52,8 +66,15 @@ import Foreign.C
   , CInt (..)
   , CString
   )
-import Data.Word (Word64)
-import UIH.Core (Rect (..))
+import UIH.Core
+  ( Color (..)
+  , FontFamily (..)
+  , FontSlant (..)
+  , FontWeight (..)
+  , Rect (..)
+  , TextStyle (..)
+  , UnderlineStyle (..)
+  )
 
 data MacWindowHandle
 data MacControlHandle
@@ -107,6 +128,157 @@ instance Storable CMacRect where
     pokeByteOff pointer 8 y
     pokeByteOff pointer 16 width
     pokeByteOff pointer 24 height
+
+data CTextStyle = CTextStyle
+  { cStyleFields :: !Word32
+  , cStyleFamilyKind :: !CInt
+  , cStyleWeight :: !CInt
+  , cStyleSlant :: !CInt
+  , cStyleUnderline :: !CInt
+  , cStyleStrikethrough :: !CInt
+  , cStyleForegroundRed :: !CDouble
+  , cStyleForegroundGreen :: !CDouble
+  , cStyleForegroundBlue :: !CDouble
+  , cStyleForegroundAlpha :: !CDouble
+  , cStyleBackgroundRed :: !CDouble
+  , cStyleBackgroundGreen :: !CDouble
+  , cStyleBackgroundBlue :: !CDouble
+  , cStyleBackgroundAlpha :: !CDouble
+  , cStyleFontSize :: !CDouble
+  , cStyleLetterSpacing :: !CDouble
+  , cStyleBaselineOffset :: !CDouble
+  , cStyleFamilyName :: !CString
+  }
+
+instance Storable CTextStyle where
+  sizeOf _ = 120
+  alignment _ = alignment (undefined :: Ptr ())
+  peek pointer =
+    CTextStyle
+      <$> peekByteOff pointer 0
+      <*> peekByteOff pointer 4
+      <*> peekByteOff pointer 8
+      <*> peekByteOff pointer 12
+      <*> peekByteOff pointer 16
+      <*> peekByteOff pointer 20
+      <*> peekByteOff pointer 24
+      <*> peekByteOff pointer 32
+      <*> peekByteOff pointer 40
+      <*> peekByteOff pointer 48
+      <*> peekByteOff pointer 56
+      <*> peekByteOff pointer 64
+      <*> peekByteOff pointer 72
+      <*> peekByteOff pointer 80
+      <*> peekByteOff pointer 88
+      <*> peekByteOff pointer 96
+      <*> peekByteOff pointer 104
+      <*> peekByteOff pointer 112
+  poke pointer style = do
+    pokeByteOff pointer 0 style.cStyleFields
+    pokeByteOff pointer 4 style.cStyleFamilyKind
+    pokeByteOff pointer 8 style.cStyleWeight
+    pokeByteOff pointer 12 style.cStyleSlant
+    pokeByteOff pointer 16 style.cStyleUnderline
+    pokeByteOff pointer 20 style.cStyleStrikethrough
+    pokeByteOff pointer 24 style.cStyleForegroundRed
+    pokeByteOff pointer 32 style.cStyleForegroundGreen
+    pokeByteOff pointer 40 style.cStyleForegroundBlue
+    pokeByteOff pointer 48 style.cStyleForegroundAlpha
+    pokeByteOff pointer 56 style.cStyleBackgroundRed
+    pokeByteOff pointer 64 style.cStyleBackgroundGreen
+    pokeByteOff pointer 72 style.cStyleBackgroundBlue
+    pokeByteOff pointer 80 style.cStyleBackgroundAlpha
+    pokeByteOff pointer 88 style.cStyleFontSize
+    pokeByteOff pointer 96 style.cStyleLetterSpacing
+    pokeByteOff pointer 104 style.cStyleBaselineOffset
+    pokeByteOff pointer 112 style.cStyleFamilyName
+
+withCTextStyle :: TextStyle -> (Ptr CTextStyle -> IO result) -> IO result
+withCTextStyle style use =
+  ByteString.useAsCString (TextEncoding.encodeUtf8 (familyName style)) $ \familyPointer ->
+    alloca $ \stylePointer -> do
+      poke stylePointer (encodeTextStyle familyPointer style)
+      use stylePointer
+
+encodeTextStyle :: CString -> TextStyle -> CTextStyle
+encodeTextStyle familyPointer style =
+  CTextStyle
+    { cStyleFields =
+        optionalField 0x001 style.textForeground
+          .|. optionalField 0x002 style.textBackground
+          .|. optionalField 0x004 style.textFontFamily
+          .|. optionalField 0x008 style.textFontSize
+          .|. optionalField 0x010 style.textFontWeight
+          .|. optionalField 0x020 style.textFontSlant
+          .|. optionalField 0x040 style.textUnderline
+          .|. optionalField 0x080 style.textStrikethrough
+          .|. optionalField 0x100 style.textLetterSpacing
+          .|. optionalField 0x200 style.textBaselineOffset
+    , cStyleFamilyKind = maybe 0 encodeFontFamily style.textFontFamily
+    , cStyleWeight = maybe 0 encodeFontWeight style.textFontWeight
+    , cStyleSlant = maybe 0 encodeFontSlant style.textFontSlant
+    , cStyleUnderline = maybe 0 encodeUnderline style.textUnderline
+    , cStyleStrikethrough = maybe 0 booleanInt style.textStrikethrough
+    , cStyleForegroundRed = realToFrac foreground.colorRed
+    , cStyleForegroundGreen = realToFrac foreground.colorGreen
+    , cStyleForegroundBlue = realToFrac foreground.colorBlue
+    , cStyleForegroundAlpha = realToFrac foreground.colorAlpha
+    , cStyleBackgroundRed = realToFrac background.colorRed
+    , cStyleBackgroundGreen = realToFrac background.colorGreen
+    , cStyleBackgroundBlue = realToFrac background.colorBlue
+    , cStyleBackgroundAlpha = realToFrac background.colorAlpha
+    , cStyleFontSize = realToFrac (fromMaybe 0 style.textFontSize)
+    , cStyleLetterSpacing = realToFrac (fromMaybe 0 style.textLetterSpacing)
+    , cStyleBaselineOffset = realToFrac (fromMaybe 0 style.textBaselineOffset)
+    , cStyleFamilyName = familyPointer
+    }
+  where
+    foreground = fromMaybe transparent style.textForeground
+    background = fromMaybe transparent style.textBackground
+    transparent = RGBA 0 0 0 0
+
+familyName :: TextStyle -> Text
+familyName style =
+  case style.textFontFamily of
+    Just (NamedFont name) -> name
+    _ -> ""
+
+optionalField :: Word32 -> Maybe value -> Word32
+optionalField bit = maybe 0 (const bit)
+
+encodeFontFamily :: FontFamily -> CInt
+encodeFontFamily SystemFont = 1
+encodeFontFamily MonospaceFont = 2
+encodeFontFamily (NamedFont _) = 3
+
+encodeFontWeight :: FontWeight -> CInt
+encodeFontWeight Thin = 100
+encodeFontWeight ExtraLight = 200
+encodeFontWeight Light = 300
+encodeFontWeight Regular = 400
+encodeFontWeight Medium = 500
+encodeFontWeight SemiBold = 600
+encodeFontWeight Bold = 700
+encodeFontWeight ExtraBold = 800
+encodeFontWeight Black = 900
+
+encodeFontSlant :: FontSlant -> CInt
+encodeFontSlant Upright = 1
+encodeFontSlant Italic = 2
+encodeFontSlant Oblique = 3
+
+encodeUnderline :: UnderlineStyle -> CInt
+encodeUnderline UnderlineNone = 0
+encodeUnderline UnderlineSingle = 1
+encodeUnderline UnderlineDouble = 2
+encodeUnderline UnderlineThick = 3
+encodeUnderline UnderlineDotted = 4
+encodeUnderline UnderlineDashed = 5
+encodeUnderline UnderlineWavy = 6
+
+booleanInt :: Bool -> CInt
+booleanInt True = 1
+booleanInt False = 0
 
 withMacRect :: Rect -> (Ptr CMacRect -> IO result) -> IO result
 withMacRect (Rect x y width height) use =
@@ -166,6 +338,18 @@ foreign import ccall unsafe "uih_macos_text_editor_create"
 
 foreign import ccall unsafe "uih_macos_control_set_text"
   c_controlSetText :: Ptr MacControlHandle -> CString -> IO ()
+
+foreign import ccall unsafe "uih_macos_text_editor_begin_presentation"
+  c_textEditorBeginPresentation :: Ptr MacControlHandle -> IO ()
+
+foreign import ccall unsafe "uih_macos_text_editor_set_base_style"
+  c_textEditorSetBaseStyle :: Ptr MacControlHandle -> Ptr CTextStyle -> IO ()
+
+foreign import ccall unsafe "uih_macos_text_editor_apply_style"
+  c_textEditorApplyStyle :: Ptr MacControlHandle -> Word64 -> Word64 -> Ptr CTextStyle -> IO CInt
+
+foreign import ccall unsafe "uih_macos_text_editor_end_presentation"
+  c_textEditorEndPresentation :: Ptr MacControlHandle -> IO ()
 
 foreign import ccall unsafe "uih_macos_control_set_frame"
   c_controlSetFrame :: Ptr MacControlHandle -> Ptr CMacRect -> IO ()

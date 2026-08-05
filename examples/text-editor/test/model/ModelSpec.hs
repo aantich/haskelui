@@ -10,11 +10,24 @@ import Example.TextEditor
   , openCommand
   , saveCommand
   )
+import Example.TextEditor.Highlighting
+  ( SyntaxClass (..)
+  , highlightHaskell
+  )
 import qualified Data.Text as Text
 import UIH.Core
 
 main :: IO ()
 main = do
+  let highlighted = highlightHaskell "😀 module Main where\nvalue = \"hi\" -- note\n"
+  assert
+    "pure highlighter uses Unicode scalar ranges"
+    ( TextSpan (TextRange 2 6) SyntaxKeyword `elem` highlighted
+        && TextSpan (TextRange 9 4) SyntaxTypeName `elem` highlighted
+        && TextSpan (TextRange 28 4) SyntaxString `elem` highlighted
+        && TextSpan (TextRange 33 7) SyntaxComment `elem` highlighted
+    )
+
   let initial = application.appInitialModel
       openRequest = application.appHandleEvent (CommandInvoked openCommand) initial
   assertEqual "Open command effect" [RequestOpenTextFiles] openRequest.transactionEffects
@@ -27,6 +40,16 @@ main = do
   assert "two reads create two document windows" (length (application.appView openedTwice).appWindows == 3)
   assert "edited window title" (any windowIsEdited editedView.appWindows)
   assert "Save enabled for active edited document" (isCommandEnabled saveCommand editedView.appCommands)
+  assert "Haskell document receives a generic syntax presentation layer" $
+    case textEditorSpecs editedView.appWindows of
+      editor : _ ->
+        editor.textEditorRevision == TextRevision 1
+          && case editor.textEditorLayers of
+            [layer] ->
+              layer.textLayerRevision == editor.textEditorRevision
+                && not (null layer.textLayerSpans)
+            _ -> False
+      [] -> False
 
   let saveRequest = application.appHandleEvent (CommandInvoked saveCommand) edited
   assertEqual
@@ -72,6 +95,13 @@ isCommandEnabled identifier commands =
   case filter ((== identifier) . (.commandId)) commands of
     [command] -> command.commandEnabled
     _ -> False
+
+textEditorSpecs :: [WindowSpec] -> [TextEditorSpec]
+textEditorSpecs windows =
+  [ editor
+  | window <- windows
+  , TextEditor editor <- window.windowControls
+  ]
 
 textIn :: String -> Text.Text -> Bool
 textIn needle = Text.isInfixOf (Text.pack needle)

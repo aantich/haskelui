@@ -21,6 +21,7 @@ source-repository head
 library
   exposed-modules:
       Example.TextEditor
+      Example.TextEditor.Highlighting
   other-modules:
       Paths_uih_example_text_editor
   autogen-modules:

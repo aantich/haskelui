@@ -31,6 +31,40 @@ typedef struct UIHMacRect {
   double height;
 } UIHMacRect;
 
+typedef enum UIHMacTextStyleField {
+  UIHMacTextStyleForeground = 1u << 0,
+  UIHMacTextStyleBackground = 1u << 1,
+  UIHMacTextStyleFontFamily = 1u << 2,
+  UIHMacTextStyleFontSize = 1u << 3,
+  UIHMacTextStyleFontWeight = 1u << 4,
+  UIHMacTextStyleFontSlant = 1u << 5,
+  UIHMacTextStyleUnderline = 1u << 6,
+  UIHMacTextStyleStrikethrough = 1u << 7,
+  UIHMacTextStyleLetterSpacing = 1u << 8,
+  UIHMacTextStyleBaselineOffset = 1u << 9
+} UIHMacTextStyleField;
+
+typedef struct UIHMacTextStyle {
+  uint32_t fields;
+  int32_t font_family_kind;
+  int32_t font_weight;
+  int32_t font_slant;
+  int32_t underline_style;
+  int32_t strikethrough;
+  double foreground_red;
+  double foreground_green;
+  double foreground_blue;
+  double foreground_alpha;
+  double background_red;
+  double background_green;
+  double background_blue;
+  double background_alpha;
+  double font_size;
+  double letter_spacing;
+  double baseline_offset;
+  const char *utf8_font_family;
+} UIHMacTextStyle;
+
 typedef struct UIHMacDebugCounters {
   int32_t windows;
   int32_t controls;
@@ -85,6 +119,16 @@ UIHMacControlRef uih_macos_text_editor_create(
 void uih_macos_control_set_text(
     UIHMacControlRef control,
     const char *utf8_text);
+void uih_macos_text_editor_begin_presentation(UIHMacControlRef control);
+void uih_macos_text_editor_set_base_style(
+    UIHMacControlRef control,
+    const UIHMacTextStyle *style);
+int32_t uih_macos_text_editor_apply_style(
+    UIHMacControlRef control,
+    uint64_t utf16_location,
+    uint64_t utf16_length,
+    const UIHMacTextStyle *style);
+void uih_macos_text_editor_end_presentation(UIHMacControlRef control);
 void uih_macos_control_set_frame(UIHMacControlRef control, const UIHMacRect *frame);
 void uih_macos_control_set_enabled(UIHMacControlRef control, int32_t enabled);
 void uih_macos_control_focus(UIHMacWindowRef window, UIHMacControlRef control);

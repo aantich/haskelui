@@ -17,7 +17,14 @@ import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Word (Word64)
-import System.FilePath (takeFileName)
+import Example.TextEditor.Highlighting
+  ( codeEditorBaseStyle
+  , haskellSyntaxLayer
+  )
+import System.FilePath
+  ( takeExtension
+  , takeFileName
+  )
 import UIH.Core
 
 data Document = Document
@@ -26,6 +33,7 @@ data Document = Document
   , documentEffectKey :: !EffectKey
   , documentPath :: !FilePath
   , documentContents :: !Text
+  , documentRevision :: !TextRevision
   , documentSavedContents :: !Text
   , documentStatus :: !Text
   , documentCloseAfterSave :: !Bool
@@ -120,10 +128,15 @@ documentWindow active document =
     , windowFrame = Rect offset offset 800 640
     , windowControls =
         [ TextEditor
-            document.documentEditorKey
-            (Rect 12 54 776 574)
-            document.documentContents
-            (active == Just document.documentWindowKey)
+            TextEditorSpec
+              { textEditorKey = document.documentEditorKey
+              , textEditorFrame = Rect 12 54 776 574
+              , textEditorText = document.documentContents
+              , textEditorRevision = document.documentRevision
+              , textEditorBaseStyle = codeEditorBaseStyle
+              , textEditorLayers = documentPresentation document
+              , textEditorFocused = active == Just document.documentWindowKey
+              }
         , Button (documentButtonKey document) (Rect 12 12 92 30) "Save" saveCommand (documentDirty document)
         , Label (documentStatusKey document) (Rect 116 16 672 24) document.documentStatus
         ]
@@ -182,6 +195,7 @@ handleEvent event model =
             ( updateDocument document.documentWindowKey $ \current ->
                 current
                   { documentContents = changedContents
+                  , documentRevision = nextTextRevision current.documentRevision
                   , documentStatus = "Unsaved changes"
                   , documentCloseAfterSave = False
                   }
@@ -288,10 +302,20 @@ insertDocument documentPath initialContents model =
         , documentEffectKey = EffectKey identity
         , documentPath = documentPath
         , documentContents = initialContents
+        , documentRevision = TextRevision 0
         , documentSavedContents = initialContents
         , documentStatus = Text.pack documentPath
         , documentCloseAfterSave = False
         }
+
+documentPresentation :: Document -> [TextLayer]
+documentPresentation document
+  | takeExtension document.documentPath `elem` [".hs", ".lhs"] =
+      [haskellSyntaxLayer document.documentRevision document.documentContents]
+  | otherwise = []
+
+nextTextRevision :: TextRevision -> TextRevision
+nextTextRevision (TextRevision revision) = TextRevision (revision + 1)
 
 updateDocument :: WindowKey -> (Document -> Document) -> EditorModel -> EditorModel
 updateDocument key change model =
