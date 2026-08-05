@@ -9,18 +9,30 @@ typedef NS_ENUM(NSInteger, UIHMacControlKind) {
   UIHMacControlKindTextField
 };
 
+@class UIHMacWindowHandle;
+@class UIHMacControlHandle;
+
 @interface UIHMacApplicationState : NSObject
 @property(nonatomic, assign) UIHMacEventCallback callback;
 @property(nonatomic, assign) void *callbackContext;
 @property(nonatomic, strong) NSMenu *fileMenu;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSMenuItem *> *commandItems;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, id> *commandTargets;
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *, UIHMacWindowHandle *> *windows;
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *, UIHMacControlHandle *> *controls;
 @end
 
 @implementation UIHMacApplicationState
 @end
 
 static UIHMacApplicationState *UIHState = nil;
+static int32_t UIHLiveWindows = 0;
+static int32_t UIHLiveControls = 0;
+static int32_t UIHLiveActionTargets = 0;
+static int32_t UIHLiveWindowDelegates = 0;
+static int32_t UIHQueuedCallbacks = 0;
+static int32_t UIHTestFailures = 0;
+static NSString *UIHLastTestFailure = nil;
 
 static void UIHAssertMainThread(void) {
   NSCAssert(UIHAppKitIsMainThread(), @"UIH AppKit operation must run on the process main thread");
@@ -40,18 +52,17 @@ static NSRect UIHRect(const UIHMacRect *frame) {
 
 static void UIHEmit(int32_t kind, uint64_t identity, NSString *text) {
   NSString *copiedText = text == nil ? @"" : [text copy];
+  UIHQueuedCallbacks += 1;
   dispatch_async(dispatch_get_main_queue(), ^{
     UIHMacApplicationState *state = UIHState;
-    if (state == nil || state.callback == NULL) {
-      return;
-    }
-    @autoreleasepool {
+    if (state != nil && state.callback != NULL) {
       state.callback(
           state.callbackContext,
           kind,
           identity,
           [copiedText UTF8String]);
     }
+    UIHQueuedCallbacks -= 1;
   });
 }
 
@@ -62,6 +73,18 @@ static void UIHEmit(int32_t kind, uint64_t identity, NSString *text) {
 @end
 
 @implementation UIHMacActionTarget
+- (instancetype)init {
+  self = [super init];
+  if (self != nil) {
+    UIHLiveActionTargets += 1;
+  }
+  return self;
+}
+
+- (void)dealloc {
+  UIHLiveActionTargets -= 1;
+}
+
 - (void)performAction:(id)sender {
   (void)sender;
   UIHEmit(self.eventKind, self.identity, @"");
@@ -86,20 +109,44 @@ static void UIHEmit(int32_t kind, uint64_t identity, NSString *text) {
 @end
 
 @interface UIHMacWindowHandle : NSObject
+@property(nonatomic, assign) uint64_t identity;
 @property(nonatomic, strong) NSWindow *window;
 @property(nonatomic, strong) UIHMacWindowDelegate *delegate;
 @end
 
 @implementation UIHMacWindowHandle
+- (instancetype)init {
+  self = [super init];
+  if (self != nil) {
+    UIHLiveWindows += 1;
+  }
+  return self;
+}
+
+- (void)dealloc {
+  UIHLiveWindows -= 1;
+}
 @end
 
 @interface UIHMacControlHandle : NSObject
+@property(nonatomic, assign) uint64_t identity;
 @property(nonatomic, strong) NSView *view;
 @property(nonatomic, strong) UIHMacActionTarget *target;
 @property(nonatomic, assign) UIHMacControlKind kind;
 @end
 
 @implementation UIHMacControlHandle
+- (instancetype)init {
+  self = [super init];
+  if (self != nil) {
+    UIHLiveControls += 1;
+  }
+  return self;
+}
+
+- (void)dealloc {
+  UIHLiveControls -= 1;
+}
 @end
 
 static UIHMacWindowHandle *UIHWindow(UIHMacWindowRef reference) {
@@ -143,6 +190,10 @@ int32_t uih_macos_initialize(UIHMacEventCallback callback, void *context) {
   UIHState.callbackContext = context;
   UIHState.commandItems = [[NSMutableDictionary alloc] init];
   UIHState.commandTargets = [[NSMutableDictionary alloc] init];
+  UIHState.windows = [[NSMutableDictionary alloc] init];
+  UIHState.controls = [[NSMutableDictionary alloc] init];
+  UIHTestFailures = 0;
+  UIHLastTestFailure = nil;
 
   NSApplication *application = NSApplication.sharedApplication;
   application.activationPolicy = NSApplicationActivationPolicyRegular;
@@ -202,14 +253,20 @@ UIHMacWindowRef uih_macos_window_create(
                                     defer:NO];
   window.title = UIHString(utf8_title);
   window.releasedWhenClosed = NO;
+  window.identifier = [NSString stringWithFormat:@"uih-window-%llu", identity];
+  window.contentView.accessibilityIdentifier =
+      [NSString stringWithFormat:@"uih-window-content-%llu", identity];
 
   UIHMacWindowDelegate *delegate = [[UIHMacWindowDelegate alloc] init];
   delegate.identity = identity;
   window.delegate = delegate;
+  UIHLiveWindowDelegates += 1;
 
   UIHMacWindowHandle *handle = [[UIHMacWindowHandle alloc] init];
+  handle.identity = identity;
   handle.window = window;
   handle.delegate = delegate;
+  UIHState.windows[@(identity)] = handle;
   return (__bridge_retained void *)handle;
 }
 
@@ -234,10 +291,14 @@ void uih_macos_window_destroy(UIHMacWindowRef reference) {
     return;
   }
   UIHMacWindowHandle *handle = (__bridge_transfer UIHMacWindowHandle *)reference;
+  [UIHState.windows removeObjectForKey:@(handle.identity)];
   handle.window.delegate = nil;
   [handle.window orderOut:nil];
   [handle.window close];
-  handle.delegate = nil;
+  if (handle.delegate != nil) {
+    handle.delegate = nil;
+    UIHLiveWindowDelegates -= 1;
+  }
   handle.window = nil;
 }
 
@@ -245,12 +306,28 @@ static UIHMacControlRef UIHRetainControl(
     NSView *view,
     UIHMacActionTarget *target,
     UIHMacControlKind kind,
+    uint64_t identity,
     UIHMacWindowRef windowReference) {
   UIHMacControlHandle *handle = [[UIHMacControlHandle alloc] init];
+  handle.identity = identity;
   handle.view = view;
   handle.target = target;
   handle.kind = kind;
+  view.accessibilityElement = YES;
+  view.accessibilityIdentifier = [NSString stringWithFormat:@"uih-control-%llu", identity];
+  switch (kind) {
+    case UIHMacControlKindLabel:
+      view.accessibilityRole = NSAccessibilityStaticTextRole;
+      break;
+    case UIHMacControlKindButton:
+      view.accessibilityRole = NSAccessibilityButtonRole;
+      break;
+    case UIHMacControlKindTextField:
+      view.accessibilityRole = NSAccessibilityTextFieldRole;
+      break;
+  }
   [UIHWindow(windowReference).window.contentView addSubview:view];
+  UIHState.controls[@(identity)] = handle;
   return (__bridge_retained void *)handle;
 }
 
@@ -260,14 +337,13 @@ UIHMacControlRef uih_macos_label_create(
     const char *utf8_text,
     const UIHMacRect *frame) {
   UIHAssertMainThread();
-  (void)identity;
   NSTextField *label = [[NSTextField alloc] initWithFrame:UIHRect(frame)];
   label.stringValue = UIHString(utf8_text);
   label.editable = NO;
   label.selectable = NO;
   label.bezeled = NO;
   label.drawsBackground = NO;
-  return UIHRetainControl(label, nil, UIHMacControlKindLabel, window);
+  return UIHRetainControl(label, nil, UIHMacControlKindLabel, identity, window);
 }
 
 UIHMacControlRef uih_macos_button_create(
@@ -277,7 +353,6 @@ UIHMacControlRef uih_macos_button_create(
     uint64_t command_identity,
     const UIHMacRect *frame) {
   UIHAssertMainThread();
-  (void)identity;
   UIHMacActionTarget *target = [[UIHMacActionTarget alloc] init];
   target.identity = command_identity;
   target.eventKind = UIHMacEventCommand;
@@ -287,7 +362,7 @@ UIHMacControlRef uih_macos_button_create(
   button.bezelStyle = NSBezelStyleRounded;
   button.target = target;
   button.action = @selector(performAction:);
-  return UIHRetainControl(button, target, UIHMacControlKindButton, window);
+  return UIHRetainControl(button, target, UIHMacControlKindButton, identity, window);
 }
 
 UIHMacControlRef uih_macos_text_field_create(
@@ -305,7 +380,7 @@ UIHMacControlRef uih_macos_text_field_create(
   field.stringValue = UIHString(utf8_text);
   field.placeholderString = UIHString(utf8_placeholder);
   field.delegate = target;
-  return UIHRetainControl(field, target, UIHMacControlKindTextField, window);
+  return UIHRetainControl(field, target, UIHMacControlKindTextField, identity, window);
 }
 
 void uih_macos_control_set_text(UIHMacControlRef reference, const char *utf8_text) {
@@ -345,12 +420,20 @@ void uih_macos_control_focus(UIHMacWindowRef window, UIHMacControlRef control) {
   [UIHWindow(window).window makeFirstResponder:UIHControl(control).view];
 }
 
+void uih_macos_control_set_next_key(
+    UIHMacControlRef reference,
+    UIHMacControlRef nextReference) {
+  UIHAssertMainThread();
+  UIHControl(reference).view.nextKeyView = UIHControl(nextReference).view;
+}
+
 void uih_macos_control_destroy(UIHMacControlRef reference) {
   UIHAssertMainThread();
   if (reference == NULL) {
     return;
   }
   UIHMacControlHandle *handle = (__bridge_transfer UIHMacControlHandle *)reference;
+  [UIHState.controls removeObjectForKey:@(handle.identity)];
   if ([handle.view isKindOfClass:NSTextField.class]) {
     ((NSTextField *)handle.view).delegate = nil;
   }
@@ -398,4 +481,173 @@ void uih_macos_command_remove(uint64_t identity) {
   [UIHState.fileMenu removeItem:item];
   [UIHState.commandItems removeObjectForKey:key];
   [UIHState.commandTargets removeObjectForKey:key];
+}
+
+static void UIHTestFail(NSString *message) {
+  UIHTestFailures += 1;
+  if (UIHLastTestFailure == nil) {
+    UIHLastTestFailure = [message copy];
+  }
+  NSLog(@"UIH native validation failure: %@", message);
+}
+
+static BOOL UIHResponderBelongsToView(NSResponder *responder, NSView *view) {
+  if (responder == view) {
+    return YES;
+  }
+  if ([responder isKindOfClass:NSText.class]) {
+    return (id)((NSText *)responder).delegate == (id)view;
+  }
+  return NO;
+}
+
+void uih_macos_debug_counters(UIHMacDebugCounters *counters) {
+  if (counters == NULL) {
+    return;
+  }
+  counters->windows = UIHLiveWindows;
+  counters->controls = UIHLiveControls;
+  counters->action_targets = UIHLiveActionTargets;
+  counters->window_delegates = UIHLiveWindowDelegates;
+  counters->queued_callbacks = UIHQueuedCallbacks;
+  counters->test_failures = UIHTestFailures;
+}
+
+const char *uih_macos_test_last_failure(void) {
+  return UIHLastTestFailure == nil ? NULL : UIHLastTestFailure.UTF8String;
+}
+
+static void UIHTestAfter(double seconds, dispatch_block_t block) {
+  dispatch_after(
+      dispatch_time(DISPATCH_TIME_NOW, (int64_t)(seconds * NSEC_PER_SEC)),
+      dispatch_get_main_queue(),
+      block);
+}
+
+void uih_macos_test_schedule_vertical_script(
+    uint64_t mainWindowIdentity,
+    uint64_t nameFieldIdentity,
+    uint64_t greetingLabelIdentity,
+    uint64_t saveCommandIdentity) {
+  UIHAssertMainThread();
+
+  UIHTestAfter(0.10, ^{
+        UIHMacWindowHandle *mainWindow = UIHState.windows[@(mainWindowIdentity)];
+        UIHMacControlHandle *nameField = UIHState.controls[@(nameFieldIdentity)];
+        UIHMacControlHandle *greetingLabel = UIHState.controls[@(greetingLabelIdentity)];
+        NSMenuItem *saveItem = UIHState.commandItems[@(saveCommandIdentity)];
+        if (mainWindow == nil || nameField == nil || greetingLabel == nil || saveItem == nil) {
+          UIHTestFail(@"initial native window, controls, or Save command were not registered");
+          [NSApplication.sharedApplication stop:nil];
+          return;
+        }
+
+        NSTextField *field = (NSTextField *)nameField.view;
+        NSString *expectedIdentifier =
+            [NSString stringWithFormat:@"uih-control-%llu", nameFieldIdentity];
+        if (![field.accessibilityIdentifier isEqualToString:expectedIdentifier]) {
+          UIHTestFail(@"text field does not expose its stable UIH accessibility identifier");
+        }
+        NSString *role = field.accessibilityRole;
+        if (![role isEqualToString:NSAccessibilityTextFieldRole]) {
+          UIHTestFail([NSString stringWithFormat:
+              @"text field exposes accessibility role %@ instead of %@",
+              role,
+              NSAccessibilityTextFieldRole]);
+        }
+
+        [mainWindow.window makeKeyAndOrderFront:nil];
+        if (![mainWindow.window makeFirstResponder:field] ||
+            !UIHResponderBelongsToView(mainWindow.window.firstResponder, field)) {
+          UIHTestFail(@"text field could not become the native first responder");
+        }
+        NSView *nextKeyView = field.nextKeyView;
+        if (nextKeyView == nil || nextKeyView == field) {
+          UIHTestFail(@"explicit key-view traversal was not installed");
+        } else {
+          if (![mainWindow.window makeFirstResponder:nextKeyView] ||
+              !UIHResponderBelongsToView(mainWindow.window.firstResponder, nextKeyView)) {
+            UIHTestFail(@"next key-view control could not become the native first responder");
+          }
+          [mainWindow.window makeFirstResponder:field];
+        }
+
+        [mainWindow.window performClose:nil];
+
+        UIHTestAfter(0.12, ^{
+          UIHMacWindowHandle *retainedMainWindow = UIHState.windows[@(mainWindowIdentity)];
+          UIHMacControlHandle *retainedNameField = UIHState.controls[@(nameFieldIdentity)];
+          if (retainedMainWindow == nil) {
+            UIHTestFail(@"dirty main window was not retained after its close veto");
+            [NSApplication.sharedApplication stop:nil];
+            return;
+          }
+          if (retainedNameField == nil || retainedNameField.kind != UIHMacControlKindTextField) {
+            UIHTestFail(@"name text field disappeared after close veto");
+            [NSApplication.sharedApplication stop:nil];
+            return;
+          }
+          NSTextField *retainedField = (NSTextField *)retainedNameField.view;
+          retainedField.stringValue = @"Ada";
+          [retainedField.delegate controlTextDidChange:
+              [NSNotification
+                  notificationWithName:NSControlTextDidChangeNotification
+                                object:retainedField]];
+
+          UIHTestAfter(0.12, ^{
+            UIHMacWindowHandle *editedMainWindow = UIHState.windows[@(mainWindowIdentity)];
+            UIHMacControlHandle *editedGreeting = UIHState.controls[@(greetingLabelIdentity)];
+            NSMenuItem *enabledSaveItem = UIHState.commandItems[@(saveCommandIdentity)];
+            if (editedMainWindow == nil || editedGreeting == nil || enabledSaveItem == nil) {
+              UIHTestFail(@"native scene disappeared before keyboard-equivalent validation");
+              [NSApplication.sharedApplication stop:nil];
+              return;
+            }
+            NSString *greeting = ((NSTextField *)editedGreeting.view).stringValue;
+            if (![greeting isEqualToString:@"Hello, Ada!"]) {
+              UIHTestFail(@"text delegate callback did not reconcile the greeting label");
+            }
+            if (!enabledSaveItem.enabled) {
+              UIHTestFail(@"Save command unexpectedly disabled before keyboard dispatch");
+            }
+
+            NSEvent *commandS =
+                [NSEvent keyEventWithType:NSEventTypeKeyDown
+                                 location:NSZeroPoint
+                            modifierFlags:NSEventModifierFlagCommand
+                                timestamp:NSProcessInfo.processInfo.systemUptime
+                             windowNumber:editedMainWindow.window.windowNumber
+                                  context:nil
+                               characters:@"s"
+              charactersIgnoringModifiers:@"s"
+                                isARepeat:NO
+                                  keyCode:1];
+            if (![NSApplication.sharedApplication.mainMenu performKeyEquivalent:commandS]) {
+              UIHTestFail(@"AppKit main menu did not handle the Command-S key equivalent");
+            }
+
+            UIHTestAfter(0.12, ^{
+              UIHMacWindowHandle *savedMainWindow = UIHState.windows[@(mainWindowIdentity)];
+              NSMenuItem *disabledSaveItem = UIHState.commandItems[@(saveCommandIdentity)];
+              if (savedMainWindow == nil || disabledSaveItem == nil) {
+                UIHTestFail(@"main window or Save command disappeared after keyboard dispatch");
+                [NSApplication.sharedApplication stop:nil];
+                return;
+              }
+              if ([savedMainWindow.window.title containsString:@"Edited"] ||
+                  disabledSaveItem.enabled) {
+                UIHTestFail(@"Command-S did not reconcile saved state into window and menu");
+              }
+              [savedMainWindow.window performClose:nil];
+
+              UIHTestAfter(0.50, ^{
+                if (UIHState != nil) {
+                  UIHTestFail(@"vertical validation timed out before the application stopped");
+                  [NSApplication.sharedApplication stop:nil];
+                }
+              });
+            });
+          });
+        });
+      });
 }

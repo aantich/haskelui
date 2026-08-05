@@ -29,6 +29,15 @@ typedef struct UIHMacRect {
   double height;
 } UIHMacRect;
 
+typedef struct UIHMacDebugCounters {
+  int32_t windows;
+  int32_t controls;
+  int32_t action_targets;
+  int32_t window_delegates;
+  int32_t queued_callbacks;
+  int32_t test_failures;
+} UIHMacDebugCounters;
+
 int32_t uih_macos_initialize(UIHMacEventCallback callback, void *context);
 void uih_macos_run(void);
 void uih_macos_stop(void);
@@ -72,6 +81,9 @@ void uih_macos_control_set_text(
 void uih_macos_control_set_frame(UIHMacControlRef control, const UIHMacRect *frame);
 void uih_macos_control_set_enabled(UIHMacControlRef control, int32_t enabled);
 void uih_macos_control_focus(UIHMacWindowRef window, UIHMacControlRef control);
+void uih_macos_control_set_next_key(
+    UIHMacControlRef control,
+    UIHMacControlRef next_control);
 void uih_macos_control_destroy(UIHMacControlRef control);
 
 void uih_macos_command_set(
@@ -80,6 +92,15 @@ void uih_macos_command_set(
     const char *utf8_key_equivalent,
     int32_t enabled);
 void uih_macos_command_remove(uint64_t identity);
+
+/* Diagnostic API used by the native backend's deterministic integration test. */
+void uih_macos_debug_counters(UIHMacDebugCounters *counters);
+const char *uih_macos_test_last_failure(void);
+void uih_macos_test_schedule_vertical_script(
+    uint64_t main_window_identity,
+    uint64_t name_field_identity,
+    uint64_t greeting_label_identity,
+    uint64_t save_command_identity);
 
 #ifdef __cplusplus
 }

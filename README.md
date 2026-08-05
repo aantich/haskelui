@@ -33,6 +33,12 @@ stack exec uih-appkit-vertical
 
 It opens two native windows and exercises retained native controls, shared menu/button commands, model-driven updates, declarative window lifetime, and close veto.
 
+The native test deterministically exercises AppKit callbacks, focus, accessibility identity, Command-S routing, close veto, and zero-resource shutdown. The candidate macOS 13 deployment floor has a separate isolated build/test and Mach-O inspection gate:
+
+```console
+tests/macos/validate-deployment-target.sh 13.0
+```
+
 ## Design documents
 
 - [Architecture proposal](docs/design/architecture.md)

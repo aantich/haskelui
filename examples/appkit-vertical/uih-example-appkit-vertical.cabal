@@ -18,6 +18,23 @@ source-repository head
   type: git
   location: https://github.com/aantich/uih
 
+library
+  exposed-modules:
+      Example.AppKitVertical
+  other-modules:
+      Paths_uih_example_appkit_vertical
+  autogen-modules:
+      Paths_uih_example_appkit_vertical
+  hs-source-dirs:
+      src
+  build-depends:
+      base >=4.20.2 && <4.21
+    , text
+    , uih-backend-appkit
+    , uih-core
+    , uih-runtime
+  default-language: Haskell2010
+
 executable uih-appkit-vertical
   main-is: Main.hs
   other-modules:
@@ -32,6 +49,27 @@ executable uih-appkit-vertical
     , text
     , uih-backend-appkit
     , uih-core
+    , uih-example-appkit-vertical
+    , uih-runtime
+  default-language: Haskell2010
+  if !os(darwin)
+    buildable: False
+
+test-suite appkit-vertical-native-test
+  type: exitcode-stdio-1.0
+  main-is: Spec.hs
+  other-modules:
+      Paths_uih_example_appkit_vertical
+  autogen-modules:
+      Paths_uih_example_appkit_vertical
+  hs-source-dirs:
+      test
+  build-depends:
+      base >=4.20.2 && <4.21
+    , text
+    , uih-backend-appkit
+    , uih-core
+    , uih-example-appkit-vertical
     , uih-runtime
   default-language: Haskell2010
   if !os(darwin)

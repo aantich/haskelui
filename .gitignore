@@ -1,6 +1,7 @@
 # Haskell build products
 .stack-work/
 **/.stack-work/
+**/.stack-work-*/
 dist/
 dist-newstyle/
 .cabal-sandbox/

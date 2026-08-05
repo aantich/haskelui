@@ -1,6 +1,6 @@
 # UIH Architecture Proposal
 
-Status: Draft for discussion, architecture revision 9  
+Status: Draft for discussion, architecture revision 10
 Audience: UIH users, contributors, and backend implementers  
 Scope: Public API, runtime architecture, backend boundaries, and initial delivery plan
 
@@ -1628,7 +1628,7 @@ Build narrow vertical slices for SDL3 and at least one native platform. Each sli
 
 These are architectural experiments, not production backends. Their purpose is to prove that semantic APIs and reconciliation operations map to genuinely different systems.
 
-The initial AppKit vertical slice now builds and renders two native windows through an Objective-C ARC shim, native label/button/text-field peers, command menu items and shortcuts, stable keyed reconciliation, and declarative window removal. Remaining conformance work for the slice is focus traversal automation, DPI/scale assertions, close-veto automation, and resource-counter assertions; these are required before calling the backend boundary fully validated.
+The initial AppKit vertical slice now builds and renders two native windows through an Objective-C ARC shim, native label/button/text-field peers, command menu items and shortcuts, stable keyed reconciliation, and declarative window removal. Its deterministic native suite validates accessibility identity/role, explicit focus transfer, dirty close veto, text delegate delivery, Haskell reconciliation, Command-S through `NSMenu`, final window removal, and zero backend-owned resources or queued callbacks at shutdown. An isolated macOS 13-targeted build runs the suite and verifies `minos 13.0` on the final executable plus project Objective-C/Haskell objects, with compatible `minos 11.0` objects sampled from the selected GHC 9.10.3 runtime. DPI/scale transitions, multi-monitor placement, IME, out-of-process Accessibility behavior, and actual execution on macOS 13 remain production conformance work.
 
 ### Phase 3: Common layout and display list
 
@@ -1780,11 +1780,10 @@ The lens representation, default dotted path syntax, distinct element-assignment
 
 11. Whether native leaf controls use common layout frames or selected native containers
 12. The Windows baseline: WinUI 3, Win32 plus modern graphics, or a layered combination
-13. The macOS bridge implementation language and ABI boundary
-14. The granularity at which native and custom elements may be mixed
-15. The first production text stack for the SDL3 backend
-16. Whether display-list types live in a separate public package or remain internal
-17. The application-thread, render-thread, and backend-event-loop ownership contract
+13. The granularity at which native and custom elements may be mixed
+14. The first production text stack for the SDL3 backend
+15. Whether display-list types live in a separate public package or remain internal
+16. The application-thread, render-thread, and backend-event-loop ownership contract
 
 Each consequential resolution should be recorded as an Architecture Decision Record.
 
@@ -1924,7 +1923,7 @@ The next artifacts should be created in this order:
 6. An ADR defining commands, focus scopes, and event routing
 7. An internal semantic IR proposal
 8. A scene-content and `SceneDriver` contract
-9. In progress: [ADR 0002](../adr/0002-backend-layout-and-appkit-c-bridge.md) and the AppKit vertical slice establish the first native adapter boundary; SDL3 and shared conformance work remain
+9. Completed for the initial native boundary: [ADR 0002](../adr/0002-backend-layout-and-appkit-c-bridge.md) and the automated AppKit vertical slice establish the first native adapter boundary; SDL3 and cross-backend conformance work remain
 10. A backend adapter contract generalized from headless, AppKit, and later SDL3 evidence
 11. A text and accessibility contract
 

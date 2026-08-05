@@ -13,14 +13,31 @@ dependencies:
   - uih-core
   - uih-runtime
 
+library:
+  source-dirs: src
+  exposed-modules:
+    - Example.AppKitVertical
+
 executables:
   uih-appkit-vertical:
     main: Main.hs
     source-dirs: app
+    dependencies:
+      - uih-example-appkit-vertical
     ghc-options:
       - -Wall
       - -Wcompat
       - -threaded
+    when:
+      - condition: '!os(darwin)'
+        buildable: false
+
+tests:
+  appkit-vertical-native-test:
+    main: Spec.hs
+    source-dirs: test
+    dependencies:
+      - uih-example-appkit-vertical
     when:
       - condition: '!os(darwin)'
         buildable: false

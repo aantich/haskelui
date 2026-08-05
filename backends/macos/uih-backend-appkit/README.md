@@ -21,7 +21,7 @@ cbits/compat/
   isolated availability and compatibility helpers
 ```
 
-The PoC currently inherits the build toolchain's deployment target. A production minimum must be configured across Objective-C, every Haskell object, the final link, and the selected GHC runtime—not only this package. Newer APIs must be guarded by native availability checks and reflected through `Internal.Capabilities`; application code must not branch on macOS versions directly.
+Ordinary development builds inherit the toolchain target. macOS 13 is the candidate production floor and has a separate validation build that applies `MACOSX_DEPLOYMENT_TARGET=13.0` across the Stack invocation, runs the native suite, checks project Objective-C/Haskell objects and the final executable with `vtool`, and verifies that representative selected-GHC base/RTS objects do not require a newer system. Runtime execution on a macOS 13 worker is still required before making a production support claim. Newer APIs must be guarded by native availability checks and reflected through `Internal.Capabilities`; application code must not branch on macOS versions directly.
 
 ## Run the vertical slice
 
@@ -30,6 +30,7 @@ From the repository root:
 ```console
 stack test
 stack exec uih-appkit-vertical
+tests/macos/validate-deployment-target.sh 13.0
 ```
 
 The example starts with two windows. Editing the text field changes shared model state; Save is shared by a native button and Command-S; the inspector is created and destroyed declaratively; closing the edited main window is vetoed until Save runs.
@@ -45,12 +46,16 @@ Implemented:
 - Close-request normalization
 - Explicit native create/update/destroy operations
 - Runtime macOS capability query
+- Stable native accessibility identities and roles
+- Explicit native key-view ordering
+- Deterministic native interaction test mode
+- Backend-owned resource and queued-callback counters
+- Reproducible macOS 13-targeted build and Mach-O inspection
 
 Still required before production use:
 
-- Automated native interaction and focus tests
-- IME and accessibility contracts
-- Native object and callback leak counters
+- Out-of-process accessibility and IME contracts
 - DPI/multi-monitor frame policy
+- Execution of the target-built suite on the oldest supported macOS release
 - `.app` bundle, signing, resources, and entitlements
 - A broader semantic control IR derived from more than one backend

@@ -159,6 +159,7 @@ createWindow spec =
       when (handle == nullPtr) (error "UIH AppKit failed to create NSWindow")
       controls <- foldM (createAndInsertControl handle) Map.empty spec.windowControls
       c_windowShow handle
+      configureControlNavigation handle controls spec.windowControls
       pure
         NativeWindow
           { nativeWindowHandle = handle
@@ -175,6 +176,7 @@ updateWindow native desired = do
       native.nativeWindowHandle
       native.nativeWindowControls
       desired.windowControls
+  configureControlNavigation native.nativeWindowHandle controls desired.windowControls
   pure
     native
       { nativeWindowSpec = desired
@@ -261,6 +263,36 @@ updateControl window native desired = do
 
 destroyControl :: NativeControl -> IO ()
 destroyControl = c_controlDestroy . nativeControlHandle
+
+configureControlNavigation
+  :: Ptr MacWindowHandle
+  -> Map ElementKey NativeControl
+  -> [Control]
+  -> IO ()
+configureControlNavigation window controls desired = do
+  case navigationHandles of
+    [] -> pure ()
+    [_] -> pure ()
+    handles ->
+      forM_ (zip handles (drop 1 handles <> take 1 handles)) $ \(current, next) ->
+        c_controlSetNextKey current next
+  forM_ desired $ \case
+    TextField key _ _ _ True ->
+      forM_ (Map.lookup key controls) $ \native ->
+        c_controlFocus window native.nativeControlHandle
+    _ -> pure ()
+  where
+    navigationHandles =
+      [ native.nativeControlHandle
+      | control <- desired
+      , isKeyboardControl control
+      , Just native <- [Map.lookup (controlKey control) controls]
+      ]
+
+isKeyboardControl :: Control -> Bool
+isKeyboardControl Button {} = True
+isKeyboardControl TextField {} = True
+isKeyboardControl Label {} = False
 
 controlKey :: Control -> ElementKey
 controlKey = \case

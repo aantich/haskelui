@@ -66,10 +66,13 @@ The initial implementation proves:
 - AppKit and Foundation framework linkage works under system GHC 9.10.3.
 - A bare Haskell executable can start the AppKit event loop.
 - Two native windows and retained native label, button, and text-field peers render.
-- Menus, key equivalents, runtime capability queries, and explicit peer teardown compile behind the C ABI.
+- Menus, key equivalents, runtime capability queries, accessibility identities, explicit focus order, and explicit peer teardown operate behind the C ABI.
 - The platform-independent core/runtime and headless backend build without AppKit imports.
+- A deterministic native driver exercises dirty-window close veto, text-field delegate delivery, Haskell reconciliation, Command-S through the AppKit menu, focus transfer, and successful final close.
+- Shutdown counters prove release of backend-owned windows, controls, target/action objects, window-delegate attachments, and queued callbacks.
+- An isolated Stack build with `MACOSX_DEPLOYMENT_TARGET=13.0` produces a final executable plus Objective-C and Haskell objects whose Mach-O load commands report `minos 13.0`; representative objects from the selected GHC 9.10.3 base and threaded RTS archives report the compatible older floor `11.0`.
 
-This is vertical-slice evidence, not a production claim. Automated native interaction and lifetime conformance remain required.
+The target-built native suite also passes on the development host. This remains vertical-slice evidence, not a claim that the executable has been run on macOS 13 hardware or a macOS 13 virtual machine.
 
 ## Alternatives considered
 
@@ -97,11 +100,10 @@ Rejected because it duplicates reconciliation and guarantees drift. Capability a
 - Adding a native operation requires coordinated C-header, Objective-C, and Haskell-FFI changes.
 - Runtime capability data becomes part of backend diagnostics and conformance testing.
 
-## Remaining implementation decisions
+## Follow-up implementation decisions
 
 Each unresolved item has a current direction:
 
-1. **Minimum macOS deployment target.** This determines which APIs may be strongly linked and how many compatibility paths require testing. Supporting an older release broadens reach but increases test and fallback cost. The PoC currently inherits the toolchain target: applying a linker flag only to the AppKit package produced correctly diagnosed mixed-object target warnings because Haskell objects and the GHC runtime were built differently. The recommendation is to evaluate macOS 13 first, but claim it only after one deployment setting is applied across Objective-C compilation, all Haskell compilation, final linking, and CI execution on a compatible machine.
+1. **Formal macOS support floor.** This determines which APIs may be strongly linked and how many compatibility paths require testing. Supporting an older release broadens reach but increases test and fallback cost. macOS 13 is now the candidate floor: the repository has a reproducible isolated build, native test, and Mach-O inspection gate that covers project Objective-C, project Haskell, the final link, and compatibility of representative selected-GHC runtime objects. That does not prove execution on macOS 13. The recommendation is to declare macOS 13 production-supported only after the same native suite passes on an actual or virtual macOS 13 CI worker; if that worker cannot be maintained, raise the declared floor rather than publishing an untested compatibility promise.
 2. **Application bundle packaging.** The bare executable is sufficient for ABI and event-loop proof but not for icons, entitlements, localization resources, document types, signing, or distribution. Alternatives are an Xcode-owned launcher or a generated `.app` bundle around the Cabal-built binary. The recommendation is to keep compilation in Stack/Cabal and add a deterministic bundle-packaging step once the backend contract stabilizes.
-3. **Callback conformance automation.** Visual rendering is proven, but menu shortcuts, text editing, close veto, focus traversal, and stale-callback behavior need repeatable tests. The recommendation is a small backend test mode with native object/event counters plus macOS accessibility-driven integration tests, while pure event-to-transaction behavior remains covered headlessly.
-4. **Resource conformance.** Explicit destroy paths exist but leak-free teardown has not been measured. The recommendation is bridge-level live counters for windows, controls, targets, and queued callbacks, asserted at shutdown in debug/test builds before expanding the native control set.
+3. **External accessibility, IME, and display-environment conformance.** Stable accessibility IDs and native roles are now asserted in process, but that does not prove the complete out-of-process accessibility tree, input-method composition, screen-scale changes, or multi-monitor frame behavior. Alternatives are only in-process bridge tests, a permissioned macOS Accessibility client, or both. The recommendation is both: keep the deterministic in-process suite fast, then add a signed/bundled test host driven through the Accessibility API plus dedicated IME and scale-transition cases before calling text input and window placement production-ready.

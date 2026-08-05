@@ -2,7 +2,8 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
 
 module UIH.Backend.AppKit.Internal.FFI
-  ( CMacRect (..)
+  ( CDebugCounters (..)
+  , CMacRect (..)
   , EventCallback
   , MacControlHandle
   , MacWindowHandle
@@ -10,6 +11,7 @@ module UIH.Backend.AppKit.Internal.FFI
   , c_commandSet
   , c_controlDestroy
   , c_controlFocus
+  , c_controlSetNextKey
   , c_controlSetEnabled
   , c_controlSetFrame
   , c_controlSetText
@@ -17,10 +19,13 @@ module UIH.Backend.AppKit.Internal.FFI
   , c_createLabel
   , c_createTextField
   , c_createWindow
+  , c_debugCounters
   , c_initialize
   , c_run
   , c_shutdown
   , c_stop
+  , c_testLastFailure
+  , c_testScheduleVerticalScript
   , c_versionMajor
   , c_versionMinor
   , c_versionPatch
@@ -37,6 +42,7 @@ import Foreign
   , Storable (..)
   , alloca
   , pokeByteOff
+  , peekByteOff
   )
 import Foreign.C
   ( CDouble (..)
@@ -48,6 +54,34 @@ import UIH.Core (Rect (..))
 
 data MacWindowHandle
 data MacControlHandle
+
+data CDebugCounters = CDebugCounters
+  !CInt
+  !CInt
+  !CInt
+  !CInt
+  !CInt
+  !CInt
+  deriving stock (Eq, Show)
+
+instance Storable CDebugCounters where
+  sizeOf _ = 24
+  alignment _ = alignment (undefined :: CInt)
+  peek pointer =
+    CDebugCounters
+      <$> peekByteOff pointer 0
+      <*> peekByteOff pointer 4
+      <*> peekByteOff pointer 8
+      <*> peekByteOff pointer 12
+      <*> peekByteOff pointer 16
+      <*> peekByteOff pointer 20
+  poke pointer (CDebugCounters windows controls targets delegates callbacks failures) = do
+    pokeByteOff pointer 0 windows
+    pokeByteOff pointer 4 controls
+    pokeByteOff pointer 8 targets
+    pokeByteOff pointer 12 delegates
+    pokeByteOff pointer 16 callbacks
+    pokeByteOff pointer 20 failures
 
 data CMacRect = CMacRect
   !CDouble
@@ -136,6 +170,9 @@ foreign import ccall unsafe "uih_macos_control_set_enabled"
 foreign import ccall unsafe "uih_macos_control_focus"
   c_controlFocus :: Ptr MacWindowHandle -> Ptr MacControlHandle -> IO ()
 
+foreign import ccall unsafe "uih_macos_control_set_next_key"
+  c_controlSetNextKey :: Ptr MacControlHandle -> Ptr MacControlHandle -> IO ()
+
 foreign import ccall unsafe "uih_macos_control_destroy"
   c_controlDestroy :: Ptr MacControlHandle -> IO ()
 
@@ -144,3 +181,12 @@ foreign import ccall unsafe "uih_macos_command_set"
 
 foreign import ccall unsafe "uih_macos_command_remove"
   c_commandRemove :: Word64 -> IO ()
+
+foreign import ccall unsafe "uih_macos_debug_counters"
+  c_debugCounters :: Ptr CDebugCounters -> IO ()
+
+foreign import ccall unsafe "uih_macos_test_last_failure"
+  c_testLastFailure :: IO CString
+
+foreign import ccall unsafe "uih_macos_test_schedule_vertical_script"
+  c_testScheduleVerticalScript :: Word64 -> Word64 -> Word64 -> Word64 -> IO ()

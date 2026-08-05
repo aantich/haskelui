@@ -24,6 +24,7 @@ source-repository head
 library
   exposed-modules:
       UIH.Backend.AppKit
+      UIH.Backend.AppKit.Testing
   other-modules:
       UIH.Backend.AppKit.Internal.Capabilities
       UIH.Backend.AppKit.Internal.FFI
