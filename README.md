@@ -33,6 +33,14 @@ stack exec uih-appkit-vertical
 
 It opens two native windows and exercises retained native controls, shared menu/button commands, model-driven updates, declarative window lifetime, and close veto.
 
+The macOS multi-window text editor opens multiple UTF-8 files into independent native `NSTextView` windows and supports editing, dirty tracking, Command-S, file writes, and deferred dirty close:
+
+```console
+stack exec uih-text-editor
+```
+
+See [the editor V1/V2 contract](examples/text-editor/README.md).
+
 The native test deterministically exercises AppKit callbacks, focus, accessibility identity, Command-S routing, close veto, and zero-resource shutdown. The candidate macOS 13 deployment floor has a separate isolated build/test and Mach-O inspection gate:
 
 ```console
@@ -44,6 +52,7 @@ tests/macos/validate-deployment-target.sh 13.0
 - [Architecture proposal](docs/design/architecture.md)
 - [ADR 0001: pure bindings, transactions, and async validation](docs/adr/0001-pure-bindings-transactions-and-async-validation.md)
 - [ADR 0002: backend layout and the AppKit C bridge](docs/adr/0002-backend-layout-and-appkit-c-bridge.md)
+- [ADR 0003: explicit file effects and the native text-editor slice](docs/adr/0003-file-effects-and-native-text-editor.md)
 
 ## License
 

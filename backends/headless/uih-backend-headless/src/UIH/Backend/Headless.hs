@@ -21,6 +21,7 @@ newHeadlessBackend = do
           pure
             BackendSession
               { backendRender = writeIORef latestView . Just
+              , backendRequestOpenTextFiles = pure ()
               , backendRun = pure ()
               , backendStop = pure ()
               , backendShutdown = pure ()

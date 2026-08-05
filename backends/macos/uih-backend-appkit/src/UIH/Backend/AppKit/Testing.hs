@@ -3,7 +3,9 @@
 
 module UIH.Backend.AppKit.Testing
   ( AppKitDebugCounters (..)
+  , AppKitTextEditorTestSpec (..)
   , AppKitVerticalTestSpec (..)
+  , appKitBackendWithTextEditorTest
   , appKitBackendWithVerticalTest
   , appKitResourcesReleased
   , queryAppKitDebugCounters
@@ -22,6 +24,7 @@ import UIH.Backend.AppKit.Internal.FFI
   , c_debugCounters
   , c_testLastFailure
   , c_testScheduleVerticalScript
+  , c_testScheduleTextEditorScript
   )
 import UIH.Core
   ( CommandId (..)
@@ -37,6 +40,13 @@ data AppKitVerticalTestSpec = AppKitVerticalTestSpec
   , testNameField :: !ElementKey
   , testGreetingLabel :: !ElementKey
   , testSaveCommand :: !CommandId
+  }
+  deriving stock (Eq, Show)
+
+data AppKitTextEditorTestSpec = AppKitTextEditorTestSpec
+  { testDocumentWindow :: !WindowKey
+  , testTextEditor :: !ElementKey
+  , testEditorSaveCommand :: !CommandId
   }
   deriving stock (Eq, Show)
 
@@ -59,6 +69,16 @@ appKitBackendWithVerticalTest spec =
       spec.testNameField.unElementKey
       spec.testGreetingLabel.unElementKey
       spec.testSaveCommand.unCommandId
+    pure session
+
+appKitBackendWithTextEditorTest :: AppKitTextEditorTestSpec -> Backend
+appKitBackendWithTextEditorTest spec =
+  Backend $ \dispatch -> do
+    session <- appKitBackend.openBackend dispatch
+    c_testScheduleTextEditorScript
+      spec.testDocumentWindow.unWindowKey
+      spec.testTextEditor.unElementKey
+      spec.testEditorSaveCommand.unCommandId
     pure session
 
 queryAppKitDebugCounters :: IO AppKitDebugCounters

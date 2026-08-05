@@ -6,6 +6,7 @@ packages:
   - backends/headless/uih-backend-headless
   - backends/macos/uih-backend-appkit
   - examples/appkit-vertical
+  - examples/text-editor
   - spikes/property-api
   - spikes/public-api
 

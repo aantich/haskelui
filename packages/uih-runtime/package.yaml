@@ -8,6 +8,8 @@ copyright: 2026 UIH contributors
 
 dependencies:
   - base >= 4.20.2 && < 4.21
+  - bytestring
+  - text
   - uih-core
 
 ghc-options:
@@ -22,5 +24,6 @@ tests:
     main: Spec.hs
     source-dirs: test
     dependencies:
+      - directory
       - uih-core
       - uih-runtime

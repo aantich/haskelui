@@ -6,7 +6,8 @@
 typedef NS_ENUM(NSInteger, UIHMacControlKind) {
   UIHMacControlKindLabel,
   UIHMacControlKindButton,
-  UIHMacControlKindTextField
+  UIHMacControlKindTextField,
+  UIHMacControlKindTextEditor
 };
 
 @class UIHMacWindowHandle;
@@ -20,6 +21,7 @@ typedef NS_ENUM(NSInteger, UIHMacControlKind) {
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, id> *commandTargets;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, UIHMacWindowHandle *> *windows;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, UIHMacControlHandle *> *controls;
+@property(nonatomic, strong) NSOpenPanel *openPanel;
 @end
 
 @implementation UIHMacApplicationState
@@ -66,25 +68,13 @@ static void UIHEmit(int32_t kind, uint64_t identity, NSString *text) {
   });
 }
 
-@interface UIHMacActionTarget : NSObject <NSTextFieldDelegate>
+@interface UIHMacActionTarget : NSObject <NSTextFieldDelegate, NSTextViewDelegate>
 @property(nonatomic, assign) uint64_t identity;
 @property(nonatomic, assign) int32_t eventKind;
 - (void)performAction:(id)sender;
 @end
 
 @implementation UIHMacActionTarget
-- (instancetype)init {
-  self = [super init];
-  if (self != nil) {
-    UIHLiveActionTargets += 1;
-  }
-  return self;
-}
-
-- (void)dealloc {
-  UIHLiveActionTargets -= 1;
-}
-
 - (void)performAction:(id)sender {
   (void)sender;
   UIHEmit(self.eventKind, self.identity, @"");
@@ -93,6 +83,11 @@ static void UIHEmit(int32_t kind, uint64_t identity, NSString *text) {
 - (void)controlTextDidChange:(NSNotification *)notification {
   NSTextField *field = notification.object;
   UIHEmit(UIHMacEventTextChanged, self.identity, field.stringValue);
+}
+
+- (void)textDidChange:(NSNotification *)notification {
+  NSTextView *editor = notification.object;
+  UIHEmit(UIHMacEventTextChanged, self.identity, editor.string);
 }
 @end
 
@@ -105,6 +100,11 @@ static void UIHEmit(int32_t kind, uint64_t identity, NSString *text) {
   (void)sender;
   UIHEmit(UIHMacEventWindowCloseRequested, self.identity, @"");
   return NO;
+}
+
+- (void)windowDidBecomeKey:(NSNotification *)notification {
+  (void)notification;
+  UIHEmit(UIHMacEventWindowActivated, self.identity, @"");
 }
 @end
 
@@ -131,6 +131,7 @@ static void UIHEmit(int32_t kind, uint64_t identity, NSString *text) {
 @interface UIHMacControlHandle : NSObject
 @property(nonatomic, assign) uint64_t identity;
 @property(nonatomic, strong) NSView *view;
+@property(nonatomic, strong) NSView *focusView;
 @property(nonatomic, strong) UIHMacActionTarget *target;
 @property(nonatomic, assign) UIHMacControlKind kind;
 @end
@@ -210,7 +211,21 @@ void uih_macos_run(void) {
 
 void uih_macos_stop(void) {
   UIHAssertMainThread();
-  [NSApplication.sharedApplication stop:nil];
+  NSApplication *application = NSApplication.sharedApplication;
+  dispatch_async(dispatch_get_main_queue(), ^{
+    [application stop:nil];
+    NSEvent *wakeEvent =
+        [NSEvent otherEventWithType:NSEventTypeApplicationDefined
+                           location:NSZeroPoint
+                      modifierFlags:0
+                          timestamp:NSProcessInfo.processInfo.systemUptime
+                       windowNumber:0
+                            context:nil
+                            subtype:0
+                              data1:0
+                              data2:0];
+    [application postEvent:wakeEvent atStart:NO];
+  });
 }
 
 void uih_macos_shutdown(void) {
@@ -304,6 +319,7 @@ void uih_macos_window_destroy(UIHMacWindowRef reference) {
 
 static UIHMacControlRef UIHRetainControl(
     NSView *view,
+    NSView *focusView,
     UIHMacActionTarget *target,
     UIHMacControlKind kind,
     uint64_t identity,
@@ -311,19 +327,23 @@ static UIHMacControlRef UIHRetainControl(
   UIHMacControlHandle *handle = [[UIHMacControlHandle alloc] init];
   handle.identity = identity;
   handle.view = view;
+  handle.focusView = focusView;
   handle.target = target;
   handle.kind = kind;
-  view.accessibilityElement = YES;
-  view.accessibilityIdentifier = [NSString stringWithFormat:@"uih-control-%llu", identity];
+  focusView.accessibilityElement = YES;
+  focusView.accessibilityIdentifier = [NSString stringWithFormat:@"uih-control-%llu", identity];
   switch (kind) {
     case UIHMacControlKindLabel:
-      view.accessibilityRole = NSAccessibilityStaticTextRole;
+      focusView.accessibilityRole = NSAccessibilityStaticTextRole;
       break;
     case UIHMacControlKindButton:
-      view.accessibilityRole = NSAccessibilityButtonRole;
+      focusView.accessibilityRole = NSAccessibilityButtonRole;
       break;
     case UIHMacControlKindTextField:
-      view.accessibilityRole = NSAccessibilityTextFieldRole;
+      focusView.accessibilityRole = NSAccessibilityTextFieldRole;
+      break;
+    case UIHMacControlKindTextEditor:
+      focusView.accessibilityRole = NSAccessibilityTextAreaRole;
       break;
   }
   [UIHWindow(windowReference).window.contentView addSubview:view];
@@ -343,7 +363,7 @@ UIHMacControlRef uih_macos_label_create(
   label.selectable = NO;
   label.bezeled = NO;
   label.drawsBackground = NO;
-  return UIHRetainControl(label, nil, UIHMacControlKindLabel, identity, window);
+  return UIHRetainControl(label, label, nil, UIHMacControlKindLabel, identity, window);
 }
 
 UIHMacControlRef uih_macos_button_create(
@@ -354,6 +374,7 @@ UIHMacControlRef uih_macos_button_create(
     const UIHMacRect *frame) {
   UIHAssertMainThread();
   UIHMacActionTarget *target = [[UIHMacActionTarget alloc] init];
+  UIHLiveActionTargets += 1;
   target.identity = command_identity;
   target.eventKind = UIHMacEventCommand;
 
@@ -362,7 +383,7 @@ UIHMacControlRef uih_macos_button_create(
   button.bezelStyle = NSBezelStyleRounded;
   button.target = target;
   button.action = @selector(performAction:);
-  return UIHRetainControl(button, target, UIHMacControlKindButton, identity, window);
+  return UIHRetainControl(button, button, target, UIHMacControlKindButton, identity, window);
 }
 
 UIHMacControlRef uih_macos_text_field_create(
@@ -373,6 +394,7 @@ UIHMacControlRef uih_macos_text_field_create(
     const UIHMacRect *frame) {
   UIHAssertMainThread();
   UIHMacActionTarget *target = [[UIHMacActionTarget alloc] init];
+  UIHLiveActionTargets += 1;
   target.identity = identity;
   target.eventKind = UIHMacEventTextChanged;
 
@@ -380,7 +402,53 @@ UIHMacControlRef uih_macos_text_field_create(
   field.stringValue = UIHString(utf8_text);
   field.placeholderString = UIHString(utf8_placeholder);
   field.delegate = target;
-  return UIHRetainControl(field, target, UIHMacControlKindTextField, identity, window);
+  return UIHRetainControl(field, field, target, UIHMacControlKindTextField, identity, window);
+}
+
+UIHMacControlRef uih_macos_text_editor_create(
+    UIHMacWindowRef window,
+    uint64_t identity,
+    const char *utf8_text,
+    const UIHMacRect *frame) {
+  UIHAssertMainThread();
+  UIHMacActionTarget *target = [[UIHMacActionTarget alloc] init];
+  UIHLiveActionTargets += 1;
+  target.identity = identity;
+  target.eventKind = UIHMacEventTextChanged;
+
+  NSScrollView *scrollView = [[NSScrollView alloc] initWithFrame:UIHRect(frame)];
+  scrollView.borderType = NSBezelBorder;
+  scrollView.hasVerticalScroller = YES;
+  scrollView.hasHorizontalScroller = NO;
+  scrollView.autohidesScrollers = YES;
+  scrollView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+
+  NSRect editorFrame = NSMakeRect(0, 0, frame->width, frame->height);
+  NSTextView *editor = [[NSTextView alloc] initWithFrame:editorFrame];
+  editor.string = UIHString(utf8_text);
+  editor.delegate = target;
+  editor.richText = NO;
+  editor.allowsUndo = YES;
+  editor.usesFindBar = YES;
+  editor.automaticQuoteSubstitutionEnabled = NO;
+  editor.automaticDashSubstitutionEnabled = NO;
+  editor.font = [NSFont monospacedSystemFontOfSize:13 weight:NSFontWeightRegular];
+  editor.minSize = NSMakeSize(0, frame->height);
+  editor.maxSize = NSMakeSize(CGFLOAT_MAX, CGFLOAT_MAX);
+  editor.verticallyResizable = YES;
+  editor.horizontallyResizable = NO;
+  editor.autoresizingMask = NSViewWidthSizable;
+  editor.textContainer.containerSize = NSMakeSize(frame->width, CGFLOAT_MAX);
+  editor.textContainer.widthTracksTextView = YES;
+  scrollView.documentView = editor;
+
+  return UIHRetainControl(
+      scrollView,
+      editor,
+      target,
+      UIHMacControlKindTextEditor,
+      identity,
+      window);
 }
 
 void uih_macos_control_set_text(UIHMacControlRef reference, const char *utf8_text) {
@@ -396,6 +464,19 @@ void uih_macos_control_set_text(UIHMacControlRef reference, const char *utf8_tex
       NSTextField *field = (NSTextField *)handle.view;
       if (![field.stringValue isEqualToString:value]) {
         field.stringValue = value;
+      }
+      break;
+    }
+    case UIHMacControlKindTextEditor: {
+      NSTextView *editor = (NSTextView *)handle.focusView;
+      if (![editor.string isEqualToString:value]) {
+        NSRange selection = editor.selectedRange;
+        editor.string = value;
+        if (selection.location <= editor.string.length) {
+          NSUInteger remaining = editor.string.length - selection.location;
+          selection.length = MIN(selection.length, remaining);
+          editor.selectedRange = selection;
+        }
       }
       break;
     }
@@ -417,14 +498,14 @@ void uih_macos_control_set_enabled(UIHMacControlRef reference, int32_t enabled) 
 
 void uih_macos_control_focus(UIHMacWindowRef window, UIHMacControlRef control) {
   UIHAssertMainThread();
-  [UIHWindow(window).window makeFirstResponder:UIHControl(control).view];
+  [UIHWindow(window).window makeFirstResponder:UIHControl(control).focusView];
 }
 
 void uih_macos_control_set_next_key(
     UIHMacControlRef reference,
     UIHMacControlRef nextReference) {
   UIHAssertMainThread();
-  UIHControl(reference).view.nextKeyView = UIHControl(nextReference).view;
+  UIHControl(reference).focusView.nextKeyView = UIHControl(nextReference).focusView;
 }
 
 void uih_macos_control_destroy(UIHMacControlRef reference) {
@@ -437,12 +518,19 @@ void uih_macos_control_destroy(UIHMacControlRef reference) {
   if ([handle.view isKindOfClass:NSTextField.class]) {
     ((NSTextField *)handle.view).delegate = nil;
   }
+  if ([handle.focusView isKindOfClass:NSTextView.class]) {
+    ((NSTextView *)handle.focusView).delegate = nil;
+  }
   if ([handle.view isKindOfClass:NSControl.class]) {
     ((NSControl *)handle.view).target = nil;
     ((NSControl *)handle.view).action = nil;
   }
   [handle.view removeFromSuperview];
-  handle.target = nil;
+  if (handle.target != nil) {
+    handle.target = nil;
+    UIHLiveActionTargets -= 1;
+  }
+  handle.focusView = nil;
   handle.view = nil;
 }
 
@@ -456,6 +544,7 @@ void uih_macos_command_set(
   NSMenuItem *item = UIHState.commandItems[key];
   if (item == nil) {
     UIHMacActionTarget *target = [[UIHMacActionTarget alloc] init];
+    UIHLiveActionTargets += 1;
     target.identity = identity;
     target.eventKind = UIHMacEventCommand;
     item = [[NSMenuItem alloc] initWithTitle:@"" action:@selector(performAction:) keyEquivalent:@""];
@@ -480,7 +569,31 @@ void uih_macos_command_remove(uint64_t identity) {
   item.target = nil;
   [UIHState.fileMenu removeItem:item];
   [UIHState.commandItems removeObjectForKey:key];
+  if (UIHState.commandTargets[key] != nil) {
+    UIHLiveActionTargets -= 1;
+  }
   [UIHState.commandTargets removeObjectForKey:key];
+}
+
+void uih_macos_open_text_files(void) {
+  UIHAssertMainThread();
+  NSOpenPanel *panel = [NSOpenPanel openPanel];
+  panel.canChooseFiles = YES;
+  panel.canChooseDirectories = NO;
+  panel.allowsMultipleSelection = YES;
+  panel.resolvesAliases = YES;
+  panel.title = @"Open Text Files";
+  panel.prompt = @"Open";
+  UIHState.openPanel = panel;
+  [panel beginWithCompletionHandler:^(NSModalResponse response) {
+    UIHState.openPanel = nil;
+    if (response != NSModalResponseOK) {
+      return;
+    }
+    for (NSURL *url in panel.URLs) {
+      UIHEmit(UIHMacEventTextFileChosen, 0, url.path);
+    }
+  }];
 }
 
 static void UIHTestFail(NSString *message) {
@@ -650,4 +763,97 @@ void uih_macos_test_schedule_vertical_script(
           });
         });
       });
+}
+
+void uih_macos_test_schedule_text_editor_script(
+    uint64_t documentWindowIdentity,
+    uint64_t editorIdentity,
+    uint64_t saveCommandIdentity) {
+  UIHAssertMainThread();
+
+  UIHTestAfter(0.10, ^{
+    UIHMacWindowHandle *documentWindow = UIHState.windows[@(documentWindowIdentity)];
+    UIHMacControlHandle *editorHandle = UIHState.controls[@(editorIdentity)];
+    NSMenuItem *saveItem = UIHState.commandItems[@(saveCommandIdentity)];
+    if (documentWindow == nil || editorHandle == nil || saveItem == nil ||
+        editorHandle.kind != UIHMacControlKindTextEditor) {
+      UIHTestFail(@"native text editor scene was not registered");
+      [NSApplication.sharedApplication stop:nil];
+      return;
+    }
+
+    NSTextView *editor = (NSTextView *)editorHandle.focusView;
+    NSString *expectedIdentifier =
+        [NSString stringWithFormat:@"uih-control-%llu", editorIdentity];
+    if (![editor.accessibilityIdentifier isEqualToString:expectedIdentifier] ||
+        ![editor.accessibilityRole isEqualToString:NSAccessibilityTextAreaRole]) {
+      UIHTestFail(@"native text editor accessibility identity or role is incorrect");
+    }
+    uih_macos_open_text_files();
+    if (UIHState.openPanel == nil || !UIHState.openPanel.visible) {
+      UIHTestFail(@"native multi-file Open panel did not become visible");
+    }
+    [UIHState.openPanel cancel:nil];
+    [documentWindow.window makeKeyAndOrderFront:nil];
+    if (![documentWindow.window makeFirstResponder:editor] ||
+        !UIHResponderBelongsToView(documentWindow.window.firstResponder, editor)) {
+      UIHTestFail(@"native text editor could not become first responder");
+    }
+
+    editor.string = @"module Saved where\nanswer = 42\n";
+    [editor.delegate textDidChange:
+        [NSNotification notificationWithName:NSTextDidChangeNotification object:editor]];
+
+    UIHTestAfter(0.12, ^{
+      UIHMacWindowHandle *editedWindow = UIHState.windows[@(documentWindowIdentity)];
+      NSMenuItem *enabledSaveItem = UIHState.commandItems[@(saveCommandIdentity)];
+      if (editedWindow == nil || enabledSaveItem == nil) {
+        UIHTestFail(@"text editor scene disappeared after native edit callback");
+        [NSApplication.sharedApplication stop:nil];
+        return;
+      }
+      if (![editedWindow.window.title containsString:@"Edited"] || !enabledSaveItem.enabled) {
+        UIHTestFail(@"native text edit did not reconcile dirty document state");
+      }
+
+      NSEvent *commandS =
+          [NSEvent keyEventWithType:NSEventTypeKeyDown
+                           location:NSZeroPoint
+                      modifierFlags:NSEventModifierFlagCommand
+                          timestamp:NSProcessInfo.processInfo.systemUptime
+                       windowNumber:editedWindow.window.windowNumber
+                            context:nil
+                         characters:@"s"
+        charactersIgnoringModifiers:@"s"
+                          isARepeat:NO
+                            keyCode:1];
+      if (![NSApplication.sharedApplication.mainMenu performKeyEquivalent:commandS]) {
+        UIHTestFail(@"text editor Save command did not handle Command-S");
+      }
+
+      UIHTestAfter(0.12, ^{
+        UIHMacWindowHandle *savedWindow = UIHState.windows[@(documentWindowIdentity)];
+        NSMenuItem *disabledSaveItem = UIHState.commandItems[@(saveCommandIdentity)];
+        if (savedWindow == nil || disabledSaveItem == nil) {
+          UIHTestFail(@"text editor scene disappeared after Save");
+          [NSApplication.sharedApplication stop:nil];
+          return;
+        }
+        if ([savedWindow.window.title containsString:@"Edited"] || disabledSaveItem.enabled) {
+          UIHTestFail(@"successful file write did not reconcile saved document state");
+        }
+        [savedWindow.window performClose:nil];
+
+        UIHTestAfter(0.30, ^{
+          if (UIHState != nil && UIHState.windows[@(documentWindowIdentity)] != nil) {
+            UIHTestFail(@"saved document close request did not remove its native window");
+            [NSApplication.sharedApplication stop:nil];
+          } else if (UIHState != nil) {
+            UIHTestFail(@"last document closed but the application did not stop");
+            [NSApplication.sharedApplication stop:nil];
+          }
+        });
+      });
+    });
+  });
 }

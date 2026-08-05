@@ -30,6 +30,7 @@ From the repository root:
 ```console
 stack test
 stack exec uih-appkit-vertical
+stack exec uih-text-editor
 tests/macos/validate-deployment-target.sh 13.0
 ```
 
@@ -42,7 +43,10 @@ Implemented:
 - AppKit-owned main event loop
 - Multiple retained native windows
 - Native labels, buttons, and text fields
+- Native scrolling multiline text editors
 - File-menu commands and key equivalents
+- Native multiple-selection text-file Open panel
+- Window activation events for focused command routing
 - Close-request normalization
 - Explicit native create/update/destroy operations
 - Runtime macOS capability query

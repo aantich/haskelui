@@ -13,7 +13,9 @@ typedef void *UIHMacControlRef;
 typedef enum UIHMacEventKind {
   UIHMacEventCommand = 1,
   UIHMacEventTextChanged = 2,
-  UIHMacEventWindowCloseRequested = 3
+  UIHMacEventWindowCloseRequested = 3,
+  UIHMacEventWindowActivated = 4,
+  UIHMacEventTextFileChosen = 5
 } UIHMacEventKind;
 
 typedef void (*UIHMacEventCallback)(
@@ -75,6 +77,11 @@ UIHMacControlRef uih_macos_text_field_create(
     const char *utf8_text,
     const char *utf8_placeholder,
     const UIHMacRect *frame);
+UIHMacControlRef uih_macos_text_editor_create(
+    UIHMacWindowRef window,
+    uint64_t identity,
+    const char *utf8_text,
+    const UIHMacRect *frame);
 void uih_macos_control_set_text(
     UIHMacControlRef control,
     const char *utf8_text);
@@ -92,6 +99,7 @@ void uih_macos_command_set(
     const char *utf8_key_equivalent,
     int32_t enabled);
 void uih_macos_command_remove(uint64_t identity);
+void uih_macos_open_text_files(void);
 
 /* Diagnostic API used by the native backend's deterministic integration test. */
 void uih_macos_debug_counters(UIHMacDebugCounters *counters);
@@ -100,6 +108,10 @@ void uih_macos_test_schedule_vertical_script(
     uint64_t main_window_identity,
     uint64_t name_field_identity,
     uint64_t greeting_label_identity,
+    uint64_t save_command_identity);
+void uih_macos_test_schedule_text_editor_script(
+    uint64_t document_window_identity,
+    uint64_t editor_identity,
     uint64_t save_command_identity);
 
 #ifdef __cplusplus

@@ -26,7 +26,8 @@ import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
-import qualified Data.Text.Encoding as Text
+import qualified Data.Text as Text
+import qualified Data.Text.Encoding as TextEncoding
 import Data.Text.Encoding.Error (lenientDecode)
 import Data.Word (Word64)
 import Foreign.C (CInt, CString)
@@ -79,6 +80,7 @@ openAppKit dispatch = do
   pure
     BackendSession
       { backendRender = reconcile stateReference
+      , backendRequestOpenTextFiles = c_openTextFiles
       , backendRun = c_run
       , backendStop = c_stop
       , backendShutdown = shutdown stateReference callback
@@ -98,6 +100,10 @@ receiveEvent dispatch _ eventKind identity textPointer =
       changedText <- decodeText textPointer
       dispatch (TextChanged (ElementKey identity) changedText)
     3 -> dispatch (WindowCloseRequested (WindowKey identity))
+    4 -> dispatch (WindowActivated (WindowKey identity))
+    5 -> do
+      path <- decodeText textPointer
+      dispatch (TextFileChosen (Text.unpack path))
     _ -> pure ()
 
 reconcile :: IORef AppKitState -> AppView -> IO ()
@@ -242,6 +248,13 @@ createControl window spec = do
                 c_createTextField window key.unElementKey text placeholder
         when focused (c_controlFocus window created)
         pure created
+      TextEditor key frame editorText focused -> do
+        created <-
+          withText editorText $ \text ->
+            withMacRect frame $
+              c_createTextEditor window key.unElementKey text
+        when focused (c_controlFocus window created)
+        pure created
   when (handle == nullPtr) (error "UIH AppKit failed to create native control")
   pure (NativeControl handle spec)
 
@@ -257,6 +270,8 @@ updateControl window native desired = do
     Button _ _ _ _ enabled ->
       c_controlSetEnabled native.nativeControlHandle (booleanInt enabled)
     TextField _ _ _ _ focused ->
+      when focused (c_controlFocus window native.nativeControlHandle)
+    TextEditor _ _ _ focused ->
       when focused (c_controlFocus window native.nativeControlHandle)
     Label {} -> pure ()
   pure native {nativeControlSpec = desired}
@@ -280,6 +295,9 @@ configureControlNavigation window controls desired = do
     TextField key _ _ _ True ->
       forM_ (Map.lookup key controls) $ \native ->
         c_controlFocus window native.nativeControlHandle
+    TextEditor key _ _ True ->
+      forM_ (Map.lookup key controls) $ \native ->
+        c_controlFocus window native.nativeControlHandle
     _ -> pure ()
   where
     navigationHandles =
@@ -292,6 +310,7 @@ configureControlNavigation window controls desired = do
 isKeyboardControl :: Control -> Bool
 isKeyboardControl Button {} = True
 isKeyboardControl TextField {} = True
+isKeyboardControl TextEditor {} = True
 isKeyboardControl Label {} = False
 
 controlKey :: Control -> ElementKey
@@ -299,18 +318,21 @@ controlKey = \case
   Label key _ _ -> key
   Button key _ _ _ _ -> key
   TextField key _ _ _ _ -> key
+  TextEditor key _ _ _ -> key
 
 controlFrame :: Control -> Rect
 controlFrame = \case
   Label _ frame _ -> frame
   Button _ frame _ _ _ -> frame
   TextField _ frame _ _ _ -> frame
+  TextEditor _ frame _ _ -> frame
 
 controlText :: Control -> Text
 controlText = \case
   Label _ _ text -> text
   Button _ _ text _ _ -> text
   TextField _ _ text _ _ -> text
+  TextEditor _ _ text _ -> text
 
 controlsCompatible :: Control -> Control -> Bool
 controlsCompatible (Label {}) (Label {}) = True
@@ -318,6 +340,7 @@ controlsCompatible (Button _ _ _ oldCommand _) (Button _ _ _ newCommand _) =
   oldCommand == newCommand
 controlsCompatible (TextField _ _ _ oldPlaceholder _) (TextField _ _ _ newPlaceholder _) =
   oldPlaceholder == newPlaceholder
+controlsCompatible (TextEditor {}) (TextEditor {}) = True
 controlsCompatible _ _ = False
 
 shutdown :: IORef AppKitState -> FunPtr EventCallback -> IO ()
@@ -330,13 +353,13 @@ shutdown stateReference callback = do
   freeHaskellFunPtr callback
 
 withText :: Text -> (CString -> IO result) -> IO result
-withText value = ByteString.useAsCString (Text.encodeUtf8 value)
+withText value = ByteString.useAsCString (TextEncoding.encodeUtf8 value)
 
 decodeText :: CString -> IO Text
 decodeText pointer
   | pointer == nullPtr = pure ""
   | otherwise =
-      Text.decodeUtf8With lenientDecode <$> ByteString.packCString pointer
+        TextEncoding.decodeUtf8With lenientDecode <$> ByteString.packCString pointer
 
 booleanInt :: Bool -> CInt
 booleanInt True = 1

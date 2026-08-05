@@ -18,14 +18,17 @@ module UIH.Backend.AppKit.Internal.FFI
   , c_createButton
   , c_createLabel
   , c_createTextField
+  , c_createTextEditor
   , c_createWindow
   , c_debugCounters
   , c_initialize
+  , c_openTextFiles
   , c_run
   , c_shutdown
   , c_stop
   , c_testLastFailure
   , c_testScheduleVerticalScript
+  , c_testScheduleTextEditorScript
   , c_versionMajor
   , c_versionMinor
   , c_versionPatch
@@ -158,6 +161,9 @@ foreign import ccall unsafe "uih_macos_button_create"
 foreign import ccall unsafe "uih_macos_text_field_create"
   c_createTextField :: Ptr MacWindowHandle -> Word64 -> CString -> CString -> Ptr CMacRect -> IO (Ptr MacControlHandle)
 
+foreign import ccall unsafe "uih_macos_text_editor_create"
+  c_createTextEditor :: Ptr MacWindowHandle -> Word64 -> CString -> Ptr CMacRect -> IO (Ptr MacControlHandle)
+
 foreign import ccall unsafe "uih_macos_control_set_text"
   c_controlSetText :: Ptr MacControlHandle -> CString -> IO ()
 
@@ -182,6 +188,9 @@ foreign import ccall unsafe "uih_macos_command_set"
 foreign import ccall unsafe "uih_macos_command_remove"
   c_commandRemove :: Word64 -> IO ()
 
+foreign import ccall unsafe "uih_macos_open_text_files"
+  c_openTextFiles :: IO ()
+
 foreign import ccall unsafe "uih_macos_debug_counters"
   c_debugCounters :: Ptr CDebugCounters -> IO ()
 
@@ -190,3 +199,6 @@ foreign import ccall unsafe "uih_macos_test_last_failure"
 
 foreign import ccall unsafe "uih_macos_test_schedule_vertical_script"
   c_testScheduleVerticalScript :: Word64 -> Word64 -> Word64 -> Word64 -> IO ()
+
+foreign import ccall unsafe "uih_macos_test_schedule_text_editor_script"
+  c_testScheduleTextEditorScript :: Word64 -> Word64 -> Word64 -> IO ()

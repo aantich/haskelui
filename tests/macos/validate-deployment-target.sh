@@ -11,13 +11,14 @@ cd "$repo_root"
 
 echo "Building and testing UIH with MACOSX_DEPLOYMENT_TARGET=$target in $work_dir"
 MACOSX_DEPLOYMENT_TARGET="$target" \
-  stack --work-dir "$work_dir" test uih-example-appkit-vertical
+  stack --work-dir "$work_dir" test uih-example-appkit-vertical uih-example-text-editor
 
 install_root="$({
   MACOSX_DEPLOYMENT_TARGET="$target" \
     stack --work-dir "$work_dir" path --local-install-root
 } 2>/dev/null)"
 binary="$install_root/bin/uih-appkit-vertical"
+editor_binary="$install_root/bin/uih-text-editor"
 
 first_match() {
   local search_root="$1"
@@ -56,6 +57,7 @@ verify_compatible_minos() {
 }
 
 verify_minos "$binary"
+verify_minos "$editor_binary"
 verify_minos "$appkit_object"
 verify_minos "$core_object"
 verify_minos "$runtime_object"

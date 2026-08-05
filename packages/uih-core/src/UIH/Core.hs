@@ -8,6 +8,8 @@ module UIH.Core
   , CommandId (..)
   , CommandSpec (..)
   , Control (..)
+  , Effect (..)
+  , EffectKey (..)
   , ElementKey (..)
   , Rect (..)
   , Transaction (..)
@@ -19,7 +21,9 @@ module UIH.Core
   , action
   , applyTransaction
   , noTransaction
+  , requestEffect
   , transaction
+  , transactionWithEffects
   ) where
 
 import Data.Text (Text)
@@ -32,6 +36,9 @@ newtype ElementKey = ElementKey {unElementKey :: Word64}
   deriving stock (Eq, Ord, Show)
 
 newtype CommandId = CommandId {unCommandId :: Word64}
+  deriving stock (Eq, Ord, Show)
+
+newtype EffectKey = EffectKey {unEffectKey :: Word64}
   deriving stock (Eq, Ord, Show)
 
 data Rect = Rect
@@ -57,6 +64,11 @@ data Control
       !ElementKey
       !Rect
       !Text
+      !Text
+      !Bool
+  | TextEditor
+      !ElementKey
+      !Rect
       !Text
       !Bool
   deriving stock (Eq, Show)
@@ -87,6 +99,16 @@ data UIEvent
   = CommandInvoked !CommandId
   | TextChanged !ElementKey !Text
   | WindowCloseRequested !WindowKey
+  | WindowActivated !WindowKey
+  | TextFileChosen !FilePath
+  | TextFileRead !FilePath !(Either Text Text)
+  | TextFileWritten !EffectKey !FilePath !Text !(Either Text ())
+  deriving stock (Eq, Show)
+
+data Effect
+  = RequestOpenTextFiles
+  | ReadTextFile !FilePath
+  | WriteTextFile !EffectKey !FilePath !Text
   deriving stock (Eq, Show)
 
 data App model = App
@@ -116,6 +138,7 @@ data Transaction model = Transaction
   { transactionAction :: !(Action model)
   , transactionUndo :: !UndoPolicy
   , transactionDescription :: !(Maybe Text)
+  , transactionEffects :: ![Effect]
   }
 
 transaction
@@ -124,11 +147,25 @@ transaction
   -> (model -> model)
   -> Transaction model
 transaction description undo change =
+  transactionWithEffects description undo [] change
+
+transactionWithEffects
+  :: Text
+  -> UndoPolicy
+  -> [Effect]
+  -> (model -> model)
+  -> Transaction model
+transactionWithEffects description undo effects change =
   Transaction
     { transactionAction = action description change
     , transactionUndo = undo
     , transactionDescription = Just description
+    , transactionEffects = effects
     }
+
+requestEffect :: Text -> Effect -> Transaction model
+requestEffect description requested =
+  transactionWithEffects description NoUndo [requested] id
 
 noTransaction :: Transaction model
 noTransaction =
@@ -136,7 +173,8 @@ noTransaction =
     { transactionAction = action "No operation" id
     , transactionUndo = NoUndo
     , transactionDescription = Nothing
+    , transactionEffects = []
     }
 
 applyTransaction :: Transaction model -> model -> model
-applyTransaction (Transaction (Action _ change) _ _) = change
+applyTransaction (Transaction (Action _ change) _ _ _) = change

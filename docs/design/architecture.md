@@ -1,6 +1,6 @@
 # UIH Architecture Proposal
 
-Status: Draft for discussion, architecture revision 10
+Status: Draft for discussion, architecture revision 11
 Audience: UIH users, contributors, and backend implementers  
 Scope: Public API, runtime architecture, backend boundaries, and initial delivery plan
 
@@ -915,6 +915,7 @@ data Transaction model = Transaction
   { transactionAction      :: Action model
   , transactionUndo        :: UndoPolicy
   , transactionDescription :: Maybe Text
+  , transactionEffects     :: [Effect]
   }
 ```
 
@@ -1335,6 +1336,26 @@ Editable controls additionally require:
 
 Native backends should use native text controls when they satisfy the requested behavior and styling. The custom backend needs an explicit text-editing runtime; wrapping SDL_ttf is not sufficient.
 
+### 19.3 Syntax highlighting
+
+Syntax highlighting is presentation over an immutable text snapshot, not attributed authoritative content. A highlighter returns semantic, revisioned spans:
+
+```haskell
+data HighlightSpan = HighlightSpan
+  { highlightRange :: TextRange
+  , highlightClass :: SyntaxClass
+  }
+
+data TextPresentation = TextPresentation
+  { presentationRevision :: TextRevision
+  , presentationSpans :: [HighlightSpan]
+  }
+```
+
+`SyntaxClass` expresses meaning such as keyword, string, comment, type, function, or number; themes decide colors and font traits. `TextRange` is validated against its originating snapshot. Parser byte offsets, AppKit/Windows UTF-16 units, and custom-renderer indices are backend/index-cache details and do not leak into the surface API.
+
+Applying presentation must not mutate characters, move selection, replace marked IME text, or create undo entries. AppKit therefore updates `NSTextStorage` attributes in a batch; a custom backend emits equivalent styled text runs. Results carrying an obsolete `TextRevision` are discarded. V2 may start with pure whole-document highlighting, then move large inputs to the explicit task executor and incremental changed-range processing without changing the document model.
+
 ## 20. Documents, tabs, and workspaces
 
 ### 20.1 Documents
@@ -1629,6 +1650,8 @@ Build narrow vertical slices for SDL3 and at least one native platform. Each sli
 These are architectural experiments, not production backends. Their purpose is to prove that semantic APIs and reconciliation operations map to genuinely different systems.
 
 The initial AppKit vertical slice now builds and renders two native windows through an Objective-C ARC shim, native label/button/text-field peers, command menu items and shortcuts, stable keyed reconciliation, and declarative window removal. Its deterministic native suite validates accessibility identity/role, explicit focus transfer, dirty close veto, text delegate delivery, Haskell reconciliation, Command-S through `NSMenu`, final window removal, and zero backend-owned resources or queued callbacks at shutdown. An isolated macOS 13-targeted build runs the suite and verifies `minos 13.0` on the final executable plus project Objective-C/Haskell objects, with compatible `minos 11.0` objects sampled from the selected GHC 9.10.3 runtime. DPI/scale transitions, multi-monitor placement, IME, out-of-process Accessibility behavior, and actual execution on macOS 13 remain production conformance work.
+
+The follow-up text-editor slice adds explicit file effects, a native multiple-selection Open panel, window activation, scrolling multiline `NSTextView` peers, active-document command routing, snapshot-correlated Save completion, and dirty-close negotiation. Its pure test opens two documents and exercises clean/dirty transitions; its native test displays and cancels the Open panel, edits a real text view, writes an actual fixture through Command-S, closes the final window, and asserts zero backend-owned resources and callbacks. File I/O is currently synchronous and UTF-8-only; the slice proves ownership and effect boundaries rather than the final asynchronous document service.
 
 ### Phase 3: Common layout and display list
 
