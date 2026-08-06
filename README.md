@@ -43,7 +43,7 @@ stack exec haskelui-appkit-vertical
 
 It opens two native windows and exercises retained native controls, shared menu/button commands, model-driven updates, declarative window lifetime, and close veto.
 
-Visual Haskell opens multiple UTF-8 files as document tabs in one native split-view workspace. It includes a project tree, central editors, a right inspector, a shared status area, dirty tracking, Command-S, deferred dirty-tab close, pure Haskell syntax highlighting for `.hs` and `.lhs` files, and versioned `.vihs` workspace restoration:
+Visual Haskell opens multiple UTF-8 files as document tabs in one native split-view workspace. It includes a project tree, central editors, a right inspector, a shared status area, dirty tracking, Command-S, deferred dirty-tab close, asynchronous TextMate highlighting with bundled Haskell/JSON/JavaScript/Python/Markdown providers, user providers under `~/.vh`, and versioned `.vihs` workspace restoration:
 
 ```console
 stack exec vh

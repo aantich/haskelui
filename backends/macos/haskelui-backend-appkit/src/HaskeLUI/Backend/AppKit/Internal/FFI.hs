@@ -45,6 +45,28 @@ module HaskeLUI.Backend.AppKit.Internal.FFI
   , c_createLabel
   , c_createTextField
   , c_createTextEditor
+  , c_createDrawingSurface
+  , c_drawingSetAccessibleLabel
+  , c_drawingBegin
+  , c_drawingPushState
+  , c_drawingPopState
+  , c_drawingConcatTransform
+  , c_drawingBeginOpacity
+  , c_drawingEndOpacity
+  , c_drawingPathBegin
+  , c_drawingPathMoveTo
+  , c_drawingPathLineTo
+  , c_drawingPathQuadraticTo
+  , c_drawingPathCubicTo
+  , c_drawingPathClose
+  , c_drawingPathAddRect
+  , c_drawingPathAddRoundedRect
+  , c_drawingPathAddEllipse
+  , c_drawingClipPath
+  , c_drawingFillPath
+  , c_drawingStrokePath
+  , c_drawingText
+  , c_drawingEnd
   , c_createWindow
   , c_debugCounters
   , c_initialize
@@ -57,7 +79,9 @@ module HaskeLUI.Backend.AppKit.Internal.FFI
   , c_testLastFailure
   , c_testScheduleVerticalScript
   , c_testScheduleTextEditorScript
+  , c_testScheduleExplorerScript
   , c_testScheduleControlGalleryScript
+  , c_testScheduleDrawingScript
   , c_versionMajor
   , c_versionMinor
   , c_versionPatch
@@ -385,6 +409,90 @@ foreign import ccall unsafe "haskelui_macos_text_field_create"
 foreign import ccall unsafe "haskelui_macos_text_editor_create"
   c_createTextEditor :: Ptr MacWindowHandle -> Word64 -> CString -> Ptr CMacRect -> IO (Ptr MacControlHandle)
 
+foreign import ccall unsafe "haskelui_macos_drawing_surface_create"
+  c_createDrawingSurface :: Ptr MacWindowHandle -> Word64 -> CString -> Ptr CMacRect -> IO (Ptr MacControlHandle)
+
+foreign import ccall unsafe "haskelui_macos_drawing_set_accessible_label"
+  c_drawingSetAccessibleLabel :: Ptr MacControlHandle -> CString -> IO ()
+
+foreign import ccall unsafe "haskelui_macos_drawing_begin"
+  c_drawingBegin :: Ptr MacControlHandle -> IO ()
+
+foreign import ccall unsafe "haskelui_macos_drawing_push_state"
+  c_drawingPushState :: Ptr MacControlHandle -> IO ()
+
+foreign import ccall unsafe "haskelui_macos_drawing_pop_state"
+  c_drawingPopState :: Ptr MacControlHandle -> IO ()
+
+foreign import ccall unsafe "haskelui_macos_drawing_concat_transform"
+  c_drawingConcatTransform
+    :: Ptr MacControlHandle
+    -> CDouble -> CDouble -> CDouble -> CDouble -> CDouble -> CDouble
+    -> IO ()
+
+foreign import ccall unsafe "haskelui_macos_drawing_begin_opacity"
+  c_drawingBeginOpacity :: Ptr MacControlHandle -> CDouble -> IO ()
+
+foreign import ccall unsafe "haskelui_macos_drawing_end_opacity"
+  c_drawingEndOpacity :: Ptr MacControlHandle -> IO ()
+
+foreign import ccall unsafe "haskelui_macos_drawing_path_begin"
+  c_drawingPathBegin :: Ptr MacControlHandle -> IO ()
+
+foreign import ccall unsafe "haskelui_macos_drawing_path_move_to"
+  c_drawingPathMoveTo :: Ptr MacControlHandle -> CDouble -> CDouble -> IO ()
+
+foreign import ccall unsafe "haskelui_macos_drawing_path_line_to"
+  c_drawingPathLineTo :: Ptr MacControlHandle -> CDouble -> CDouble -> IO ()
+
+foreign import ccall unsafe "haskelui_macos_drawing_path_quadratic_to"
+  c_drawingPathQuadraticTo
+    :: Ptr MacControlHandle -> CDouble -> CDouble -> CDouble -> CDouble -> IO ()
+
+foreign import ccall unsafe "haskelui_macos_drawing_path_cubic_to"
+  c_drawingPathCubicTo
+    :: Ptr MacControlHandle
+    -> CDouble -> CDouble -> CDouble -> CDouble -> CDouble -> CDouble
+    -> IO ()
+
+foreign import ccall unsafe "haskelui_macos_drawing_path_close"
+  c_drawingPathClose :: Ptr MacControlHandle -> IO ()
+
+foreign import ccall unsafe "haskelui_macos_drawing_path_add_rect"
+  c_drawingPathAddRect :: Ptr MacControlHandle -> Ptr CMacRect -> IO ()
+
+foreign import ccall unsafe "haskelui_macos_drawing_path_add_rounded_rect"
+  c_drawingPathAddRoundedRect :: Ptr MacControlHandle -> Ptr CMacRect -> CDouble -> CDouble -> IO ()
+
+foreign import ccall unsafe "haskelui_macos_drawing_path_add_ellipse"
+  c_drawingPathAddEllipse :: Ptr MacControlHandle -> Ptr CMacRect -> IO ()
+
+foreign import ccall unsafe "haskelui_macos_drawing_clip_path"
+  c_drawingClipPath :: Ptr MacControlHandle -> CInt -> IO ()
+
+foreign import ccall unsafe "haskelui_macos_drawing_fill_path"
+  c_drawingFillPath
+    :: Ptr MacControlHandle -> CInt
+    -> CDouble -> CDouble -> CDouble -> CDouble
+    -> IO ()
+
+foreign import ccall unsafe "haskelui_macos_drawing_stroke_path"
+  c_drawingStrokePath
+    :: Ptr MacControlHandle
+    -> CDouble -> CInt -> CInt -> CDouble
+    -> Ptr CDouble -> Word64 -> CDouble
+    -> CDouble -> CDouble -> CDouble -> CDouble
+    -> IO ()
+
+foreign import ccall unsafe "haskelui_macos_drawing_text"
+  c_drawingText
+    :: Ptr MacControlHandle -> CString -> Ptr CMacRect -> Ptr CTextStyle
+    -> CInt -> CInt -> CInt
+    -> IO ()
+
+foreign import ccall unsafe "haskelui_macos_drawing_end"
+  c_drawingEnd :: Ptr MacControlHandle -> IO ()
+
 foreign import ccall unsafe "haskelui_macos_catalog_control_create"
   c_catalogCreate :: Ptr MacWindowHandle -> Word64 -> CInt -> Ptr CMacRect -> IO (Ptr MacControlHandle)
 
@@ -496,8 +604,14 @@ foreign import ccall unsafe "haskelui_macos_test_schedule_vertical_script"
 foreign import ccall unsafe "haskelui_macos_test_schedule_text_editor_script"
   c_testScheduleTextEditorScript :: Word64 -> Word64 -> Word64 -> Word64 -> Word64 -> IO ()
 
+foreign import ccall unsafe "haskelui_macos_test_schedule_explorer_script"
+  c_testScheduleExplorerScript :: Word64 -> Word64 -> Word64 -> Word64 -> IO ()
+
 foreign import ccall unsafe "haskelui_macos_test_schedule_control_gallery_script"
   c_testScheduleControlGalleryScript
     :: Word64 -> Word64 -> Word64 -> Word64 -> Word64 -> Word64
     -> Word64 -> Word64 -> Word64 -> Word64 -> Word64 -> Word64
     -> Word64 -> Word64 -> IO ()
+
+foreign import ccall unsafe "haskelui_macos_test_schedule_drawing_script"
+  c_testScheduleDrawingScript :: Word64 -> Word64 -> IO ()

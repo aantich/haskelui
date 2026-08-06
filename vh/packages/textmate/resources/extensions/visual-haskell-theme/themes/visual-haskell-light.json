@@ -1,0 +1,68 @@
+{
+  "name": "Visual Haskell Light",
+  "type": "light",
+  "tokenColors": [
+    {
+      "settings": {
+        "foreground": "#1F2129",
+        "background": "#FAFAF7"
+      }
+    },
+    {
+      "scope": ["comment", "punctuation.definition.comment"],
+      "settings": { "foreground": "#2E6E3D", "fontStyle": "italic" }
+    },
+    {
+      "scope": ["string", "constant.character.escape"],
+      "settings": { "foreground": "#B8292E" }
+    },
+    {
+      "scope": ["keyword", "storage.type", "storage.modifier"],
+      "settings": { "foreground": "#7A2E94", "fontStyle": "bold" }
+    },
+    {
+      "scope": ["constant.numeric", "constant.language"],
+      "settings": { "foreground": "#1F4DB8" }
+    },
+    {
+      "scope": ["entity.name.type", "support.type"],
+      "settings": { "foreground": "#006B85" }
+    },
+    {
+      "scope": ["entity.name.function", "variable.function"],
+      "settings": { "foreground": "#9C4C14" }
+    },
+    {
+      "scope": ["support.type.property-name", "meta.object-literal.key"],
+      "settings": { "foreground": "#006B85" }
+    },
+    {
+      "scope": ["markup.heading", "entity.name.section"],
+      "settings": { "foreground": "#7A2E94", "fontStyle": "bold" }
+    },
+    {
+      "scope": "markup.bold",
+      "settings": { "fontStyle": "bold" }
+    },
+    {
+      "scope": "markup.italic",
+      "settings": { "fontStyle": "italic" }
+    },
+    {
+      "scope": ["markup.inline.raw", "markup.raw.block", "markup.fenced_code"],
+      "settings": { "foreground": "#B8292E" }
+    },
+    {
+      "scope": ["markup.underline.link", "meta.link"],
+      "settings": { "foreground": "#1F4DB8", "fontStyle": "underline" }
+    },
+    {
+      "scope": "markup.quote",
+      "settings": { "foreground": "#2E6E3D", "fontStyle": "italic" }
+    },
+    {
+      "scope": ["markup.list", "constant.language.task-list"],
+      "settings": { "foreground": "#1F4DB8" }
+    }
+  ]
+}

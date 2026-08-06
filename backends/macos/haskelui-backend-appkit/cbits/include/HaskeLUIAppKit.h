@@ -214,6 +214,75 @@ HaskeLUIMacControlRef haskelui_macos_text_editor_create(
     uint64_t identity,
     const char *utf8_text,
     const HaskeLUIMacRect *frame);
+HaskeLUIMacControlRef haskelui_macos_drawing_surface_create(
+    HaskeLUIMacWindowRef window,
+    uint64_t identity,
+    const char *utf8_accessible_label,
+    const HaskeLUIMacRect *frame);
+void haskelui_macos_drawing_set_accessible_label(
+    HaskeLUIMacControlRef control,
+    const char *utf8_accessible_label);
+void haskelui_macos_drawing_begin(HaskeLUIMacControlRef control);
+void haskelui_macos_drawing_push_state(HaskeLUIMacControlRef control);
+void haskelui_macos_drawing_pop_state(HaskeLUIMacControlRef control);
+void haskelui_macos_drawing_concat_transform(
+    HaskeLUIMacControlRef control,
+    double a, double b, double c, double d, double tx, double ty);
+void haskelui_macos_drawing_begin_opacity(
+    HaskeLUIMacControlRef control,
+    double opacity);
+void haskelui_macos_drawing_end_opacity(HaskeLUIMacControlRef control);
+void haskelui_macos_drawing_path_begin(HaskeLUIMacControlRef control);
+void haskelui_macos_drawing_path_move_to(
+    HaskeLUIMacControlRef control, double x, double y);
+void haskelui_macos_drawing_path_line_to(
+    HaskeLUIMacControlRef control, double x, double y);
+void haskelui_macos_drawing_path_quadratic_to(
+    HaskeLUIMacControlRef control,
+    double control_x, double control_y, double x, double y);
+void haskelui_macos_drawing_path_cubic_to(
+    HaskeLUIMacControlRef control,
+    double control1_x, double control1_y,
+    double control2_x, double control2_y,
+    double x, double y);
+void haskelui_macos_drawing_path_close(HaskeLUIMacControlRef control);
+void haskelui_macos_drawing_path_add_rect(
+    HaskeLUIMacControlRef control,
+    const HaskeLUIMacRect *rect);
+void haskelui_macos_drawing_path_add_rounded_rect(
+    HaskeLUIMacControlRef control,
+    const HaskeLUIMacRect *rect,
+    double radius_x,
+    double radius_y);
+void haskelui_macos_drawing_path_add_ellipse(
+    HaskeLUIMacControlRef control,
+    const HaskeLUIMacRect *rect);
+void haskelui_macos_drawing_clip_path(
+    HaskeLUIMacControlRef control,
+    int32_t even_odd);
+void haskelui_macos_drawing_fill_path(
+    HaskeLUIMacControlRef control,
+    int32_t even_odd,
+    double red, double green, double blue, double alpha);
+void haskelui_macos_drawing_stroke_path(
+    HaskeLUIMacControlRef control,
+    double width,
+    int32_t line_cap,
+    int32_t line_join,
+    double miter_limit,
+    const double *dash_pattern,
+    uint64_t dash_count,
+    double dash_phase,
+    double red, double green, double blue, double alpha);
+void haskelui_macos_drawing_text(
+    HaskeLUIMacControlRef control,
+    const char *utf8_text,
+    const HaskeLUIMacRect *rect,
+    const HaskeLUIMacTextStyle *style,
+    int32_t horizontal_alignment,
+    int32_t vertical_alignment,
+    int32_t wrapping);
+void haskelui_macos_drawing_end(HaskeLUIMacControlRef control);
 HaskeLUIMacControlRef haskelui_macos_catalog_control_create(
     HaskeLUIMacWindowRef window,
     uint64_t identity,
@@ -342,6 +411,11 @@ void haskelui_macos_test_schedule_text_editor_script(
     uint64_t tab_identity,
     uint64_t save_command_identity,
     uint64_t open_folder_command_identity);
+void haskelui_macos_test_schedule_explorer_script(
+    uint64_t workspace_window_identity,
+    uint64_t project_tree_identity,
+    uint64_t file_item_identity,
+    uint64_t expected_tab_identity);
 void haskelui_macos_test_schedule_control_gallery_script(
     uint64_t window_identity,
     uint64_t root_tab_identity,
@@ -357,6 +431,9 @@ void haskelui_macos_test_schedule_control_gallery_script(
     uint64_t popover_identity,
     uint64_t container_identity,
     uint64_t nested_child_identity);
+void haskelui_macos_test_schedule_drawing_script(
+    uint64_t window_identity,
+    uint64_t drawing_surface_identity);
 
 #ifdef __cplusplus
 }

@@ -1,0 +1,54 @@
+{
+  "name": "Haskell",
+  "scopeName": "source.haskell",
+  "fileTypes": ["hs", "lhs"],
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    {
+      "name": "constant.numeric.haskell",
+      "match": "\\b(?:0[xX][0-9A-Fa-f]+|0[oO][0-7]+|0[bB][01]+|[0-9]+(?:\\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)\\b"
+    },
+    {
+      "name": "keyword.control.haskell",
+      "match": "\\b(?:as|case|class|data|default|deriving|do|else|family|foreign|hiding|if|import|in|infix|infixl|infixr|instance|let|mdo|module|newtype|of|pattern|qualified|role|safe|then|type|unsafe|via|where)\\b"
+    },
+    {
+      "name": "storage.type.haskell",
+      "match": "\\b[A-Z][A-Za-z0-9_']*\\b"
+    },
+    {
+      "name": "keyword.operator.haskell",
+      "match": "[!#$%&*+./<=>?@\\\\^|~:-]+"
+    }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        { "name": "comment.line.double-dash.haskell", "match": "--.*$" },
+        { "include": "#block-comment" }
+      ]
+    },
+    "block-comment": {
+      "name": "comment.block.haskell",
+      "begin": "\\{-",
+      "end": "-\\}",
+      "patterns": [
+        { "include": "#block-comment" }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.haskell",
+          "match": "\"(?:\\\\.|[^\"\\\\])*\""
+        },
+        {
+          "name": "string.quoted.single.haskell",
+          "match": "'(?:\\\\.|[^'\\\\])'"
+        }
+      ]
+    }
+  }
+}
+

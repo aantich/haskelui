@@ -1,0 +1,23 @@
+{
+  "name": "visual-haskell-python",
+  "displayName": "Visual Haskell Python Grammar",
+  "version": "1.0.0",
+  "contributes": {
+    "languages": [
+      {
+        "id": "python",
+        "aliases": ["Python", "py"],
+        "extensions": [".py", ".pyw"],
+        "filenames": ["SConstruct", "SConscript"]
+      }
+    ],
+    "grammars": [
+      {
+        "language": "python",
+        "scopeName": "source.python",
+        "path": "./syntaxes/python.tmLanguage.json"
+      }
+    ]
+  }
+}
+

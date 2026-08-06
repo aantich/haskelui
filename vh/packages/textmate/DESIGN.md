@@ -1,12 +1,15 @@
-# HaskeLUI TextMate Runtime Design
+# Visual Haskell TextMate Runtime Design
 
-Status: Proposed; documentation only  
-Date: 2026-08-05  
-Implementation status: No package, dependency, FFI binding, or executable code exists yet
+Status: Implemented first production slice  
+Date: 2026-08-06  
+Implementation status: TM1 core, plist input, themes, incremental line caching,
+typed service integration, bundled providers, and live user-provider discovery
+are implemented. Cross-grammar includes, injections, embedded-language behavior,
+and the differential VS Code oracle remain later compatibility work.
 
 ## 1. Purpose
 
-`haskelui-textmate` will load declarative TextMate grammars and themes at runtime, tokenize edited documents, and convert the result into HaskeLUI's generic revision-bound text presentation layers.
+`visual-haskell-textmate` loads declarative TextMate grammars and themes at runtime, tokenizes edited documents, and converts the result into HaskeLUI's generic revision-bound text presentation layers.
 
 The package belongs outside `haskelui-core`. Core owns portable text ranges, styles, attributed content, and presentation layers. This package will own TextMate-specific manifests, grammar rules, scope stacks, theme selectors, regex execution, line-state caching, and compatibility behavior.
 
@@ -20,7 +23,7 @@ VS Code extension or TextMate bundle
         └── JSON/plist theme
                 │
                 ▼
-        HaskeLUI TextMate runtime
+      Visual Haskell TextMate runtime
                 │
         scalar-indexed styled spans
                 │
@@ -75,30 +78,33 @@ Compatibility is versioned by feature rather than expressed as a blanket claim:
 
 The first useful release should target TM1 plus basic JSON themes. Higher levels should be enabled only after their conformance suites pass.
 
-## 5. Planned package boundary
+## 5. Package boundary
 
-The directory is expected eventually to become a Stack/Cabal package:
+The engine is a VH-owned Stack/Cabal package:
 
 ```text
-packages/haskelui-textmate/
+vh/packages/textmate/
 ├── DESIGN.md
-├── package.yaml                 # future
-├── src/HaskeLUI/TextMate/
-│   ├── Extension.hs             # future: manifest and contribution loading
-│   ├── Grammar.hs               # future: decoded grammar representation
-│   ├── Linker.hs                # future: includes and repository resolution
-│   ├── Oniguruma.hs             # future: managed native regex handles
-│   ├── Tokenizer.hs             # future: line tokenizer and rule stack
-│   ├── Incremental.hs           # future: line cache and edit invalidation
-│   ├── Scope.hs                 # future: scope names and stacks
-│   ├── Theme.hs                 # future: selector matching and style resolution
-│   ├── Provider.hs              # future: language registry
-│   └── HaskeLUI.hs                   # future: conversion to TextLayer
-├── cbits/                       # future: small prefixed Oniguruma C bridge
-└── test/                        # future: fixtures and differential tests
+├── package.yaml
+├── resources/extensions/       # VH-owned bundled grammars and theme
+├── src/VisualHaskell/TextMate/
+│   ├── Format.hs                # JSON and XML plist decoding
+│   ├── Grammar.hs               # grammar representation and validation
+│   ├── Oniguruma.hs             # managed native regex handles
+│   ├── Registry.hs              # manifests and language/provider discovery
+│   ├── Service.hs               # supervised service and resource watcher
+│   ├── Theme.hs                 # selector matching and TextLayer output
+│   ├── Tokenizer.hs             # stateful incremental line tokenizer
+│   └── Types.hs                 # public IDs, snapshots, commands, and events
+├── cbits/                       # small prefixed Oniguruma C bridge
+├── vendor/oniguruma/            # pinned Oniguruma 6.9.10 source
+└── test/                        # conformance and incremental tests
 ```
 
-`haskelui-core` must not depend on this package. `haskelui-textmate` may depend on `haskelui-core` in its HaskeLUI adapter because the dependency direction remains one-way.
+`haskelui-core` does not depend on this package. `visual-haskell-textmate`
+depends on `haskelui-core`, preserving the one-way dependency. The package is
+owned by VH rather than the generic UI framework because grammars, language
+association, and editor policy are product concerns.
 
 ## 6. Data model
 
@@ -269,7 +275,11 @@ Impure operations include:
 - Discovering installed extensions.
 - Running background tokenization and cancellation.
 
-The package must not use `unsafePerformIO` to present compiled regex execution as a pure highlighter. Initial experiments may run synchronously from an explicit effect, but production editor integration must use the task executor so a grammar cannot block the UI event loop.
+The package does not use `unsafePerformIO`. Native compilation and tokenization
+run in a typed, bounded HaskeLUI service away from the UI event loop. Commands
+are coalesced by document key, and results carry document revision, content
+hash, registry generation, grammar generation, and theme generation. VH applies
+only a result that still describes its current immutable document snapshot.
 
 ## 13. Theme resolution
 
@@ -359,7 +369,12 @@ Supporting arbitrary untrusted downloaded grammars would require stronger isolat
 
 The runtime implementation, regex engine, each bundled grammar, each theme, and each extension have independent licenses and notice requirements.
 
-The first release should load user-supplied or application-explicit grammar directories and ship only small test fixtures written for HaskeLUI. A curated built-in grammar collection should be a later, separately reviewed distribution decision with machine-readable provenance, version pins, licenses, and notices.
+The first slice ships small VH-owned Haskell, JSON, JavaScript, Python, and Markdown
+grammars plus a VH-owned light theme. Their provenance is recorded beside the
+resources. Users can copy full declarative VS Code extension directories into
+`~/.vh/extensions`, standalone grammars into `~/.vh/grammars`, and themes into
+`~/.vh/themes`; these directories are watched and reloaded without executing
+extension JavaScript.
 
 Loading an extension already present on a user's machine does not by itself authorize HaskeLUI to redistribute that extension.
 
@@ -402,7 +417,7 @@ Measure grammar load, first full tokenization, single-line edit convergence, mem
 
 ## 19. Delivery phases
 
-### Phase 0: conformance spike
+### Phase 0: conformance spike — partially complete
 
 - Pin the differential oracle.
 - Define normalized golden output.
@@ -411,7 +426,7 @@ Measure grammar load, first full tokenization, single-line edit convergence, mem
 
 Exit criterion: representative regex and token ranges agree with the oracle.
 
-### Phase 1: TM1 grammar engine
+### Phase 1: TM1 grammar engine — implemented
 
 - JSON grammar loading.
 - Native Oniguruma bridge.
@@ -421,7 +436,7 @@ Exit criterion: representative regex and token ranges agree with the oracle.
 
 Exit criterion: TM1 fixtures and differential tests pass with deterministic resource cleanup.
 
-### Phase 2: manifests, themes, and HaskeLUI adapter
+### Phase 2: manifests, themes, and HaskeLUI adapter — implemented
 
 - Extension-directory manifests.
 - Language selection by explicit ID and filename.
@@ -429,14 +444,15 @@ Exit criterion: TM1 fixtures and differential tests pass with deterministic reso
 - Theme specificity and per-property merging.
 - `TextLayer` output in the existing editor.
 
-Exit criterion: at least JavaScript, Python, JSON, and Haskell fixtures render through AppKit without application-specific lexers.
+Exit criterion: at least JavaScript, Python, JSON, Haskell, and Markdown fixtures render through AppKit without application-specific lexers.
 
-### Phase 3: incremental service
+### Phase 3: incremental service — implemented baseline
 
 - Revisioned line cache.
 - Edit invalidation and convergence.
-- Task execution, cancellation, and stale-result handling.
-- Visible-range prioritization.
+- Typed service execution and stale-result handling.
+- Pending: cooperative cancellation inside long tokenization passes.
+- Pending: using the existing priority command for visible-range scheduling.
 
 Exit criterion: generated edits remain equivalent to full passes and large documents do not tokenize on the UI thread.
 
@@ -463,13 +479,17 @@ Exit criterion: distribution is reproducible and all shipped resources have revi
 
 Options are a system library, a vendored pinned source release, or Microsoft's WebAssembly binding. System libraries reduce repository weight but are inconsistent or absent across target platforms. The WASM binding offers compatibility but introduces a WASM host and is intentionally scoped to VS Code. A pinned native source release adds build responsibility but gives macOS/Windows parity and native packaging.
 
-Recommendation: vendor a pinned, minimally configured native Oniguruma source after license and security review, behind a small prefixed C ABI.
+Decision: vendored Oniguruma 6.9.10 is compiled behind a small prefixed C ABI.
+The Haskell wrapper owns regex lifetime with `ForeignPtr` finalizers and exposes
+UTF-8 byte offsets only inside the TextMate package.
 
 ### 20.2 Bundled versus user-provided grammars
 
 Bundling provides immediate language coverage but creates update, provenance, binary-size, and licensing obligations. User-provided extensions avoid redistribution and allow experimentation but make behavior less reproducible.
 
-Recommendation: start with explicit user/application grammar directories and HaskeLUI-owned fixtures. Design a curated bundle only after the engine is stable and provenance automation exists.
+Decision: ship only VH-owned initial providers and accept user-installed
+declarative extensions and standalone files under `~/.vh`. A larger curated
+third-party bundle still requires provenance automation and license review.
 
 ### 20.3 Compatibility versus strict rejection
 
@@ -487,7 +507,9 @@ Recommendation: expose both boundaries. Scope spans remain inspectable and cache
 
 A synchronous first implementation is simpler, but compiling or running arbitrary grammar regexes in the UI callback risks visible stalls and undermines the framework's pure update boundary.
 
-Recommendation: a tiny conformance spike may call the engine synchronously from a test harness, but the first editor-integrated version should use an explicit tokenization effect/task with revision correlation.
+Decision: tests may call the engine directly, while the editor uses the typed
+TextMate service with immutable snapshots, revision correlation, restart replay,
+bounded/coalesced commands, and explicit external events.
 
 ### 20.6 Exact VS Code parity
 
@@ -502,4 +524,3 @@ Recommendation: advertise versioned TextMate grammar/theme compatibility only. A
 - [Microsoft vscode-textmate](https://github.com/microsoft/vscode-textmate)
 - [Microsoft vscode-oniguruma](https://github.com/microsoft/vscode-oniguruma)
 - [Oniguruma](https://github.com/kkos/oniguruma)
-

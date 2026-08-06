@@ -1,0 +1,22 @@
+{
+  "name": "visual-haskell-json",
+  "displayName": "Visual Haskell JSON Grammar",
+  "version": "1.0.0",
+  "contributes": {
+    "languages": [
+      {
+        "id": "json",
+        "aliases": ["JSON"],
+        "extensions": [".json", ".jsonc"]
+      }
+    ],
+    "grammars": [
+      {
+        "language": "json",
+        "scopeName": "source.json",
+        "path": "./syntaxes/json.tmLanguage.json"
+      }
+    ]
+  }
+}
+

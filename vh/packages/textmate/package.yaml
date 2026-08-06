@@ -1,0 +1,120 @@
+name: visual-haskell-textmate
+version: 0.1.0.0
+synopsis: Declarative TextMate grammar and theme runtime for Visual Haskell
+description: Loads TextMate and VS Code grammar/theme contributions, tokenizes immutable document snapshots with vendored Oniguruma, and produces revision-bound HaskeLUI text layers.
+category: Development
+github: aantich/haskelui
+license: BSD-3-Clause
+author: Visual Haskell contributors
+maintainer: Visual Haskell contributors
+copyright: 2026 Visual Haskell contributors
+
+dependencies:
+  - aeson
+  - async
+  - base >= 4.20.2 && < 4.21
+  - bytestring
+  - containers
+  - directory
+  - filepath
+  - haskelui-core
+  - scientific
+  - stm
+  - text
+  - time
+  - vector
+  - xml-conduit
+
+library:
+  source-dirs: src
+  exposed-modules:
+    - VisualHaskell.TextMate
+    - VisualHaskell.TextMate.Grammar
+    - VisualHaskell.TextMate.Oniguruma
+    - VisualHaskell.TextMate.Registry
+    - VisualHaskell.TextMate.Service
+    - VisualHaskell.TextMate.Theme
+    - VisualHaskell.TextMate.Tokenizer
+    - VisualHaskell.TextMate.Types
+  c-sources:
+    - cbits/VisualHaskellTextMate.c
+    - vendor/oniguruma/src/regerror.c
+    - vendor/oniguruma/src/regparse.c
+    - vendor/oniguruma/src/regext.c
+    - vendor/oniguruma/src/regcomp.c
+    - vendor/oniguruma/src/regexec.c
+    - vendor/oniguruma/src/reggnu.c
+    - vendor/oniguruma/src/regenc.c
+    - vendor/oniguruma/src/regsyntax.c
+    - vendor/oniguruma/src/regtrav.c
+    - vendor/oniguruma/src/regversion.c
+    - vendor/oniguruma/src/st.c
+    - vendor/oniguruma/src/onig_init.c
+    - vendor/oniguruma/src/unicode.c
+    - vendor/oniguruma/src/ascii.c
+    - vendor/oniguruma/src/utf8.c
+    - vendor/oniguruma/src/utf16_be.c
+    - vendor/oniguruma/src/utf16_le.c
+    - vendor/oniguruma/src/utf32_be.c
+    - vendor/oniguruma/src/utf32_le.c
+    - vendor/oniguruma/src/euc_jp.c
+    - vendor/oniguruma/src/sjis.c
+    - vendor/oniguruma/src/iso8859_1.c
+    - vendor/oniguruma/src/iso8859_2.c
+    - vendor/oniguruma/src/iso8859_3.c
+    - vendor/oniguruma/src/iso8859_4.c
+    - vendor/oniguruma/src/iso8859_5.c
+    - vendor/oniguruma/src/iso8859_6.c
+    - vendor/oniguruma/src/iso8859_7.c
+    - vendor/oniguruma/src/iso8859_8.c
+    - vendor/oniguruma/src/iso8859_9.c
+    - vendor/oniguruma/src/iso8859_10.c
+    - vendor/oniguruma/src/iso8859_11.c
+    - vendor/oniguruma/src/iso8859_13.c
+    - vendor/oniguruma/src/iso8859_14.c
+    - vendor/oniguruma/src/iso8859_15.c
+    - vendor/oniguruma/src/iso8859_16.c
+    - vendor/oniguruma/src/euc_tw.c
+    - vendor/oniguruma/src/euc_kr.c
+    - vendor/oniguruma/src/big5.c
+    - vendor/oniguruma/src/gb18030.c
+    - vendor/oniguruma/src/koi8_r.c
+    - vendor/oniguruma/src/cp1251.c
+    - vendor/oniguruma/src/euc_jp_prop.c
+    - vendor/oniguruma/src/sjis_prop.c
+    - vendor/oniguruma/src/unicode_unfold_key.c
+    - vendor/oniguruma/src/unicode_fold1_key.c
+    - vendor/oniguruma/src/unicode_fold2_key.c
+    - vendor/oniguruma/src/unicode_fold3_key.c
+  include-dirs:
+    - cbits/include
+    - vendor/oniguruma/src
+  install-includes:
+    - VisualHaskellTextMate.h
+  cc-options:
+    - -DONIG_STATIC
+  ghc-options:
+    - -Wall
+    - -Wcompat
+
+data-files:
+  - resources/extensions/*/package.json
+  - resources/extensions/*/syntaxes/*
+  - resources/extensions/*/themes/*
+  - resources/PROVENANCE.md
+
+extra-source-files:
+  - DESIGN.md
+  - test/fixtures/minimal.tmLanguage
+  - vendor/oniguruma/COPYING
+  - vendor/oniguruma/README.md
+  - vendor/oniguruma/src/*.h
+
+tests:
+  visual-haskell-textmate-test:
+    main: Spec.hs
+    source-dirs: test
+    dependencies:
+      - visual-haskell-textmate
+    ghc-options:
+      - -threaded

@@ -22,7 +22,9 @@ library
   exposed-modules:
       HaskeLUI.Binding
       HaskeLUI.Core
+      HaskeLUI.Drawing
       HaskeLUI.ExternalEvent
+      HaskeLUI.Graphics.Types
       HaskeLUI.Layout
       HaskeLUI.Property
       HaskeLUI.Service
@@ -45,6 +47,7 @@ test-suite haskelui-core-test
   type: exitcode-stdio-1.0
   main-is: Spec.hs
   other-modules:
+      DrawingSpec
       LayoutSpec
       PropertySpec
       Paths_haskelui_core

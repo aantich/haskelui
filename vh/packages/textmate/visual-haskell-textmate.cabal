@@ -1,0 +1,168 @@
+cabal-version: 2.2
+
+-- This file has been generated from package.yaml by hpack version 0.39.6.
+--
+-- see: https://github.com/sol/hpack
+
+name:           visual-haskell-textmate
+version:        0.1.0.0
+synopsis:       Declarative TextMate grammar and theme runtime for Visual Haskell
+description:    Loads TextMate and VS Code grammar/theme contributions, tokenizes immutable document snapshots with vendored Oniguruma, and produces revision-bound HaskeLUI text layers.
+category:       Development
+homepage:       https://github.com/aantich/haskelui#readme
+bug-reports:    https://github.com/aantich/haskelui/issues
+author:         Visual Haskell contributors
+maintainer:     Visual Haskell contributors
+copyright:      2026 Visual Haskell contributors
+license:        BSD-3-Clause
+build-type:     Simple
+extra-source-files:
+    DESIGN.md
+    test/fixtures/minimal.tmLanguage
+    vendor/oniguruma/COPYING
+    vendor/oniguruma/README.md
+    vendor/oniguruma/src/config.h
+    vendor/oniguruma/src/oniggnu.h
+    vendor/oniguruma/src/onigposix.h
+    vendor/oniguruma/src/oniguruma.h
+    vendor/oniguruma/src/regenc.h
+    vendor/oniguruma/src/regint.h
+    vendor/oniguruma/src/regparse.h
+    vendor/oniguruma/src/st.h
+data-files:
+    resources/extensions/visual-haskell-haskell/package.json
+    resources/extensions/visual-haskell-javascript/package.json
+    resources/extensions/visual-haskell-json/package.json
+    resources/extensions/visual-haskell-markdown/package.json
+    resources/extensions/visual-haskell-python/package.json
+    resources/extensions/visual-haskell-theme/package.json
+    resources/extensions/visual-haskell-haskell/syntaxes/haskell.tmLanguage.json
+    resources/extensions/visual-haskell-javascript/syntaxes/javascript.tmLanguage.json
+    resources/extensions/visual-haskell-json/syntaxes/json.tmLanguage.json
+    resources/extensions/visual-haskell-markdown/syntaxes/markdown.tmLanguage.json
+    resources/extensions/visual-haskell-python/syntaxes/python.tmLanguage.json
+    resources/extensions/visual-haskell-theme/themes/visual-haskell-light.json
+    resources/PROVENANCE.md
+
+source-repository head
+  type: git
+  location: https://github.com/aantich/haskelui
+
+library
+  exposed-modules:
+      VisualHaskell.TextMate
+      VisualHaskell.TextMate.Grammar
+      VisualHaskell.TextMate.Oniguruma
+      VisualHaskell.TextMate.Registry
+      VisualHaskell.TextMate.Service
+      VisualHaskell.TextMate.Theme
+      VisualHaskell.TextMate.Tokenizer
+      VisualHaskell.TextMate.Types
+  other-modules:
+      VisualHaskell.TextMate.Format
+      Paths_visual_haskell_textmate
+  autogen-modules:
+      Paths_visual_haskell_textmate
+  hs-source-dirs:
+      src
+  ghc-options: -Wall -Wcompat
+  cc-options: -DONIG_STATIC
+  include-dirs:
+      cbits/include
+      vendor/oniguruma/src
+  install-includes:
+      VisualHaskellTextMate.h
+  c-sources:
+      cbits/VisualHaskellTextMate.c
+      vendor/oniguruma/src/regerror.c
+      vendor/oniguruma/src/regparse.c
+      vendor/oniguruma/src/regext.c
+      vendor/oniguruma/src/regcomp.c
+      vendor/oniguruma/src/regexec.c
+      vendor/oniguruma/src/reggnu.c
+      vendor/oniguruma/src/regenc.c
+      vendor/oniguruma/src/regsyntax.c
+      vendor/oniguruma/src/regtrav.c
+      vendor/oniguruma/src/regversion.c
+      vendor/oniguruma/src/st.c
+      vendor/oniguruma/src/onig_init.c
+      vendor/oniguruma/src/unicode.c
+      vendor/oniguruma/src/ascii.c
+      vendor/oniguruma/src/utf8.c
+      vendor/oniguruma/src/utf16_be.c
+      vendor/oniguruma/src/utf16_le.c
+      vendor/oniguruma/src/utf32_be.c
+      vendor/oniguruma/src/utf32_le.c
+      vendor/oniguruma/src/euc_jp.c
+      vendor/oniguruma/src/sjis.c
+      vendor/oniguruma/src/iso8859_1.c
+      vendor/oniguruma/src/iso8859_2.c
+      vendor/oniguruma/src/iso8859_3.c
+      vendor/oniguruma/src/iso8859_4.c
+      vendor/oniguruma/src/iso8859_5.c
+      vendor/oniguruma/src/iso8859_6.c
+      vendor/oniguruma/src/iso8859_7.c
+      vendor/oniguruma/src/iso8859_8.c
+      vendor/oniguruma/src/iso8859_9.c
+      vendor/oniguruma/src/iso8859_10.c
+      vendor/oniguruma/src/iso8859_11.c
+      vendor/oniguruma/src/iso8859_13.c
+      vendor/oniguruma/src/iso8859_14.c
+      vendor/oniguruma/src/iso8859_15.c
+      vendor/oniguruma/src/iso8859_16.c
+      vendor/oniguruma/src/euc_tw.c
+      vendor/oniguruma/src/euc_kr.c
+      vendor/oniguruma/src/big5.c
+      vendor/oniguruma/src/gb18030.c
+      vendor/oniguruma/src/koi8_r.c
+      vendor/oniguruma/src/cp1251.c
+      vendor/oniguruma/src/euc_jp_prop.c
+      vendor/oniguruma/src/sjis_prop.c
+      vendor/oniguruma/src/unicode_unfold_key.c
+      vendor/oniguruma/src/unicode_fold1_key.c
+      vendor/oniguruma/src/unicode_fold2_key.c
+      vendor/oniguruma/src/unicode_fold3_key.c
+  build-depends:
+      aeson
+    , async
+    , base >=4.20.2 && <4.21
+    , bytestring
+    , containers
+    , directory
+    , filepath
+    , haskelui-core
+    , scientific
+    , stm
+    , text
+    , time
+    , vector
+    , xml-conduit
+  default-language: Haskell2010
+
+test-suite visual-haskell-textmate-test
+  type: exitcode-stdio-1.0
+  main-is: Spec.hs
+  other-modules:
+      Paths_visual_haskell_textmate
+  autogen-modules:
+      Paths_visual_haskell_textmate
+  hs-source-dirs:
+      test
+  ghc-options: -threaded
+  build-depends:
+      aeson
+    , async
+    , base >=4.20.2 && <4.21
+    , bytestring
+    , containers
+    , directory
+    , filepath
+    , haskelui-core
+    , scientific
+    , stm
+    , text
+    , time
+    , vector
+    , visual-haskell-textmate
+    , xml-conduit
+  default-language: Haskell2010

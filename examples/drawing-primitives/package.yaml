@@ -1,0 +1,52 @@
+name: haskelui-example-drawing-primitives
+version: 0.1.0.0
+github: aantich/haskelui
+license: BSD-3-Clause
+author: HaskeLUI contributors
+maintainer: HaskeLUI contributors
+copyright: 2026 HaskeLUI contributors
+
+dependencies:
+  - base >= 4.20.2 && < 4.21
+  - text
+  - haskelui-core
+
+library:
+  source-dirs: src
+  exposed-modules:
+    - Example.DrawingPrimitives
+
+executables:
+  haskelui-drawing-primitives:
+    main: Main.hs
+    source-dirs: app
+    dependencies:
+      - haskelui-backend-appkit
+      - haskelui-example-drawing-primitives
+      - haskelui-runtime
+    ghc-options:
+      - -Wall
+      - -Wcompat
+      - -threaded
+    when:
+      - condition: '!os(darwin)'
+        buildable: false
+
+tests:
+  drawing-primitives-model-test:
+    main: Spec.hs
+    source-dirs: test
+    dependencies:
+      - haskelui-backend-headless
+      - haskelui-example-drawing-primitives
+      - haskelui-runtime
+  drawing-primitives-native-test:
+    main: NativeSpec.hs
+    source-dirs: test/native
+    dependencies:
+      - haskelui-backend-appkit
+      - haskelui-example-drawing-primitives
+      - haskelui-runtime
+    when:
+      - condition: '!os(darwin)'
+        buildable: false

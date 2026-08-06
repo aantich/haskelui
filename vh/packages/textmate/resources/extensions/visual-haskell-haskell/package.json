@@ -1,0 +1,22 @@
+{
+  "name": "visual-haskell-haskell",
+  "displayName": "Visual Haskell Haskell Grammar",
+  "version": "1.0.0",
+  "contributes": {
+    "languages": [
+      {
+        "id": "haskell",
+        "aliases": ["Haskell"],
+        "extensions": [".hs", ".lhs"]
+      }
+    ],
+    "grammars": [
+      {
+        "language": "haskell",
+        "scopeName": "source.haskell",
+        "path": "./syntaxes/haskell.tmLanguage.json"
+      }
+    ]
+  }
+}
+

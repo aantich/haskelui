@@ -1,0 +1,19 @@
+{
+  "name": "Python",
+  "scopeName": "source.python",
+  "fileTypes": ["py", "pyw"],
+  "patterns": [
+    { "name": "comment.line.number-sign.python", "match": "#.*$" },
+    { "name": "string.quoted.multi.double.python", "begin": "\"\"\"", "end": "\"\"\"" },
+    { "name": "string.quoted.multi.single.python", "begin": "'''", "end": "'''" },
+    { "name": "string.quoted.double.python", "match": "(?i:[rubf]*)\"(?:\\\\.|[^\"\\\\])*\"" },
+    { "name": "string.quoted.single.python", "match": "(?i:[rubf]*)'(?:\\\\.|[^'\\\\])*'" },
+    { "name": "keyword.control.python", "match": "\\b(?:and|as|assert|async|await|break|case|class|continue|def|del|elif|else|except|finally|for|from|global|if|import|in|is|lambda|match|nonlocal|not|or|pass|raise|return|try|while|with|yield)\\b" },
+    { "name": "constant.language.python", "match": "\\b(?:True|False|None|NotImplemented|Ellipsis)\\b" },
+    { "name": "constant.numeric.python", "match": "\\b(?:0[xX][0-9A-Fa-f_]+|0[oO][0-7_]+|0[bB][01_]+|[0-9][0-9_]*(?:\\.[0-9_]*)?(?:[eE][+-]?[0-9_]+)?[jJ]?)\\b" },
+    { "name": "entity.name.function.python", "match": "(?<=\\bdef\\s)[A-Za-z_][A-Za-z0-9_]*" },
+    { "name": "entity.name.type.class.python", "match": "(?<=\\bclass\\s)[A-Za-z_][A-Za-z0-9_]*" },
+    { "name": "entity.name.function.decorator.python", "match": "@[A-Za-z_][A-Za-z0-9_.]*" }
+  ]
+}
+

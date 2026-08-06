@@ -4,10 +4,14 @@
 module HaskeLUI.Backend.AppKit.Testing
   ( AppKitDebugCounters (..)
   , AppKitControlGalleryTestSpec (..)
+  , AppKitDrawingTestSpec (..)
+  , AppKitExplorerTestSpec (..)
   , AppKitTextEditorTestSpec (..)
   , AppKitVerticalTestSpec (..)
   , appKitBackendWithTextEditorTest
   , appKitBackendWithControlGalleryTest
+  , appKitBackendWithDrawingTest
+  , appKitBackendWithExplorerTest
   , appKitBackendWithVerticalTest
   , appKitResourcesReleased
   , queryAppKitDebugCounters
@@ -28,9 +32,12 @@ import HaskeLUI.Backend.AppKit.Internal.FFI
   , c_testScheduleVerticalScript
   , c_testScheduleTextEditorScript
   , c_testScheduleControlGalleryScript
+  , c_testScheduleDrawingScript
+  , c_testScheduleExplorerScript
   )
 import HaskeLUI.Core
   ( CommandId (..)
+  , CollectionItemKey (..)
   , ElementKey (..)
   , TabKey (..)
   , WindowKey (..)
@@ -56,6 +63,14 @@ data AppKitTextEditorTestSpec = AppKitTextEditorTestSpec
   }
   deriving stock (Eq, Show)
 
+data AppKitExplorerTestSpec = AppKitExplorerTestSpec
+  { testExplorerWindow :: !WindowKey
+  , testProjectTree :: !ElementKey
+  , testProjectFile :: !CollectionItemKey
+  , testOpenedFileTab :: !TabKey
+  }
+  deriving stock (Eq, Show)
+
 data AppKitControlGalleryTestSpec = AppKitControlGalleryTestSpec
   { testGalleryWindow :: !WindowKey
   , testGalleryRootTab :: !ElementKey
@@ -71,6 +86,12 @@ data AppKitControlGalleryTestSpec = AppKitControlGalleryTestSpec
   , testGalleryPopover :: !ElementKey
   , testGalleryContainer :: !ElementKey
   , testGalleryNestedChild :: !ElementKey
+  }
+  deriving stock (Eq, Show)
+
+data AppKitDrawingTestSpec = AppKitDrawingTestSpec
+  { testDrawingWindow :: !WindowKey
+  , testDrawingSurface :: !ElementKey
   }
   deriving stock (Eq, Show)
 
@@ -107,6 +128,17 @@ appKitBackendWithTextEditorTest spec =
       spec.testEditorOpenFolderCommand.unCommandId
     pure session
 
+appKitBackendWithExplorerTest :: AppKitExplorerTestSpec -> Backend
+appKitBackendWithExplorerTest spec =
+  Backend $ \dispatch -> do
+    session <- appKitBackend.openBackend dispatch
+    c_testScheduleExplorerScript
+      spec.testExplorerWindow.unWindowKey
+      spec.testProjectTree.unElementKey
+      spec.testProjectFile.unCollectionItemKey
+      spec.testOpenedFileTab.unTabKey
+    pure session
+
 appKitBackendWithControlGalleryTest :: AppKitControlGalleryTestSpec -> Backend
 appKitBackendWithControlGalleryTest spec =
   Backend $ \dispatch -> do
@@ -126,6 +158,15 @@ appKitBackendWithControlGalleryTest spec =
       spec.testGalleryPopover.unElementKey
       spec.testGalleryContainer.unElementKey
       spec.testGalleryNestedChild.unElementKey
+    pure session
+
+appKitBackendWithDrawingTest :: AppKitDrawingTestSpec -> Backend
+appKitBackendWithDrawingTest spec =
+  Backend $ \dispatch -> do
+    session <- appKitBackend.openBackend dispatch
+    c_testScheduleDrawingScript
+      spec.testDrawingWindow.unWindowKey
+      spec.testDrawingSurface.unElementKey
     pure session
 
 queryAppKitDebugCounters :: IO AppKitDebugCounters

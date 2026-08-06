@@ -2,13 +2,14 @@
 
 module Main (main) where
 
-import VisualHaskell (applicationWithWorkspaceRegistry)
-import System.Directory
-  ( XdgDirectory (XdgState)
-  , createDirectoryIfMissing
-  , getXdgDirectory
+import VisualHaskell (applicationWithEnvironment)
+import VisualHaskell.Paths
+  ( ensureVisualHaskellPaths
+  , resolveVisualHaskellPaths
+  , visualHaskellHome
+  , visualHaskellLastWorkspacePath
   )
-import System.FilePath ((</>))
+import VisualHaskell.TextMate (defaultTextMateConfiguration)
 import HaskeLUI.Backend.AppKit
   ( AppKitCapabilities (..)
   , appKitBackend
@@ -19,8 +20,13 @@ import HaskeLUI.Runtime (runApp)
 main :: IO ()
 main = do
   capabilities <- queryAppKitCapabilities
-  stateDirectory <- getXdgDirectory XdgState "visual-haskell"
-  createDirectoryIfMissing True stateDirectory
-  let registryPath = stateDirectory </> "last-workspace"
+  paths <- resolveVisualHaskellPaths
+  ensureVisualHaskellPaths paths
+  textMateConfiguration <- defaultTextMateConfiguration paths.visualHaskellHome
   putStrLn ("Starting Visual Haskell on " <> show capabilities.appKitVersion)
-  runApp appKitBackend (applicationWithWorkspaceRegistry registryPath)
+  runApp
+    appKitBackend
+    ( applicationWithEnvironment
+        paths.visualHaskellLastWorkspacePath
+        textMateConfiguration
+    )

@@ -45,7 +45,9 @@ The initial implementation will:
    values.
 6. Support GHC 9.10.3 first and add other compiler workers only after the
    protocol and product behavior stabilize.
-7. Keep the existing pure lexical highlighter as an immediate fallback.
+7. Use the implemented asynchronous TextMate service for broad lexical
+   highlighting, while keeping the existing pure Haskell lexer as an immediate
+   startup/failure fallback.
 8. Apply all worker-generated changes through normal revision-checked editor
    transactions. The worker never writes source files.
 9. Keep portable UI/workspace state in `.vihs` and rebuildable compiler data in
@@ -780,7 +782,7 @@ data TrustMode
 Untrusted mode provides:
 
 - File tree and ordinary text editing
-- Pure lexical highlighting
+- Declarative TextMate lexical highlighting with a pure built-in fallback
 - No project commands
 - No custom cradle
 - No compiler plugins or Template Haskell execution
@@ -956,7 +958,7 @@ Gate:
 
 - Add semantic highlighting, hover, definition, outline, analysis status, and
   component selection.
-- Preserve lexical fallback and explicit stale-state presentation.
+- Preserve TextMate/pure lexical fallback and explicit stale-state presentation.
 - Add project-configuration reload and trusted file watching.
 
 Gate:

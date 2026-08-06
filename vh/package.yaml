@@ -11,15 +11,18 @@ dependencies:
   - base >= 4.20.2 && < 4.21
   - bytestring
   - containers
+  - directory
   - filepath
   - text
   - haskelui-core
+  - visual-haskell-textmate
 
 library:
   source-dirs: src
   exposed-modules:
     - VisualHaskell
     - VisualHaskell.Highlighting
+    - VisualHaskell.Paths
     - VisualHaskell.WorkspaceState
 
 executables:
@@ -53,6 +56,19 @@ tests:
       - directory
       - haskelui-backend-appkit
       - visual-haskell
+      - haskelui-runtime
+    when:
+      - condition: '!os(darwin)'
+        buildable: false
+  vh-explorer-native-test:
+    main: ExplorerNativeSpec.hs
+    source-dirs: test/explorer-native
+    dependencies:
+      - directory
+      - filepath
+      - haskelui-backend-appkit
+      - visual-haskell
+      - visual-haskell-textmate
       - haskelui-runtime
     when:
       - condition: '!os(darwin)'

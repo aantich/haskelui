@@ -6,7 +6,9 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 module HaskeLUI.Core
-  ( module HaskeLUI.Layout
+  ( module HaskeLUI.Drawing
+  , module HaskeLUI.Graphics.Types
+  , module HaskeLUI.Layout
   , Action
   , App (..)
   , AppView (..)
@@ -18,7 +20,6 @@ module HaskeLUI.Core
   , ChoiceControlSpec (..)
   , ChoiceItem (..)
   , ChoiceKey (..)
-  , Color (..)
   , ColorControlSpec (..)
   , CollectionControlSpec (..)
   , CollectionItem (..)
@@ -33,6 +34,7 @@ module HaskeLUI.Core
   , LayoutContainerSpec (..)
   , Control (..)
   , ControlLabel (..)
+  , DrawingSurfaceSpec (..)
   , DateComponents (..)
   , DateControlSpec (..)
   , DocumentKey (..)
@@ -46,9 +48,6 @@ module HaskeLUI.Core
   , ExternalSink (..)
   , FileSystemEntry (..)
   , FileSystemEntryKind (..)
-  , FontFamily (..)
-  , FontSlant (..)
-  , FontWeight (..)
   , ImageControlSpec (..)
   , ImageSource (..)
   , MenuControlSpec (..)
@@ -61,7 +60,6 @@ module HaskeLUI.Core
   , PaneState (..)
   , PaneTree (..)
   , PaneVisibility (..)
-  , Rect (..)
   , PresentationKind (..)
   , PresentationResult (..)
   , PresentationSpec (..)
@@ -103,7 +101,6 @@ module HaskeLUI.Core
   , TextRevision (..)
   , TextRun (..)
   , TextSpan (..)
-  , TextStyle (..)
   , TextInputSpec (..)
   , TimeComponents (..)
   , TimeControlSpec (..)
@@ -116,7 +113,6 @@ module HaskeLUI.Core
   , TabKey (..)
   , Transaction (..)
   , UIEvent (..)
-  , UnderlineStyle (..)
   , UndoGroup (..)
   , UndoPolicy (..)
   , WindowKey (..)
@@ -211,6 +207,8 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Typeable (Typeable)
 import Data.Word (Word64)
+import HaskeLUI.Drawing
+import HaskeLUI.Graphics.Types
 import HaskeLUI.Layout
 
 newtype WindowKey = WindowKey {unWindowKey :: Word64}
@@ -282,103 +280,6 @@ newtype ChoiceKey = ChoiceKey {unChoiceKey :: Word64}
 
 newtype CollectionItemKey = CollectionItemKey {unCollectionItemKey :: Word64}
   deriving stock (Eq, Ord, Show)
-
-data Rect = Rect
-  { rectX :: !Double
-  , rectY :: !Double
-  , rectWidth :: !Double
-  , rectHeight :: !Double
-  }
-  deriving stock (Eq, Show)
-
-data Color = RGBA
-  { colorRed :: !Double
-  , colorGreen :: !Double
-  , colorBlue :: !Double
-  , colorAlpha :: !Double
-  }
-  deriving stock (Eq, Show)
-
-data FontFamily
-  = SystemFont
-  | MonospaceFont
-  | NamedFont !Text
-  deriving stock (Eq, Show)
-
-data FontWeight
-  = Thin
-  | ExtraLight
-  | Light
-  | Regular
-  | Medium
-  | SemiBold
-  | Bold
-  | ExtraBold
-  | Black
-  deriving stock (Eq, Ord, Show)
-
-data FontSlant
-  = Upright
-  | Italic
-  | Oblique
-  deriving stock (Eq, Ord, Show)
-
-data UnderlineStyle
-  = UnderlineNone
-  | UnderlineSingle
-  | UnderlineDouble
-  | UnderlineThick
-  | UnderlineDotted
-  | UnderlineDashed
-  | UnderlineWavy
-  deriving stock (Eq, Ord, Show)
-
--- | Partial portable inline styling. 'Nothing' means that the property does not
--- override the style supplied by an earlier text layer.
-data TextStyle = TextStyle
-  { textForeground :: !(Maybe Color)
-  , textBackground :: !(Maybe Color)
-  , textFontFamily :: !(Maybe FontFamily)
-  , textFontSize :: !(Maybe Double)
-  , textFontWeight :: !(Maybe FontWeight)
-  , textFontSlant :: !(Maybe FontSlant)
-  , textUnderline :: !(Maybe UnderlineStyle)
-  , textStrikethrough :: !(Maybe Bool)
-  , textLetterSpacing :: !(Maybe Double)
-  , textBaselineOffset :: !(Maybe Double)
-  }
-  deriving stock (Eq, Show)
-
--- Later layers override earlier layers one property at a time.
-instance Semigroup TextStyle where
-  earlier <> later =
-    TextStyle
-      { textForeground = later.textForeground <|> earlier.textForeground
-      , textBackground = later.textBackground <|> earlier.textBackground
-      , textFontFamily = later.textFontFamily <|> earlier.textFontFamily
-      , textFontSize = later.textFontSize <|> earlier.textFontSize
-      , textFontWeight = later.textFontWeight <|> earlier.textFontWeight
-      , textFontSlant = later.textFontSlant <|> earlier.textFontSlant
-      , textUnderline = later.textUnderline <|> earlier.textUnderline
-      , textStrikethrough = later.textStrikethrough <|> earlier.textStrikethrough
-      , textLetterSpacing = later.textLetterSpacing <|> earlier.textLetterSpacing
-      , textBaselineOffset = later.textBaselineOffset <|> earlier.textBaselineOffset
-      }
-
-instance Monoid TextStyle where
-  mempty =
-    TextStyle
-      { textForeground = Nothing
-      , textBackground = Nothing
-      , textFontFamily = Nothing
-      , textFontSize = Nothing
-      , textFontWeight = Nothing
-      , textFontSlant = Nothing
-      , textUnderline = Nothing
-      , textStrikethrough = Nothing
-      , textLetterSpacing = Nothing
-      , textBaselineOffset = Nothing
-      }
 
 -- | A range between Unicode scalar-value boundaries in an immutable text
 -- snapshot. Backends translate these offsets to their native indexing units.
@@ -668,6 +569,18 @@ data ImageControlSpec = ImageControlSpec
   }
   deriving stock (Eq, Show)
 
+-- | An immutable retained drawing surface. The revision is the cheap backend
+-- reconciliation key; callers must advance it whenever the drawing changes.
+data DrawingSurfaceSpec = DrawingSurfaceSpec
+  { drawingSurfaceKey :: !ElementKey
+  , drawingSurfaceFrame :: !Rect
+  , drawingSurfaceRevision :: !DrawingRevision
+  , drawingSurfaceDrawing :: !Drawing
+  , drawingSurfaceIntrinsicMetrics :: !IntrinsicMetrics
+  , drawingSurfaceAccessibleLabel :: !Text
+  }
+  deriving stock (Eq, Show)
+
 data CollectionControlSpec = CollectionControlSpec
   { collectionControlKey :: !ElementKey
   , collectionControlFrame :: !Rect
@@ -889,6 +802,7 @@ data Control
   | RichText !RichTextSpec
   | Image !ImageControlSpec
   | Icon !ImageControlSpec
+  | DrawingSurface !DrawingSurfaceSpec
   | Separator !ElementKey !Rect
   | RepeatButton !ActionControlSpec
   | ToggleButton !ToggleControlSpec
@@ -948,6 +862,7 @@ controlKey = \case
   RichText spec -> spec.richTextKey
   Image spec -> spec.imageControlKey
   Icon spec -> spec.imageControlKey
+  DrawingSurface spec -> spec.drawingSurfaceKey
   Separator key _ -> key
   RepeatButton spec -> spec.actionControlKey
   ToggleButton spec -> spec.toggleControlKey
@@ -1006,6 +921,7 @@ controlFrame = \case
   RichText spec -> spec.richTextFrame
   Image spec -> spec.imageControlFrame
   Icon spec -> spec.imageControlFrame
+  DrawingSurface spec -> spec.drawingSurfaceFrame
   Separator _ frame -> frame
   RepeatButton spec -> spec.actionControlFrame
   ToggleButton spec -> spec.toggleControlFrame
@@ -1067,6 +983,7 @@ setControlFrame frame = \case
   RichText spec -> RichText spec {richTextFrame = frame}
   Image spec -> Image spec {imageControlFrame = frame}
   Icon spec -> Icon spec {imageControlFrame = frame}
+  DrawingSurface spec -> DrawingSurface spec {drawingSurfaceFrame = frame}
   Separator key _ -> Separator key frame
   RepeatButton spec -> RepeatButton spec {actionControlFrame = frame}
   ToggleButton spec -> ToggleButton spec {toggleControlFrame = frame}
@@ -1120,6 +1037,7 @@ setControlFrame frame = \case
 -- populated its native measurement cache.  Backends should override these
 -- values with fitting sizes whenever possible.
 controlIntrinsicMetrics :: Control -> IntrinsicMetrics
+controlIntrinsicMetrics (DrawingSurface spec) = spec.drawingSurfaceIntrinsicMetrics
 controlIntrinsicMetrics control =
   let frame = controlFrame control
       ideal = Size (Dp (max 0 frame.rectWidth)) (Dp (max 0 frame.rectHeight))
@@ -1218,6 +1136,7 @@ controlCatalogKind = \case
   RichText {} -> Just RichTextKind
   Image {} -> Just ImageKind
   Icon {} -> Just IconKind
+  DrawingSurface {} -> Nothing
   Separator {} -> Just SeparatorKind
   RepeatButton {} -> Just RepeatButtonKind
   ToggleButton {} -> Just ToggleButtonKind
@@ -1569,6 +1488,13 @@ validateControl control =
             }
       ProgressBar spec -> validateProgress spec
       Meter spec -> validateProgress spec
+      DrawingSurface spec ->
+        [ "Invalid drawing surface "
+            <> Text.pack (show spec.drawingSurfaceKey)
+            <> ": "
+            <> drawingValidationMessage drawingError
+        | drawingError <- validateDrawing spec.drawingSurfaceDrawing
+        ]
       Container spec -> validateContainer spec
       LayoutContainer spec -> validateLayoutContainer spec
       _ -> []

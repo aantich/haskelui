@@ -22,6 +22,7 @@ library
   exposed-modules:
       VisualHaskell
       VisualHaskell.Highlighting
+      VisualHaskell.Paths
       VisualHaskell.WorkspaceState
   other-modules:
       Paths_visual_haskell
@@ -34,9 +35,11 @@ library
     , base >=4.20.2 && <4.21
     , bytestring
     , containers
+    , directory
     , filepath
     , haskelui-core
     , text
+    , visual-haskell-textmate
   default-language: Haskell2010
 
 executable vh
@@ -60,6 +63,33 @@ executable vh
     , haskelui-runtime
     , text
     , visual-haskell
+    , visual-haskell-textmate
+  default-language: Haskell2010
+  if !os(darwin)
+    buildable: False
+
+test-suite vh-explorer-native-test
+  type: exitcode-stdio-1.0
+  main-is: ExplorerNativeSpec.hs
+  other-modules:
+      Paths_visual_haskell
+  autogen-modules:
+      Paths_visual_haskell
+  hs-source-dirs:
+      test/explorer-native
+  build-depends:
+      aeson
+    , base >=4.20.2 && <4.21
+    , bytestring
+    , containers
+    , directory
+    , filepath
+    , haskelui-backend-appkit
+    , haskelui-core
+    , haskelui-runtime
+    , text
+    , visual-haskell
+    , visual-haskell-textmate
   default-language: Haskell2010
   if !os(darwin)
     buildable: False
@@ -78,10 +108,12 @@ test-suite vh-model-test
     , base >=4.20.2 && <4.21
     , bytestring
     , containers
+    , directory
     , filepath
     , haskelui-core
     , text
     , visual-haskell
+    , visual-haskell-textmate
   default-language: Haskell2010
 
 test-suite vh-native-test
@@ -105,6 +137,7 @@ test-suite vh-native-test
     , haskelui-runtime
     , text
     , visual-haskell
+    , visual-haskell-textmate
   default-language: Haskell2010
   if !os(darwin)
     buildable: False
@@ -129,4 +162,5 @@ test-suite vh-workspace-persistence-test
     , haskelui-runtime
     , text
     , visual-haskell
+    , visual-haskell-textmate
   default-language: Haskell2010

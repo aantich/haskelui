@@ -11,6 +11,7 @@ typedef NS_ENUM(NSInteger, HaskeLUIMacControlKind) {
   HaskeLUIMacControlKindButton,
   HaskeLUIMacControlKindTextField,
   HaskeLUIMacControlKindTextEditor,
+  HaskeLUIMacControlKindDrawing,
   HaskeLUIMacControlKindCatalog
 };
 
@@ -44,6 +45,8 @@ static NSString *HaskeLUILastTestFailure = nil;
 static BOOL HaskeLUIControlGalleryTestActive = NO;
 
 static NSColor *HaskeLUIColor(double red, double green, double blue, double alpha);
+static NSFont *HaskeLUIFontForStyle(NSFont *existingFont, const HaskeLUIMacTextStyle *style);
+static NSUnderlineStyle HaskeLUIUnderlineStyle(int32_t style);
 
 static void HaskeLUIAssertMainThread(void) {
   NSCAssert(HaskeLUIAppKitIsMainThread(), @"HaskeLUI AppKit operation must run on the process main thread");
@@ -84,6 +87,130 @@ static void HaskeLUIEmit(int32_t kind, uint64_t identity, NSString *text) {
 @implementation HaskeLUIContainerHostView
 - (BOOL)isFlipped {
   return self.usesTopLeftCoordinates;
+}
+@end
+
+typedef NS_ENUM(NSInteger, HaskeLUIDrawingCommandKind) {
+  HaskeLUIDrawingPushState,
+  HaskeLUIDrawingPopState,
+  HaskeLUIDrawingTransform,
+  HaskeLUIDrawingBeginOpacity,
+  HaskeLUIDrawingEndOpacity,
+  HaskeLUIDrawingClip,
+  HaskeLUIDrawingFill,
+  HaskeLUIDrawingStroke,
+  HaskeLUIDrawingText
+};
+
+@interface HaskeLUIDrawingView : NSView
+@property(nonatomic, copy) NSArray<NSDictionary *> *drawingCommands;
+@property(nonatomic, strong) NSMutableArray<NSDictionary *> *pendingCommands;
+@property(nonatomic, strong) NSBezierPath *pendingPath;
+@end
+
+@implementation HaskeLUIDrawingView
+- (BOOL)isFlipped {
+  return YES;
+}
+
+- (BOOL)isOpaque {
+  return NO;
+}
+
+- (void)drawRect:(NSRect)dirtyRect {
+  (void)dirtyRect;
+  CGContextRef context = NSGraphicsContext.currentContext.CGContext;
+  for (NSDictionary *command in self.drawingCommands ?: @[]) {
+    switch ((HaskeLUIDrawingCommandKind)[command[@"kind"] integerValue]) {
+      case HaskeLUIDrawingPushState:
+        [NSGraphicsContext saveGraphicsState];
+        break;
+      case HaskeLUIDrawingPopState:
+        [NSGraphicsContext restoreGraphicsState];
+        break;
+      case HaskeLUIDrawingTransform: {
+        NSAffineTransform *transform = [NSAffineTransform transform];
+        NSAffineTransformStruct matrix = {
+          [command[@"a"] doubleValue],
+          [command[@"b"] doubleValue],
+          [command[@"c"] doubleValue],
+          [command[@"d"] doubleValue],
+          [command[@"tx"] doubleValue],
+          [command[@"ty"] doubleValue]
+        };
+        transform.transformStruct = matrix;
+        [transform concat];
+        break;
+      }
+      case HaskeLUIDrawingBeginOpacity:
+        CGContextSaveGState(context);
+        CGContextSetAlpha(context, [command[@"alpha"] doubleValue]);
+        CGContextBeginTransparencyLayer(context, NULL);
+        break;
+      case HaskeLUIDrawingEndOpacity:
+        CGContextEndTransparencyLayer(context);
+        CGContextRestoreGState(context);
+        break;
+      case HaskeLUIDrawingClip: {
+        NSBezierPath *path = command[@"path"];
+        path.windingRule = [command[@"evenOdd"] boolValue]
+            ? NSWindingRuleEvenOdd
+            : NSWindingRuleNonZero;
+        [path addClip];
+        break;
+      }
+      case HaskeLUIDrawingFill: {
+        NSBezierPath *path = command[@"path"];
+        path.windingRule = [command[@"evenOdd"] boolValue]
+            ? NSWindingRuleEvenOdd
+            : NSWindingRuleNonZero;
+        [(NSColor *)command[@"color"] setFill];
+        [path fill];
+        break;
+      }
+      case HaskeLUIDrawingStroke: {
+        NSBezierPath *path = [command[@"path"] copy];
+        path.lineWidth = [command[@"width"] doubleValue];
+        path.lineCapStyle = (NSLineCapStyle)[command[@"cap"] integerValue];
+        path.lineJoinStyle = (NSLineJoinStyle)[command[@"join"] integerValue];
+        path.miterLimit = [command[@"miter"] doubleValue];
+        NSArray<NSNumber *> *dash = command[@"dash"];
+        if (dash.count > 0) {
+          CGFloat pattern[dash.count];
+          for (NSUInteger index = 0; index < dash.count; index += 1) {
+            pattern[index] = dash[index].doubleValue;
+          }
+          [path setLineDash:pattern
+                      count:(NSInteger)dash.count
+                      phase:[command[@"phase"] doubleValue]];
+        }
+        [(NSColor *)command[@"color"] setStroke];
+        [path stroke];
+        break;
+      }
+      case HaskeLUIDrawingText: {
+        NSString *text = command[@"text"];
+        NSDictionary *attributes = command[@"attributes"];
+        NSRect rect = [command[@"rect"] rectValue];
+        NSStringDrawingOptions options = [command[@"wrap"] integerValue] == 0
+            ? 0
+            : NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading;
+        NSRect bounds = [text boundingRectWithSize:rect.size options:options attributes:attributes];
+        switch ([command[@"vertical"] integerValue]) {
+          case 1:
+            rect.origin.y += MAX(0, (rect.size.height - NSHeight(bounds)) / 2.0);
+            break;
+          case 2:
+            rect.origin.y += MAX(0, rect.size.height - NSHeight(bounds));
+            break;
+          default:
+            break;
+        }
+        [text drawWithRect:rect options:options attributes:attributes];
+        break;
+      }
+    }
+  }
 }
 @end
 
@@ -446,6 +573,7 @@ static NSImage *HaskeLUIImageSource(NSString *source);
 @property(nonatomic, assign) BOOL suppressEvents;
 @property(nonatomic, assign) BOOL contentSizedRows;
 - (void)reload;
+- (void)activateSelectedItem:(id)sender;
 @end
 
 @implementation HaskeLUIMacOutlineAdapter
@@ -497,6 +625,30 @@ static NSImage *HaskeLUIImageSource(NSString *source);
   }];
   HaskeLUIEmit(HaskeLUIMacEventCollectionSelectionChanged, self.identity,
           [keys componentsJoinedByString:@","]);
+}
+
+- (void)activateSelectedItem:(id)sender {
+  (void)sender;
+  if (self.suppressEvents) {
+    return;
+  }
+  NSInteger row = self.outline.clickedRow;
+  if (row < 0) {
+    row = self.outline.selectedRow;
+  }
+  if (row < 0) {
+    return;
+  }
+  HaskeLUIMacOutlineNode *node = [self.outline itemAtRow:row];
+  // Selection-change already delivers newly selected rows. The action path is
+  // only for activating the row that the declarative model already selected,
+  // which AppKit otherwise reports as no change at all.
+  if (node != nil && [node.value[@"selected"] boolValue]) {
+    HaskeLUIEmit(
+        HaskeLUIMacEventCollectionSelectionChanged,
+        self.identity,
+        [node.value[@"identity"] stringValue]);
+  }
 }
 
 - (void)emitExpansion:(NSNotification *)notification expanded:(BOOL)expanded {
@@ -1322,6 +1474,9 @@ static HaskeLUIMacControlRef HaskeLUIRetainControl(
     case HaskeLUIMacControlKindTextEditor:
       focusView.accessibilityRole = NSAccessibilityTextAreaRole;
       break;
+    case HaskeLUIMacControlKindDrawing:
+      focusView.accessibilityRole = NSAccessibilityImageRole;
+      break;
     case HaskeLUIMacControlKindCatalog:
       focusView.accessibilityRole = NSAccessibilityGroupRole;
       break;
@@ -1429,6 +1584,321 @@ HaskeLUIMacControlRef haskelui_macos_text_editor_create(
       HaskeLUIMacControlKindTextEditor,
       identity,
       window);
+}
+
+static HaskeLUIDrawingView *HaskeLUIDrawing(HaskeLUIMacControlRef reference) {
+  HaskeLUIMacControlHandle *handle = HaskeLUIControl(reference);
+  if (handle.kind != HaskeLUIMacControlKindDrawing ||
+      ![handle.view isKindOfClass:HaskeLUIDrawingView.class]) {
+    return nil;
+  }
+  return (HaskeLUIDrawingView *)handle.view;
+}
+
+static void HaskeLUIAppendDrawingCommand(
+    HaskeLUIDrawingView *view,
+    NSDictionary *command) {
+  if (view.pendingCommands != nil && command != nil) {
+    [view.pendingCommands addObject:command];
+  }
+}
+
+HaskeLUIMacControlRef haskelui_macos_drawing_surface_create(
+    HaskeLUIMacWindowRef window,
+    uint64_t identity,
+    const char *utf8AccessibleLabel,
+    const HaskeLUIMacRect *frame) {
+  HaskeLUIAssertMainThread();
+  HaskeLUIDrawingView *view = [[HaskeLUIDrawingView alloc] initWithFrame:HaskeLUIRect(frame)];
+  view.drawingCommands = @[];
+  view.accessibilityLabel = HaskeLUIString(utf8AccessibleLabel);
+  return HaskeLUIRetainControl(
+      view,
+      view,
+      nil,
+      HaskeLUIMacControlKindDrawing,
+      identity,
+      window);
+}
+
+void haskelui_macos_drawing_set_accessible_label(
+    HaskeLUIMacControlRef reference,
+    const char *utf8AccessibleLabel) {
+  HaskeLUIDrawingView *view = HaskeLUIDrawing(reference);
+  view.accessibilityLabel = HaskeLUIString(utf8AccessibleLabel);
+}
+
+void haskelui_macos_drawing_begin(HaskeLUIMacControlRef reference) {
+  HaskeLUIAssertMainThread();
+  HaskeLUIDrawingView *view = HaskeLUIDrawing(reference);
+  view.pendingCommands = [[NSMutableArray alloc] init];
+  view.pendingPath = nil;
+}
+
+void haskelui_macos_drawing_push_state(HaskeLUIMacControlRef reference) {
+  HaskeLUIAppendDrawingCommand(
+      HaskeLUIDrawing(reference),
+      @{@"kind": @(HaskeLUIDrawingPushState)});
+}
+
+void haskelui_macos_drawing_pop_state(HaskeLUIMacControlRef reference) {
+  HaskeLUIAppendDrawingCommand(
+      HaskeLUIDrawing(reference),
+      @{@"kind": @(HaskeLUIDrawingPopState)});
+}
+
+void haskelui_macos_drawing_concat_transform(
+    HaskeLUIMacControlRef reference,
+    double a, double b, double c, double d, double tx, double ty) {
+  HaskeLUIAppendDrawingCommand(
+      HaskeLUIDrawing(reference),
+      @{
+        @"kind": @(HaskeLUIDrawingTransform),
+        @"a": @(a), @"b": @(b), @"c": @(c), @"d": @(d),
+        @"tx": @(tx), @"ty": @(ty)
+      });
+}
+
+void haskelui_macos_drawing_begin_opacity(
+    HaskeLUIMacControlRef reference,
+    double opacity) {
+  HaskeLUIAppendDrawingCommand(
+      HaskeLUIDrawing(reference),
+      @{@"kind": @(HaskeLUIDrawingBeginOpacity), @"alpha": @(opacity)});
+}
+
+void haskelui_macos_drawing_end_opacity(HaskeLUIMacControlRef reference) {
+  HaskeLUIAppendDrawingCommand(
+      HaskeLUIDrawing(reference),
+      @{@"kind": @(HaskeLUIDrawingEndOpacity)});
+}
+
+void haskelui_macos_drawing_path_begin(HaskeLUIMacControlRef reference) {
+  HaskeLUIDrawing(reference).pendingPath = [NSBezierPath bezierPath];
+}
+
+void haskelui_macos_drawing_path_move_to(
+    HaskeLUIMacControlRef reference,
+    double x,
+    double y) {
+  [HaskeLUIDrawing(reference).pendingPath moveToPoint:NSMakePoint(x, y)];
+}
+
+void haskelui_macos_drawing_path_line_to(
+    HaskeLUIMacControlRef reference,
+    double x,
+    double y) {
+  [HaskeLUIDrawing(reference).pendingPath lineToPoint:NSMakePoint(x, y)];
+}
+
+void haskelui_macos_drawing_path_quadratic_to(
+    HaskeLUIMacControlRef reference,
+    double controlX,
+    double controlY,
+    double x,
+    double y) {
+  NSBezierPath *path = HaskeLUIDrawing(reference).pendingPath;
+  NSPoint start = path.currentPoint;
+  NSPoint control = NSMakePoint(controlX, controlY);
+  NSPoint end = NSMakePoint(x, y);
+  NSPoint first = NSMakePoint(
+      start.x + (2.0 / 3.0) * (control.x - start.x),
+      start.y + (2.0 / 3.0) * (control.y - start.y));
+  NSPoint second = NSMakePoint(
+      end.x + (2.0 / 3.0) * (control.x - end.x),
+      end.y + (2.0 / 3.0) * (control.y - end.y));
+  [path curveToPoint:end controlPoint1:first controlPoint2:second];
+}
+
+void haskelui_macos_drawing_path_cubic_to(
+    HaskeLUIMacControlRef reference,
+    double control1X,
+    double control1Y,
+    double control2X,
+    double control2Y,
+    double x,
+    double y) {
+  [HaskeLUIDrawing(reference).pendingPath
+      curveToPoint:NSMakePoint(x, y)
+      controlPoint1:NSMakePoint(control1X, control1Y)
+      controlPoint2:NSMakePoint(control2X, control2Y)];
+}
+
+void haskelui_macos_drawing_path_close(HaskeLUIMacControlRef reference) {
+  [HaskeLUIDrawing(reference).pendingPath closePath];
+}
+
+void haskelui_macos_drawing_path_add_rect(
+    HaskeLUIMacControlRef reference,
+    const HaskeLUIMacRect *rect) {
+  [HaskeLUIDrawing(reference).pendingPath appendBezierPathWithRect:HaskeLUIRect(rect)];
+}
+
+void haskelui_macos_drawing_path_add_rounded_rect(
+    HaskeLUIMacControlRef reference,
+    const HaskeLUIMacRect *rect,
+    double radiusX,
+    double radiusY) {
+  NSBezierPath *rounded = [NSBezierPath
+      bezierPathWithRoundedRect:HaskeLUIRect(rect)
+      xRadius:radiusX
+      yRadius:radiusY];
+  [HaskeLUIDrawing(reference).pendingPath appendBezierPath:rounded];
+}
+
+void haskelui_macos_drawing_path_add_ellipse(
+    HaskeLUIMacControlRef reference,
+    const HaskeLUIMacRect *rect) {
+  [HaskeLUIDrawing(reference).pendingPath
+      appendBezierPathWithOvalInRect:HaskeLUIRect(rect)];
+}
+
+static NSBezierPath *HaskeLUITakeDrawingPath(HaskeLUIDrawingView *view) {
+  NSBezierPath *path = [view.pendingPath copy] ?: [NSBezierPath bezierPath];
+  view.pendingPath = nil;
+  return path;
+}
+
+void haskelui_macos_drawing_clip_path(
+    HaskeLUIMacControlRef reference,
+    int32_t evenOdd) {
+  HaskeLUIDrawingView *view = HaskeLUIDrawing(reference);
+  HaskeLUIAppendDrawingCommand(
+      view,
+      @{
+        @"kind": @(HaskeLUIDrawingClip),
+        @"path": HaskeLUITakeDrawingPath(view),
+        @"evenOdd": @(evenOdd != 0)
+      });
+}
+
+void haskelui_macos_drawing_fill_path(
+    HaskeLUIMacControlRef reference,
+    int32_t evenOdd,
+    double red,
+    double green,
+    double blue,
+    double alpha) {
+  HaskeLUIDrawingView *view = HaskeLUIDrawing(reference);
+  HaskeLUIAppendDrawingCommand(
+      view,
+      @{
+        @"kind": @(HaskeLUIDrawingFill),
+        @"path": HaskeLUITakeDrawingPath(view),
+        @"evenOdd": @(evenOdd != 0),
+        @"color": HaskeLUIColor(red, green, blue, alpha)
+      });
+}
+
+void haskelui_macos_drawing_stroke_path(
+    HaskeLUIMacControlRef reference,
+    double width,
+    int32_t lineCap,
+    int32_t lineJoin,
+    double miterLimit,
+    const double *dashPattern,
+    uint64_t dashCount,
+    double dashPhase,
+    double red,
+    double green,
+    double blue,
+    double alpha) {
+  HaskeLUIDrawingView *view = HaskeLUIDrawing(reference);
+  NSMutableArray<NSNumber *> *dash = [[NSMutableArray alloc] init];
+  for (uint64_t index = 0; index < dashCount; index += 1) {
+    [dash addObject:@(dashPattern[index])];
+  }
+  HaskeLUIAppendDrawingCommand(
+      view,
+      @{
+        @"kind": @(HaskeLUIDrawingStroke),
+        @"path": HaskeLUITakeDrawingPath(view),
+        @"width": @(width),
+        @"cap": @(lineCap),
+        @"join": @(lineJoin),
+        @"miter": @(miterLimit),
+        @"dash": dash,
+        @"phase": @(dashPhase),
+        @"color": HaskeLUIColor(red, green, blue, alpha)
+      });
+}
+
+void haskelui_macos_drawing_text(
+    HaskeLUIMacControlRef reference,
+    const char *utf8Text,
+    const HaskeLUIMacRect *rect,
+    const HaskeLUIMacTextStyle *style,
+    int32_t horizontalAlignment,
+    int32_t verticalAlignment,
+    int32_t wrapping) {
+  HaskeLUIDrawingView *view = HaskeLUIDrawing(reference);
+  NSMutableDictionary<NSAttributedStringKey, id> *attributes =
+      [[NSMutableDictionary alloc] init];
+  attributes[NSForegroundColorAttributeName] = NSColor.labelColor;
+  attributes[NSFontAttributeName] = [NSFont systemFontOfSize:13.0];
+  if (style != NULL) {
+    if ((style->fields & HaskeLUIMacTextStyleForeground) != 0) {
+      attributes[NSForegroundColorAttributeName] = HaskeLUIColor(
+          style->foreground_red,
+          style->foreground_green,
+          style->foreground_blue,
+          style->foreground_alpha);
+    }
+    if ((style->fields & HaskeLUIMacTextStyleBackground) != 0) {
+      attributes[NSBackgroundColorAttributeName] = HaskeLUIColor(
+          style->background_red,
+          style->background_green,
+          style->background_blue,
+          style->background_alpha);
+    }
+    NSFont *font = HaskeLUIFontForStyle(attributes[NSFontAttributeName], style);
+    if (font != nil) {
+      attributes[NSFontAttributeName] = font;
+    }
+    if ((style->fields & HaskeLUIMacTextStyleUnderline) != 0) {
+      attributes[NSUnderlineStyleAttributeName] =
+          @(HaskeLUIUnderlineStyle(style->underline_style));
+    }
+    if ((style->fields & HaskeLUIMacTextStyleStrikethrough) != 0) {
+      attributes[NSStrikethroughStyleAttributeName] =
+          style->strikethrough != 0 ? @(NSUnderlineStyleSingle) : @0;
+    }
+    if ((style->fields & HaskeLUIMacTextStyleLetterSpacing) != 0) {
+      attributes[NSKernAttributeName] = @(style->letter_spacing);
+    }
+    if ((style->fields & HaskeLUIMacTextStyleBaselineOffset) != 0) {
+      attributes[NSBaselineOffsetAttributeName] = @(style->baseline_offset);
+    }
+  }
+  NSMutableParagraphStyle *paragraph = [[NSMutableParagraphStyle alloc] init];
+  paragraph.alignment = horizontalAlignment == 1
+      ? NSTextAlignmentCenter
+      : horizontalAlignment == 2 ? NSTextAlignmentRight : NSTextAlignmentLeft;
+  paragraph.lineBreakMode = wrapping == 2
+      ? NSLineBreakByCharWrapping
+      : wrapping == 1 ? NSLineBreakByWordWrapping : NSLineBreakByClipping;
+  attributes[NSParagraphStyleAttributeName] = paragraph;
+  HaskeLUIAppendDrawingCommand(
+      view,
+      @{
+        @"kind": @(HaskeLUIDrawingText),
+        @"text": HaskeLUIString(utf8Text),
+        @"rect": [NSValue valueWithRect:HaskeLUIRect(rect)],
+        @"attributes": attributes,
+        @"vertical": @(verticalAlignment),
+        @"wrap": @(wrapping)
+      });
+}
+
+void haskelui_macos_drawing_end(HaskeLUIMacControlRef reference) {
+  HaskeLUIAssertMainThread();
+  HaskeLUIDrawingView *view = HaskeLUIDrawing(reference);
+  if (view.pendingCommands != nil) {
+    view.drawingCommands = [view.pendingCommands copy];
+    view.pendingCommands = nil;
+    view.pendingPath = nil;
+    [view setNeedsDisplay:YES];
+  }
 }
 
 static HaskeLUIMacActionTarget *HaskeLUINewTarget(uint64_t identity, int32_t eventKind) {
@@ -1559,6 +2029,8 @@ static NSScrollView *HaskeLUIOutlineCollectionView(
   adapter.outline = outline;
   outline.dataSource = adapter;
   outline.delegate = adapter;
+  outline.target = adapter;
+  outline.action = @selector(activateSelectedItem:);
   scroll.documentView = outline;
   *adapterResult = adapter;
   *outlineResult = outline;
@@ -2963,6 +3435,8 @@ void haskelui_macos_control_set_text(HaskeLUIMacControlRef reference, const char
       }
       break;
     }
+    case HaskeLUIMacControlKindDrawing:
+      break;
     case HaskeLUIMacControlKindCatalog:
       haskelui_macos_catalog_control_set_primary_text(reference, utf8_text);
       break;
@@ -2995,7 +3469,7 @@ static NSFontWeight HaskeLUIFontWeight(int32_t weight) {
   }
 }
 
-static NSFont *HaskeLUIFontForStyle(NSTextView *editor, const HaskeLUIMacTextStyle *style) {
+static NSFont *HaskeLUIFontForStyle(NSFont *existingFont, const HaskeLUIMacTextStyle *style) {
   uint32_t fontFields =
       HaskeLUIMacTextStyleFontFamily |
       HaskeLUIMacTextStyleFontSize |
@@ -3005,7 +3479,7 @@ static NSFont *HaskeLUIFontForStyle(NSTextView *editor, const HaskeLUIMacTextSty
     return nil;
   }
 
-  NSFont *existing = editor.font ?: [NSFont systemFontOfSize:13.0];
+  NSFont *existing = existingFont ?: [NSFont systemFontOfSize:13.0];
   CGFloat size =
       (style->fields & HaskeLUIMacTextStyleFontSize) != 0
           ? (CGFloat)MAX(1.0, style->font_size)
@@ -3127,7 +3601,7 @@ void haskelui_macos_text_editor_set_base_style(
             style->background_blue,
             style->background_alpha);
   }
-  NSFont *font = HaskeLUIFontForStyle(editor, style);
+  NSFont *font = HaskeLUIFontForStyle(editor.font, style);
   if (font != nil) {
     editor.font = font;
   }
@@ -3176,7 +3650,7 @@ int32_t haskelui_macos_text_editor_apply_style(
             style->background_blue,
             style->background_alpha);
   }
-  NSFont *font = HaskeLUIFontForStyle(editor, style);
+  NSFont *font = HaskeLUIFontForStyle(editor.font, style);
   if (font != nil) {
     attributes[NSFontAttributeName] = font;
   }
@@ -4388,5 +4862,111 @@ void haskelui_macos_test_schedule_text_editor_script(
       });
     });
     });
+  });
+}
+
+void haskelui_macos_test_schedule_explorer_script(
+    uint64_t workspaceWindowIdentity,
+    uint64_t projectTreeIdentity,
+    uint64_t fileItemIdentity,
+    uint64_t expectedTabIdentity) {
+  HaskeLUIAssertMainThread();
+
+  HaskeLUITestAfter(0.35, ^{
+    HaskeLUIMacWindowHandle *window = HaskeLUIState.windows[@(workspaceWindowIdentity)];
+    HaskeLUIMacControlHandle *tree = HaskeLUIState.controls[@(projectTreeIdentity)];
+    if (window == nil || tree == nil || tree.outlineAdapter == nil) {
+      HaskeLUITestFail(@"Visual Haskell project outline was not registered");
+      [NSApplication.sharedApplication stop:nil];
+      return;
+    }
+
+    NSOutlineView *outline = tree.outlineAdapter.outline;
+    NSInteger fileRow = -1;
+    for (NSInteger row = 0; row < outline.numberOfRows; row += 1) {
+      HaskeLUIMacOutlineNode *node = [outline itemAtRow:row];
+      if ([node.value[@"identity"] unsignedLongLongValue] == fileItemIdentity) {
+        fileRow = row;
+        break;
+      }
+    }
+    if (fileRow < 0) {
+      HaskeLUITestFail(@"Visual Haskell project file row was not visible");
+      [NSApplication.sharedApplication stop:nil];
+      return;
+    }
+
+    [window.window makeKeyAndOrderFront:nil];
+    [window.window makeFirstResponder:outline];
+    [outline selectRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)fileRow]
+         byExtendingSelection:NO];
+    [outline sendAction:outline.action to:outline.target];
+
+    HaskeLUITestAfter(0.40, ^{
+      HaskeLUIMacWindowHandle *updatedWindow = HaskeLUIState.windows[@(workspaceWindowIdentity)];
+      HaskeLUIMacTabHandle *openedTab = nil;
+      for (HaskeLUIMacTabGroupHandle *group in updatedWindow.tabGroups.allValues) {
+        openedTab = group.tabs[@(expectedTabIdentity)];
+        if (openedTab != nil) {
+          break;
+        }
+      }
+      if (updatedWindow == nil || openedTab == nil || openedTab.contentView.hidden) {
+        HaskeLUITestFail(@"selecting a native project file did not open and activate its tab");
+        [NSApplication.sharedApplication stop:nil];
+        return;
+      }
+
+      [updatedWindow.window performClose:nil];
+      HaskeLUITestAfter(0.20, ^{
+        if (HaskeLUIState != nil && HaskeLUIState.windows[@(workspaceWindowIdentity)] != nil) {
+          HaskeLUITestFail(@"clean explorer fixture did not close its workspace");
+        }
+        if (HaskeLUIState != nil) {
+          [NSApplication.sharedApplication stop:nil];
+        }
+      });
+    });
+  });
+}
+
+void haskelui_macos_test_schedule_drawing_script(
+    uint64_t windowIdentity,
+    uint64_t drawingSurfaceIdentity) {
+  HaskeLUIAssertMainThread();
+  HaskeLUITestAfter(0.15, ^{
+    HaskeLUIMacWindowHandle *window = HaskeLUIState.windows[@(windowIdentity)];
+    HaskeLUIMacControlHandle *control = HaskeLUIState.controls[@(drawingSurfaceIdentity)];
+    if (window == nil || control == nil ||
+        control.kind != HaskeLUIMacControlKindDrawing ||
+        ![control.view isKindOfClass:HaskeLUIDrawingView.class]) {
+      HaskeLUITestFail(@"drawing gallery did not create its native drawing surface");
+      [NSApplication.sharedApplication stop:nil];
+      return;
+    }
+    HaskeLUIDrawingView *view = (HaskeLUIDrawingView *)control.view;
+    if (!view.isFlipped) {
+      HaskeLUITestFail(@"drawing surface does not use portable top-left coordinates");
+    }
+    if (view.drawingCommands.count < 60) {
+      HaskeLUITestFail(@"drawing surface did not retain the complete primitive display list");
+    }
+    if (![view.accessibilityRole isEqualToString:NSAccessibilityImageRole] ||
+        view.accessibilityLabel.length == 0) {
+      HaskeLUITestFail(@"drawing surface accessibility metadata is incomplete");
+    }
+    [window.window makeKeyAndOrderFront:nil];
+    [window.window displayIfNeeded];
+    NSBitmapImageRep *bitmap = [view bitmapImageRepForCachingDisplayInRect:view.bounds];
+    if (bitmap == nil) {
+      HaskeLUITestFail(@"AppKit could not allocate an offscreen drawing-surface snapshot");
+    } else {
+      [view cacheDisplayInRect:view.bounds toBitmapImageRep:bitmap];
+      NSData *png = [bitmap representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
+      if (png.length == 0) {
+        HaskeLUITestFail(@"drawing surface paint pass produced no bitmap data");
+      }
+    }
+    [NSApplication.sharedApplication stop:nil];
   });
 }

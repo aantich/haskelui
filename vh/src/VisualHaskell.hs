@@ -7,6 +7,7 @@ module VisualHaskell
   ( application
   , applicationWithDocument
   , applicationWithDocuments
+  , applicationWithEnvironment
   , applicationWithWorkspaceRegistry
   , firstDocumentEditorKey
   , firstDocumentTabKey
@@ -57,8 +58,9 @@ import System.FilePath
   , takeFileName
   )
 import HaskeLUI.Binding
-import HaskeLUI.Core
+import HaskeLUI.Core hiding (Path)
 import HaskeLUI.Property
+import VisualHaskell.TextMate
 
 data Document = Document
   { documentKey :: !DocumentKey
@@ -71,6 +73,8 @@ data Document = Document
   , documentSavedContents :: !Text
   , documentStatus :: !Text
   , documentCloseAfterSave :: !Bool
+  , documentSyntaxLayer :: !(Maybe TextLayer)
+  , documentLanguage :: !(Maybe LanguageId)
   }
   deriving stock (Eq, Generic, Show)
 
@@ -104,6 +108,8 @@ data EditorModel = EditorModel
   , workspaceRestoreActiveFile :: !(Maybe FilePath)
   , workspaceRestoreExplorerSelection :: !(Maybe FilePath)
   , workspaceRegistryPath :: !(Maybe FilePath)
+  , textMateRegistryGeneration :: !(Maybe RegistryGeneration)
+  , textMateStatus :: !Text
   }
   deriving stock (Eq, Generic, Show)
 
@@ -165,6 +171,26 @@ applicationWithWorkspaceRegistry registryPath =
   where
     normalizedRegistryPath = normalise registryPath
 
+-- | Production Visual Haskell application: workspace restoration plus the
+-- supervised TextMate provider service and live user-resource discovery.
+applicationWithEnvironment
+  :: FilePath
+  -> TextMateConfiguration
+  -> App EditorModel
+applicationWithEnvironment registryPath configuration =
+  applicationValue
+    { appInitialEffects = [ReadOptionalTextFile normalizedRegistryPath]
+    , appInitialCommands = textMateCommandsForDocuments endpoint Map.empty startingModel
+    , appServices = [textMateWorker]
+    , appSubscriptions = const [textMateResourceSubscription configuration (textMateExternalEvent endpoint)]
+    }
+  where
+    normalizedRegistryPath = normalise registryPath
+    startingModel = initialModel {workspaceRegistryPath = Just normalizedRegistryPath}
+    applicationValue = editorApplicationWithTextMate (Just endpoint) startingModel
+    (textMateWorker, endpoint) =
+      textMateService configuration (textMateExternalEvent endpoint)
+
 applicationWithDocument :: FilePath -> Text -> App EditorModel
 applicationWithDocument documentPath initialContents =
   applicationWithDocuments [(documentPath, initialContents)]
@@ -206,10 +232,18 @@ initialModel =
     , workspaceRestoreActiveFile = Nothing
     , workspaceRestoreExplorerSelection = Nothing
     , workspaceRegistryPath = Nothing
+    , textMateRegistryGeneration = Nothing
+    , textMateStatus = "Syntax: built-in fallback"
     }
 
 editorApplication :: EditorModel -> App EditorModel
-editorApplication startingModel =
+editorApplication = editorApplicationWithTextMate Nothing
+
+editorApplicationWithTextMate
+  :: Maybe (ServiceEndpoint TextMateCommand)
+  -> EditorModel
+  -> App EditorModel
+editorApplicationWithTextMate textMateEndpoint startingModel =
   App
     { appInitialModel = startingModel
     , appInitialEffects = []
@@ -217,7 +251,7 @@ editorApplication startingModel =
     , appServices = []
     , appSubscriptions = const []
     , appView = render
-    , appHandleEvent = handleEvent
+    , appHandleEvent = handleEventWithTextMate textMateEndpoint
     }
 
 render :: EditorModel -> AppView
@@ -428,10 +462,13 @@ statusControls model =
     status = maybe model.workspaceMessage (.documentStatus) (selectedDocument model)
     summary =
       Text.pack (show (Map.size model.documents))
-        <> if Map.size model.documents == 1 then " document" else " documents"
+        <> (if Map.size model.documents == 1 then " document" else " documents")
+        <> " · "
+        <> model.textMateStatus
 
 languageDescription :: Document -> Text
 languageDescription document
+  | Just language <- document.documentLanguage = language.unLanguageId <> " · TextMate"
   | takeExtension document.documentPath `elem` [".hs", ".lhs"] = "Haskell source"
   | otherwise = "Plain text"
 
@@ -531,6 +568,188 @@ removeDocumentAction key =
 handleEvent :: UIEvent -> EditorModel -> Transaction EditorModel
 handleEvent event model =
   persistWorkspaceChanges model (handleEventWithoutPersistence event model)
+
+handleEventWithTextMate
+  :: Maybe (ServiceEndpoint TextMateCommand)
+  -> UIEvent
+  -> EditorModel
+  -> Transaction EditorModel
+handleEventWithTextMate Nothing = handleEvent
+handleEventWithTextMate (Just endpoint) = \event model ->
+  let update = handleEvent event model
+      updatedModel = applyTransaction update model
+   in appendRuntimeCommands
+        (textMateCommandsForDocuments endpoint model.documents updatedModel)
+        update
+
+textMateCommandsForDocuments
+  :: ServiceEndpoint TextMateCommand
+  -> Map DocumentKey Document
+  -> EditorModel
+  -> [RuntimeCommand EditorModel]
+textMateCommandsForDocuments endpoint oldDocuments newModel =
+  fmap (sendService endpoint . CloseTextMateDocument) closedDocuments
+    <> fmap (sendService endpoint . UpsertTextMateDocument . documentSnapshot) changedDocuments
+    <> maybe [] (pure . sendService endpoint . PrioritizeTextMateDocument . (.documentKey))
+      (selectedDocument newModel)
+  where
+    closedDocuments = Map.keys (oldDocuments `Map.difference` newModel.documents)
+    changedDocuments =
+      [ document
+      | document <- Map.elems newModel.documents
+      , case Map.lookup document.documentKey oldDocuments of
+          Nothing -> True
+          Just previous ->
+            previous.documentRevision /= document.documentRevision
+              || previous.documentPath /= document.documentPath
+              || previous.documentContents /= document.documentContents
+      ]
+
+documentSnapshot :: Document -> HighlightSnapshot
+documentSnapshot document =
+  highlightSnapshot
+    document.documentKey
+    document.documentRevision
+    document.documentPath
+    document.documentContents
+
+textMateExternalEvent
+  :: ServiceEndpoint TextMateCommand
+  -> TextMateServiceEvent
+  -> ExternalEvent EditorModel
+textMateExternalEvent endpoint serviceEvent =
+  externalEvent "Visual Haskell TextMate event" (applyTextMateServiceEvent endpoint serviceEvent)
+
+applyTextMateServiceEvent
+  :: ServiceEndpoint TextMateCommand
+  -> TextMateServiceEvent
+  -> EditorModel
+  -> Transaction EditorModel
+applyTextMateServiceEvent endpoint serviceEvent model =
+  case serviceEvent of
+    TextMateResourcesChanged ->
+      requestRuntimeCommand
+        "Reload copied TextMate resources"
+        (sendService endpoint ReloadTextMateResources)
+    TextMateServiceStatus status ->
+      let statusUpdate =
+            transactionFromAction
+              "Update TextMate service status"
+              NoUndo
+              (editorProperties.textMateStatus .= serviceStatusText status)
+       in case status of
+            ServiceRunning ->
+              appendRuntimeCommands
+                (textMateCommandsForDocuments endpoint Map.empty model)
+                statusUpdate
+            _ -> statusUpdate
+    TextMateRegistryChanged generation summary ->
+      transactionFromAction
+        "Update TextMate provider registry"
+        NoUndo
+        ( batchActions
+            "Update TextMate provider registry"
+            [ editorProperties.textMateRegistryGeneration .= Just generation
+            , editorProperties.textMateStatus
+                .= registryStatusText summary
+            ]
+        )
+    TextMateHighlightReady result -> applyHighlightResult result model
+    TextMateHighlightUnavailable documentKey revision sourceHash message ->
+      applyHighlightUnavailable documentKey revision sourceHash message model
+    TextMateFailure failure ->
+      transactionFromAction
+        "Report TextMate failure"
+        NoUndo
+        (editorProperties.textMateStatus .= "Syntax unavailable: " <> failure.highlightFailureMessage)
+
+serviceStatusText :: ServiceStatus -> Text
+serviceStatusText status =
+  case status of
+    ServiceStarting -> "Syntax: starting TextMate"
+    ServiceRunning -> "Syntax: TextMate running"
+    ServiceHealthChanged ServiceHealthy -> "Syntax: TextMate healthy"
+    ServiceHealthChanged (ServiceDegraded message) -> "Syntax degraded: " <> message
+    ServiceRestartScheduled attempt _ ->
+      "Syntax: restarting TextMate (attempt " <> Text.pack (show attempt) <> ")"
+    ServiceExited _ -> "Syntax: TextMate stopped"
+    ServiceCircuitOpen _ _ -> "Syntax: TextMate disabled after repeated failures"
+
+registryStatusText :: RegistrySummary -> Text
+registryStatusText summary =
+  "Syntax: "
+    <> Text.pack (show (length summary.registryLanguageIds))
+    <> " languages, "
+    <> Text.pack (show (length summary.registryThemeIds))
+    <> " themes"
+    <> if summary.registryDiagnosticCount == 0
+      then ""
+      else " (" <> Text.pack (show summary.registryDiagnosticCount) <> " diagnostics)"
+
+applyHighlightResult :: HighlightResult -> EditorModel -> Transaction EditorModel
+applyHighlightResult result model =
+  case Map.lookup result.resultDocument model.documents of
+    Just document
+      | result.resultRevision == document.documentRevision
+      , result.resultContentHash == contentHash document.documentContents
+      , maybe True (== result.resultRegistryGeneration) model.textMateRegistryGeneration ->
+          transactionFromAction
+            "Apply current TextMate highlight"
+            NoUndo
+            ( actionWithProperties
+                "Apply current TextMate highlight"
+                [ propertyId editorProperties.documents
+                , propertyId editorProperties.textMateStatus
+                ]
+                ( \current ->
+                    updateDocument
+                      result.resultDocument
+                      ( \currentDocument ->
+                          currentDocument
+                            { documentSyntaxLayer = Just result.resultLayer
+                            , documentLanguage = Just result.resultLanguage
+                            }
+                      )
+                      current
+                        { textMateStatus = "Syntax: " <> result.resultLanguage.unLanguageId
+                        }
+                )
+            )
+    _ -> noTransaction
+
+applyHighlightUnavailable
+  :: DocumentKey
+  -> TextRevision
+  -> ContentHash
+  -> Text
+  -> EditorModel
+  -> Transaction EditorModel
+applyHighlightUnavailable documentKey revision sourceHash message model =
+  case Map.lookup documentKey model.documents of
+    Just document
+      | revision == document.documentRevision
+      , sourceHash == contentHash document.documentContents ->
+          transactionFromAction
+            "Apply TextMate fallback"
+            NoUndo
+            ( actionWithProperties
+                "Apply TextMate fallback"
+                [ propertyId editorProperties.documents
+                , propertyId editorProperties.textMateStatus
+                ]
+                ( \current ->
+                    updateDocument
+                      documentKey
+                      ( \currentDocument ->
+                          currentDocument
+                            { documentSyntaxLayer = Nothing
+                            , documentLanguage = Nothing
+                            }
+                      )
+                      current {textMateStatus = "Syntax fallback: " <> message}
+                )
+            )
+    _ -> noTransaction
 
 handleEventWithoutPersistence :: UIEvent -> EditorModel -> Transaction EditorModel
 handleEventWithoutPersistence event model =
@@ -1305,10 +1524,14 @@ insertDocument documentPath initialContents model =
         , documentSavedContents = initialContents
         , documentStatus = Text.pack documentPath
         , documentCloseAfterSave = False
+        , documentSyntaxLayer = Nothing
+        , documentLanguage = Nothing
         }
 
 documentPresentation :: Document -> [TextLayer]
 documentPresentation document
+  | Just layer <- document.documentSyntaxLayer
+  , layer.textLayerRevision == document.documentRevision = [layer]
   | takeExtension document.documentPath `elem` [".hs", ".lhs"] =
       [haskellSyntaxLayer document.documentRevision document.documentContents]
   | otherwise = []

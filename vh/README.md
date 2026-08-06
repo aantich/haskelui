@@ -68,9 +68,17 @@ document replacement, external-change conflict handling, encoding selection,
 and app-level Quit negotiation remain production document concerns rather than
 AppKit-specific behavior.
 
-## V2 syntax highlighting
+## TextMate syntax highlighting
 
-Haskell source files (`.hs` and `.lhs`) are highlighted by a synchronous, pure lexer. Syntax concepts stay in the example rather than HaskeLUI Core:
+The production editor highlights Haskell, JSON, JavaScript, Python, and Markdown through
+the VH-owned `visual-haskell-textmate` package. The engine loads declarative
+TextMate grammars and themes, uses vendored native Oniguruma 6.9.10, caches
+state per line, and sends immutable snapshots through HaskeLUI's typed service
+runtime. Revision and content-hash checks prevent stale results from replacing
+newer presentation.
+
+HaskeLUI Core remains language-neutral. The old pure Haskell lexer still
+provides an immediate/failure fallback through the same generic API:
 
 ```haskell
 highlightHaskell :: Text -> [TextSpan SyntaxClass]
@@ -78,8 +86,30 @@ highlightHaskell :: Text -> [TextSpan SyntaxClass]
 syntaxStyle :: SyntaxClass -> TextStyle
 ```
 
-The example theme resolves those semantic spans into generic, revision-bound `TextLayer` values. HaskeLUI Core knows only portable `TextStyle`, generic `TextSpan a`, authored `TextRun`/`AttributedText`, and ordered presentation layers. The same primitives can represent rich text, search results, diagnostics, spellchecking, or another application's annotations.
+Both paths resolve into generic, revision-bound `TextLayer` values. HaskeLUI
+Core knows only portable `TextStyle`, generic `TextSpan a`, authored
+`TextRun`/`AttributedText`, and ordered presentation layers. The same
+primitives can represent rich text, search results, diagnostics, spellchecking,
+or another application's annotations.
 
 The AppKit adapter resolves overlapping layers property-by-property, converts public Unicode scalar ranges to native UTF-16 ranges, and applies temporary layout attributes. Presentation does not modify characters, authored attributes, selection, or the native undo stack. Layers carrying an obsolete revision are discarded.
 
-This first highlighter reparses the complete document after each edit and intentionally supports only a useful lexical subset of Haskell. Large-file background highlighting, incremental changed-range processing, parser-grade language coverage, theme selection, and a language-provider registry are later optimizations and extensions behind the same generic layer contract.
+Visual Haskell creates these user directories on launch:
+
+```text
+~/.vh/extensions  # unpacked declarative VS Code extensions
+~/.vh/grammars    # standalone TextMate grammars
+~/.vh/themes      # standalone TextMate themes
+```
+
+Copying, modifying, renaming, or removing a resource triggers a registry reload.
+Visual Haskell reads only language, grammar, and theme contributions and never
+executes extension JavaScript or binaries. Set `VH_HOME` to use another root.
+The editor bundles VH-owned initial providers and records their provenance in
+`vh/packages/textmate/resources/PROVENANCE.md`.
+
+The current engine covers the TM1 rule core plus JSON/XML plist files, `while`,
+back-reference substitution, basic theme selectors, and incremental line
+caching. Cross-grammar includes, injection execution, embedded languages,
+semantic tokens, and the large differential compatibility corpus are still
+future compatibility work.

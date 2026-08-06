@@ -18,6 +18,7 @@ import Control.Monad
 import Control.Applicative ((<|>))
 import qualified Data.ByteString as ByteString
 import Data.Char (ord)
+import Data.Foldable (traverse_)
 import Data.IORef
   ( IORef
   , atomicModifyIORef'
@@ -37,6 +38,7 @@ import Data.Text.Encoding.Error (lenientDecode)
 import Data.Word (Word64)
 import Foreign (alloca, peek)
 import Foreign.C (CDouble, CInt, CString)
+import Foreign.Marshal.Array (withArray)
 import Foreign.Ptr
   ( FunPtr
   , Ptr
@@ -545,6 +547,7 @@ singleFillControl [TreeView {}] = True
 singleFillControl [TableView {}] = True
 singleFillControl [ItemRepeater {}] = True
 singleFillControl [NavigationSidebar {}] = True
+singleFillControl [DrawingSurface {}] = True
 singleFillControl _ = False
 
 destroyWindow :: NativeWindow -> IO ()
@@ -613,6 +616,13 @@ createControl window spec = do
               c_createTextEditor window editor.textEditorKey.unElementKey text
         when editor.textEditorFocused (c_controlFocus window created)
         pure created
+      DrawingSurface surface ->
+        withText surface.drawingSurfaceAccessibleLabel $ \label ->
+          withMacRect surface.drawingSurfaceFrame $
+            c_createDrawingSurface
+              window
+              surface.drawingSurfaceKey.unElementKey
+              label
       _ ->
         case controlCatalogKind spec of
           Nothing -> error "HaskeLUI AppKit encountered an unclassified Core control"
@@ -628,6 +638,7 @@ createControl window spec = do
     RichTextEditor editor -> do
       configureCatalogControl handle spec
       applyTextEditorPresentation handle editor
+    DrawingSurface surface -> applyDrawingPresentation handle surface
     _ -> when (isJust (controlCatalogKind spec)) (configureCatalogControl handle spec)
   pure (NativeControl handle spec Nothing)
 
@@ -643,6 +654,18 @@ updateControl window native desired = do
     Button _ _ value _ _ -> withText value (c_controlSetText native.nativeControlHandle)
     TextField _ _ value _ _ -> withText value (c_controlSetText native.nativeControlHandle)
     TextEditor editor -> withText editor.textEditorText (c_controlSetText native.nativeControlHandle)
+    DrawingSurface surface -> do
+      case native.nativeControlSpec of
+        DrawingSurface previous
+          | previous.drawingSurfaceRevision /= surface.drawingSurfaceRevision ->
+              applyDrawingPresentation native.nativeControlHandle surface
+          | otherwise -> pure ()
+        _ -> applyDrawingPresentation native.nativeControlHandle surface
+      case native.nativeControlSpec of
+        DrawingSurface previous
+          | previous.drawingSurfaceAccessibleLabel /= surface.drawingSurfaceAccessibleLabel ->
+              withText surface.drawingSurfaceAccessibleLabel (c_drawingSetAccessibleLabel native.nativeControlHandle)
+        _ -> pure ()
     _ ->
       when (catalogConfigurationChanged native.nativeControlSpec desired) $
         configureCatalogControl native.nativeControlHandle desired
@@ -672,6 +695,8 @@ measurementAffectingChanged (LayoutContainer old) (LayoutContainer new) =
   old.layoutContainerPresentation /= new.layoutContainerPresentation
 measurementAffectingChanged (Container old) (Container new) =
   old.containerKind /= new.containerKind
+measurementAffectingChanged (DrawingSurface old) (DrawingSurface new) =
+  old.drawingSurfaceIntrinsicMetrics /= new.drawingSurfaceIntrinsicMetrics
 measurementAffectingChanged old new =
   setControlFrame (Rect 0 0 0 0) old /= setControlFrame (Rect 0 0 0 0) new
 
@@ -740,6 +765,9 @@ commitPortableLayoutFrames window controls resolved =
         _ -> pure updated
 
 measureNativeControl :: NativeControl -> IO IntrinsicMetrics
+measureNativeControl native
+  | DrawingSurface surface <- native.nativeControlSpec =
+      pure surface.drawingSurfaceIntrinsicMetrics
 measureNativeControl native =
   alloca $ \result -> do
     c_controlMeasure native.nativeControlHandle 0 0 result
@@ -1167,6 +1195,7 @@ isKeyboardControl Label {} = False
 isKeyboardControl RichText {} = False
 isKeyboardControl Image {} = False
 isKeyboardControl Icon {} = False
+isKeyboardControl DrawingSurface {} = False
 isKeyboardControl Separator {} = False
 isKeyboardControl ProgressBar {} = False
 isKeyboardControl ActivityIndicator {} = False
@@ -1187,10 +1216,144 @@ controlsCompatible (Button _ _ _ oldCommand _) (Button _ _ _ newCommand _) =
 controlsCompatible (TextField _ _ _ oldPlaceholder _) (TextField _ _ _ newPlaceholder _) =
   oldPlaceholder == newPlaceholder
 controlsCompatible (TextEditor {}) (TextEditor {}) = True
+controlsCompatible (DrawingSurface {}) (DrawingSurface {}) = True
 controlsCompatible old new =
   case (controlCatalogKind old, controlCatalogKind new) of
     (Just oldKind, Just newKind) -> oldKind == newKind
     _ -> False
+
+applyDrawingPresentation :: Ptr MacControlHandle -> DrawingSurfaceSpec -> IO ()
+applyDrawingPresentation handle surface =
+  case validateDrawing surface.drawingSurfaceDrawing of
+    [] -> do
+      c_drawingBegin handle
+      traverse_ (executeDrawingCommand handle) (compileDrawing surface.drawingSurfaceDrawing)
+      c_drawingEnd handle
+    errors ->
+      error
+        ( "Invalid HaskeLUI drawing surface: "
+            <> Text.unpack
+              (Text.intercalate "; " (fmap drawingValidationMessage errors))
+        )
+
+executeDrawingCommand :: Ptr MacControlHandle -> DrawingCommand -> IO ()
+executeDrawingCommand handle = \case
+  PushState -> c_drawingPushState handle
+  PopState -> c_drawingPopState handle
+  ConcatTransform affine ->
+    c_drawingConcatTransform
+      handle
+      (realToFrac affine.affineA)
+      (realToFrac affine.affineB)
+      (realToFrac affine.affineC)
+      (realToFrac affine.affineD)
+      (realToFrac affine.affineTx)
+      (realToFrac affine.affineTy)
+  ClipGeometry rule geometry -> do
+    emitGeometryPath handle geometry
+    c_drawingClipPath handle (encodeFillRule rule)
+  BeginOpacity opacity -> c_drawingBeginOpacity handle (realToFrac opacity)
+  EndOpacity -> c_drawingEndOpacity handle
+  FillGeometry rule (Solid color) geometry -> do
+    emitGeometryPath handle geometry
+    c_drawingFillPath
+      handle
+      (encodeFillRule rule)
+      (realToFrac color.colorRed)
+      (realToFrac color.colorGreen)
+      (realToFrac color.colorBlue)
+      (realToFrac color.colorAlpha)
+  StrokeGeometry style (Solid color) geometry -> do
+    emitGeometryPath handle geometry
+    let dash = fmap realToFrac style.strokeDashPattern :: [CDouble]
+    withArray dash $ \dashPointer ->
+      c_drawingStrokePath
+        handle
+        (realToFrac style.strokeWidth)
+        (encodeLineCap style.strokeLineCap)
+        (encodeLineJoin style.strokeLineJoin)
+        (realToFrac style.strokeMiterLimit)
+        dashPointer
+        (fromIntegral (length dash))
+        (realToFrac style.strokeDashPhase)
+        (realToFrac color.colorRed)
+        (realToFrac color.colorGreen)
+        (realToFrac color.colorBlue)
+        (realToFrac color.colorAlpha)
+  DrawTextCommand text ->
+    withText text.drawnText $ \value ->
+      withMacRect text.drawnTextRect $ \rect ->
+        withCTextStyle text.drawnTextStyle $ \style ->
+          c_drawingText
+            handle
+            value
+            rect
+            style
+            (encodeHorizontalAlignment text.drawnTextHorizontalAlignment)
+            (encodeVerticalAlignment text.drawnTextVerticalAlignment)
+            (encodeTextWrapping text.drawnTextWrapping)
+
+emitGeometryPath :: Ptr MacControlHandle -> Geometry -> IO ()
+emitGeometryPath handle geometry = do
+  c_drawingPathBegin handle
+  case geometry of
+    Rectangle rect -> withMacRect rect (c_drawingPathAddRect handle)
+    RoundedRectangle rect radiusX radiusY ->
+      withMacRect rect $ \nativeRect ->
+        c_drawingPathAddRoundedRect handle nativeRect (realToFrac radiusX) (realToFrac radiusY)
+    Ellipse rect -> withMacRect rect (c_drawingPathAddEllipse handle)
+    PathGeometry (Path segments) -> traverse_ (emitPathSegment handle) segments
+
+emitPathSegment :: Ptr MacControlHandle -> PathSegment -> IO ()
+emitPathSegment handle = \case
+  MoveTo point -> c_drawingPathMoveTo handle (realToFrac point.pointX) (realToFrac point.pointY)
+  LineTo point -> c_drawingPathLineTo handle (realToFrac point.pointX) (realToFrac point.pointY)
+  QuadraticTo control end ->
+    c_drawingPathQuadraticTo
+      handle
+      (realToFrac control.pointX)
+      (realToFrac control.pointY)
+      (realToFrac end.pointX)
+      (realToFrac end.pointY)
+  CubicTo first second end ->
+    c_drawingPathCubicTo
+      handle
+      (realToFrac first.pointX)
+      (realToFrac first.pointY)
+      (realToFrac second.pointX)
+      (realToFrac second.pointY)
+      (realToFrac end.pointX)
+      (realToFrac end.pointY)
+  ClosePath -> c_drawingPathClose handle
+
+encodeFillRule :: FillRule -> CInt
+encodeFillRule NonZero = 0
+encodeFillRule EvenOdd = 1
+
+encodeLineCap :: LineCap -> CInt
+encodeLineCap ButtCap = 0
+encodeLineCap RoundCap = 1
+encodeLineCap SquareCap = 2
+
+encodeLineJoin :: LineJoin -> CInt
+encodeLineJoin MiterJoin = 0
+encodeLineJoin RoundJoin = 1
+encodeLineJoin BevelJoin = 2
+
+encodeHorizontalAlignment :: HorizontalTextAlignment -> CInt
+encodeHorizontalAlignment TextStart = 0
+encodeHorizontalAlignment TextCenter = 1
+encodeHorizontalAlignment TextEnd = 2
+
+encodeVerticalAlignment :: VerticalTextAlignment -> CInt
+encodeVerticalAlignment TextTop = 0
+encodeVerticalAlignment TextMiddle = 1
+encodeVerticalAlignment TextBottom = 2
+
+encodeTextWrapping :: TextWrapping -> CInt
+encodeTextWrapping NoWrap = 0
+encodeTextWrapping WordWrap = 1
+encodeTextWrapping CharacterWrap = 2
 
 textEditorPresentationChanged :: Control -> Control -> Bool
 textEditorPresentationChanged (TextEditor old) (TextEditor new) =

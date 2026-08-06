@@ -15,7 +15,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import GHC.Generics (Generic)
 import HaskeLUI.Binding
-import HaskeLUI.Core
+import HaskeLUI.Core hiding (Path)
 import HaskeLUI.Property
 
 data Model = Model

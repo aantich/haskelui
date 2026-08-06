@@ -1,0 +1,22 @@
+{
+  "name": "visual-haskell-markdown",
+  "displayName": "Visual Haskell Markdown Grammar",
+  "version": "1.0.0",
+  "contributes": {
+    "languages": [
+      {
+        "id": "markdown",
+        "aliases": ["Markdown", "md"],
+        "extensions": [".md", ".markdown", ".mdown", ".mkd", ".mkdn", ".mdwn", ".rmd"],
+        "filenames": ["README", "CHANGELOG", "CONTRIBUTING", "LICENSE.md"]
+      }
+    ],
+    "grammars": [
+      {
+        "language": "markdown",
+        "scopeName": "text.html.markdown",
+        "path": "./syntaxes/markdown.tmLanguage.json"
+      }
+    ]
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "name": "visual-haskell-javascript",
+  "displayName": "Visual Haskell JavaScript Grammar",
+  "version": "1.0.0",
+  "contributes": {
+    "languages": [
+      {
+        "id": "javascript",
+        "aliases": ["JavaScript", "JS"],
+        "extensions": [".js", ".mjs", ".cjs", ".jsx"]
+      }
+    ],
+    "grammars": [
+      {
+        "language": "javascript",
+        "scopeName": "source.js",
+        "path": "./syntaxes/javascript.tmLanguage.json"
+      }
+    ]
+  }
+}
+

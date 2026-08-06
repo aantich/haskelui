@@ -10,6 +10,9 @@ HaskeLUI is an experimental framework for writing native desktop applications in
 Haskell. Application code owns ordinary immutable Haskell state and describes
 windows, workspaces, controls, commands, and layout without importing a native
 UI toolkit. A backend retains and updates the corresponding native objects.
+Portable retained 2D drawing surfaces are also implemented, with AppKit as the
+first native executor and the headless backend exposing normalized display
+lists for deterministic tests.
 
 This guide documents the API that exists and compiles in this repository. It
 does not present types from design sketches or `spikes/` as finished features.
@@ -28,15 +31,16 @@ implemented.
 5. [Windows and real desktop workspaces](#5-windows-and-real-desktop-workspaces)
 6. [Commands](#6-commands)
 7. [Controls](#7-controls)
-8. [Portable layout](#8-portable-layout)
-9. [Collections, trees, and tables](#9-collections-trees-and-tables)
-10. [Text, rich text, and presentation layers](#10-text-rich-text-and-presentation-layers)
-11. [Dialogs, popovers, and feedback](#11-dialogs-popovers-and-feedback)
-12. [Effects and file workflows](#12-effects-and-file-workflows)
-13. [Structuring a real application](#13-structuring-a-real-application)
-14. [Validation and testing](#14-validation-and-testing)
-15. [Current boundaries](#15-current-boundaries)
-16. [Examples and deeper references](#16-examples-and-deeper-references)
+8. [Drawing surfaces](#8-drawing-surfaces)
+9. [Portable layout](#9-portable-layout)
+10. [Collections, trees, and tables](#10-collections-trees-and-tables)
+11. [Text, rich text, and presentation layers](#11-text-rich-text-and-presentation-layers)
+12. [Dialogs, popovers, and feedback](#12-dialogs-popovers-and-feedback)
+13. [Effects and file workflows](#13-effects-and-file-workflows)
+14. [Structuring a real application](#14-structuring-a-real-application)
+15. [Validation and testing](#15-validation-and-testing)
+16. [Current boundaries](#16-current-boundaries)
+17. [Examples and deeper references](#17-examples-and-deeper-references)
 
 ## 1. The programming model
 
@@ -203,6 +207,7 @@ The examples in this repository can be run with:
 stack exec haskelui-appkit-vertical
 stack exec vh
 stack exec haskelui-control-gallery
+stack exec haskelui-drawing-primitives
 ```
 
 ## 3. State, events, and transactions
@@ -888,6 +893,7 @@ different spec records so invalid combinations are harder to express.
 | Menus and shell | `MenuBar`, `ContextMenu`, `Toolbar` |
 | Presentations | `Dialog`, `Alert`, `Popover`, `Tooltip` |
 | Feedback | `ProgressBar`, `ActivityIndicator`, `Meter`, `Badge`, `InlineNotice` |
+| Custom drawing | `DrawingSurface` |
 | Composition | `Container`, `LayoutContainer` |
 
 The exhaustive executable reference is `examples/control-gallery`. Open it
@@ -942,7 +948,252 @@ should receive focus; marking several controls focused makes the last
 reconciled request win. Retained controls otherwise preserve their native first
 responder across normal model updates.
 
-## 8. Portable layout
+## 8. Drawing surfaces
+
+Use `DrawingSurface` for charts, graphs, node editors, diagrams, custom
+visualizations, and other content that cannot be expressed as native controls.
+It is a retained leaf control: the application supplies an immutable `Drawing`,
+and the backend keeps a native display-list snapshot and repaints it when the
+platform asks.
+
+This is different from `CanvasContainer` and `LayoutCanvas`. Those arrange
+child controls at explicit coordinates; they do not draw pixels, paths, or
+text. A drawing surface can itself be placed by either direct frames or the
+portable layout engine.
+
+`HaskeLUI.Core` re-exports the complete drawing API. Libraries that only build
+drawings may instead use the focused modules:
+
+```haskell
+import HaskeLUI.Drawing
+import HaskeLUI.Graphics.Types
+```
+
+### Create a surface
+
+`DrawingSurfaceSpec` combines normal control identity and layout data with a
+drawing snapshot:
+
+```haskell
+chartSurfaceKey :: ElementKey
+chartSurfaceKey = ElementKey 700
+
+chartMetrics :: IntrinsicMetrics
+chartMetrics =
+  IntrinsicMetrics
+    { intrinsicMinimum = Size 320 180
+    , intrinsicIdeal = Size 800 450
+    , intrinsicMaximum = Size 1600 900
+    , intrinsicFirstBaseline = Nothing
+    , intrinsicLastBaseline = Nothing
+    }
+
+chartSurface :: DrawingRevision -> Drawing -> Control
+chartSurface revision drawing =
+  DrawingSurface
+    DrawingSurfaceSpec
+      { drawingSurfaceKey = chartSurfaceKey
+      , drawingSurfaceFrame = Rect 24 24 800 450
+      , drawingSurfaceRevision = revision
+      , drawingSurfaceDrawing = drawing
+      , drawingSurfaceIntrinsicMetrics = chartMetrics
+      , drawingSurfaceAccessibleLabel =
+          "Build duration chart for the last thirty runs"
+      }
+```
+
+The frame is expressed in the parent coordinate system. Drawing coordinates
+are local to the surface:
+
+- Units are logical units, not physical pixels.
+- The local origin is the surface's top-left corner.
+- Positive X points right and positive Y points down.
+- Backends apply the display scale; application code must not multiply by the
+  Retina or monitor scale.
+
+The accessibility label describes the visualization as a whole. Prefer a
+useful summary over labels such as “canvas” or “custom view.” A future semantic
+subtree can expose individual nodes or data points; the current API exposes one
+native accessibility image element.
+
+### Drawing composition
+
+`Drawing` is a pure tree:
+
+| Constructor | Meaning |
+|---|---|
+| `Empty` | Draw nothing |
+| `Group [Drawing]` | Draw children in list order |
+| `Transform Affine2 Drawing` | Apply a local affine transform |
+| `Clip FillRule Geometry Drawing` | Restrict a subtree to a geometry |
+| `Opacity Double Drawing` | Composite a subtree with group opacity |
+| `Fill FillRule Paint Geometry` | Fill a geometry |
+| `Stroke StrokeStyle Paint Geometry` | Stroke a geometry |
+| `DrawText TextDraw` | Draw text inside an explicit rectangle |
+
+Later drawings appear over earlier drawings. State introduced by transforms,
+clips, and opacity is scoped to the nested drawing and cannot leak into its
+siblings.
+
+The current `Paint` vocabulary is `Solid Color`. Colors use sRGB-style RGBA
+components between zero and one:
+
+```haskell
+ink, accent :: Paint
+ink = Solid (RGBA 0.10 0.12 0.18 1)
+accent = Solid (RGBA 0.18 0.45 0.93 1)
+```
+
+### Geometry and paths
+
+Portable geometry includes:
+
+- `Rectangle Rect`
+- `RoundedRectangle Rect radiusX radiusY`
+- `Ellipse Rect`
+- `PathGeometry Path`
+
+A path is a sequence of `MoveTo`, `LineTo`, `QuadraticTo`, `CubicTo`, and
+`ClosePath` segments. Every drawable contour must begin with `MoveTo`:
+
+```haskell
+curve :: Geometry
+curve =
+  PathGeometry $
+    Path
+      [ MoveTo (Point 20 120)
+      , QuadraticTo (Point 90 20) (Point 160 120)
+      , CubicTo
+          (Point 210 180)
+          (Point 260 20)
+          (Point 320 120)
+      ]
+
+curveDrawing :: Drawing
+curveDrawing =
+  Stroke
+    ( defaultStrokeStyle
+        { strokeWidth = 5
+        , strokeLineCap = RoundCap
+        , strokeLineJoin = RoundJoin
+        , strokeDashPattern = [12, 6]
+        , strokeDashPhase = 0
+        }
+    )
+    accent
+    curve
+```
+
+Fill rules are `NonZero` and `EvenOdd`. The latter is useful for holes in
+compound paths. Stroke caps are `ButtCap`, `RoundCap`, and `SquareCap`; joins
+are `MiterJoin`, `RoundJoin`, and `BevelJoin`. Dash components and stroke widths
+are expressed in logical units.
+
+Affine transforms use the matrix `[a c tx; b d ty; 0 0 1]`. Common constructors
+avoid spelling it manually:
+
+```haskell
+translated = Transform (translation 80 40) drawing
+scaled = Transform (scaling 1.5 0.75) drawing
+rotated = Transform (rotation (pi / 8)) drawing
+```
+
+Transforms nest, so rotation around an arbitrary center can be expressed as
+translation to the center, rotation, then translation back.
+
+### Text drawing
+
+Text is laid out inside an explicit logical rectangle:
+
+```haskell
+heading :: Drawing
+heading =
+  DrawText
+    TextDraw
+      { drawnText = "Build durations"
+      , drawnTextRect = Rect 24 18 420 36
+      , drawnTextStyle =
+          mempty
+            { textForeground = Just (RGBA 0.10 0.12 0.18 1)
+            , textFontFamily = Just SystemFont
+            , textFontWeight = Just SemiBold
+            , textFontSize = Just 24
+            }
+      , drawnTextHorizontalAlignment = TextStart
+      , drawnTextVerticalAlignment = TextMiddle
+      , drawnTextWrapping = NoWrap
+      }
+```
+
+Horizontal alignment is `TextStart`, `TextCenter`, or `TextEnd`. Vertical
+alignment is `TextTop`, `TextMiddle`, or `TextBottom`. Wrapping is `NoWrap`,
+`WordWrap`, or `CharacterWrap`.
+
+Text drawing currently delegates glyph selection, shaping, line breaking, and
+font fallback to the backend. The supplied rectangle is portable, but exact
+glyph metrics and wrap points can differ between platforms. There is not yet a
+portable text-measurement prepass for drawing surfaces.
+
+### Revisions and reconciliation
+
+`DrawingRevision` is the cheap retained-backend change key. Increment or
+replace it whenever `drawingSurfaceDrawing` changes:
+
+```haskell
+data ChartModel = ChartModel
+  { chartRevision :: !DrawingRevision
+  , chartDrawing :: !Drawing
+  }
+```
+
+The AppKit backend intentionally does not deeply compare large drawing trees.
+Changing the drawing while retaining the same revision is a programming error:
+the native surface may continue displaying the old snapshot. Changing only the
+frame or intrinsic metrics does not require a drawing revision.
+
+Build expensive chart layout, graph routing, or data decimation in an
+element-scoped task, then commit the resulting pure `Drawing` and a new revision
+to the model. Live data feeds normally belong in a bounded service. Pointer
+motion and animation are not task or service workloads; retained interactive
+surface input and a presentation frame clock are not part of the current API.
+
+### Validation and headless tests
+
+`validateDrawing` checks finite coordinates and transforms, color and opacity
+ranges, nonnegative geometry and stroke values, dash patterns, font sizes, and
+path sequencing. `validateControlCatalog` automatically includes these errors
+for every `DrawingSurface` in a control tree.
+
+The headless backend exposes normalized drawing commands without rasterizing
+platform-dependent pixels:
+
+```haskell
+import HaskeLUI.Backend.Headless
+
+case captureDrawingSurfaces renderedView of
+  [captured] -> do
+    print captured.capturedDrawingSurfaceRevision
+    print captured.capturedDrawingCommands
+  _ -> error "expected one drawing surface"
+```
+
+This is the preferred test boundary for geometry and command ordering. Native
+tests should be reserved for executor conformance, text behavior, scaling, and
+resource lifetime.
+
+The complete executable gallery is `examples/drawing-primitives`:
+
+```console
+stack run haskelui-drawing-primitives
+stack test haskelui-example-drawing-primitives
+```
+
+It demonstrates every currently supported geometry, fill rule, path segment,
+stroke cap/join/dash, transform, clipping, opacity, and text-layout option. The
+native test forces the AppKit view through an offscreen bitmap paint pass and
+then verifies complete resource cleanup.
+
+## 9. Portable layout
 
 HaskeLUI currently supports two placement approaches:
 
@@ -1084,7 +1335,7 @@ spans. Native measurements are cached. Large datasets should remain inside
 specialized `ListView`, `TableView`, `TreeView`, or collection controls rather
 than creating thousands of general layout leaves.
 
-## 9. Collections, trees, and tables
+## 10. Collections, trees, and tables
 
 The collection family shares stable item and selection data:
 
@@ -1147,7 +1398,7 @@ presentation requirement. Invalid fixed heights fail Core validation.
 `CollectionView` and `ItemRepeater` use a different card/item-layout contract
 and currently reject nondefault row policies.
 
-## 10. Text, rich text, and presentation layers
+## 11. Text, rich text, and presentation layers
 
 HaskeLUI separates authoritative content from derived presentation.
 
@@ -1215,10 +1466,47 @@ Applying layers does not change document characters or make the document dirty.
 `TextStyle` supports foreground/background color, font family and size, weight,
 slant, underline, strikethrough, letter spacing, and baseline offset.
 
-The included editor highlights `.hs` and `.lhs` files with a small pure Haskell
-highlighter. The planned TextMate package is currently design-only.
+Visual Haskell now uses the VH-owned `visual-haskell-textmate` package in
+production. Its bounded typed service loads declarative VS Code/TextMate
+providers, runs the vendored native Oniguruma engine off the UI thread, retains
+line rule stacks for incremental edits, resolves a selected theme, and returns
+ordinary revision-bound `TextLayer` values. Every result also carries a content
+hash and provider generations; the editor discards it if the document has moved
+on. The original pure Haskell lexer remains the immediate fallback while the
+service starts or if a provider fails.
 
-## 11. Dialogs, popovers, and feedback
+The executable bundles VH-owned Haskell, JSON, JavaScript, Python, and Markdown grammars
+plus the Visual Haskell Light theme. Additional resources are installed simply
+by copying them into the per-user Visual Haskell folder:
+
+```text
+~/.vh/
+├── extensions/   # unpacked VS Code extensions containing package.json
+├── grammars/     # standalone .json, .tmLanguage, or .plist grammars
+├── themes/       # standalone JSON or plist TextMate themes
+└── settings.json # reserved for future user settings; not created by default
+```
+
+Visual Haskell watches the three resource directories and reloads the provider
+registry after a copy, edit, rename, or removal. Only declarative language,
+grammar, and theme contributions are read; extension JavaScript, activation
+events, commands, binaries, and install scripts are never executed. A user
+provider with the same identifier overrides a bundled provider and registry
+conflicts are reported as diagnostics.
+
+Set `VH_HOME` to replace `~/.vh` for portable installations and tests. Runtime
+state and caches continue to use platform state/cache directories, while the
+workspace-local `.vihs` file remains responsible for tabs, expanded folders,
+selection, and pane state.
+
+The currently advertised compatibility is the TM1 core (`match`,
+`begin`/`end`, captures, repositories, `$self`, and `$base`) plus JSON/XML plist
+input, `while`, back-reference substitution, basic TextMate theme selectors,
+and incremental line caching. Cross-grammar includes, injection execution,
+embedded-language behavior, and broad differential compatibility with
+`vscode-textmate` remain explicit next steps.
+
+## 12. Dialogs, popovers, and feedback
 
 Presentations are desired state, not imperative calls:
 
@@ -1249,7 +1537,7 @@ Use the lightweight feedback controls for nonmodal state:
 The title and message in `MessageControlSpec` are semantic content; each backend
 chooses an appropriate native presentation.
 
-## 12. Effects and file workflows
+## 13. Effects and file workflows
 
 The implemented effect algebra is intentionally small:
 
@@ -1329,7 +1617,7 @@ folder's versioned `.vihs` file. Tabs, active file, expanded folders, explorer
 selection, and pane state are stored as safe project-relative paths. See
 [Visual Haskell workspace persistence](design/visual-haskell-workspaces.md).
 
-## 13. Structuring a real application
+## 14. Structuring a real application
 
 A practical project structure is feature-oriented:
 
@@ -1410,7 +1698,7 @@ it. Precompute derived data in pure update steps or cache it in the model with a
 revision. Presentation layers should be associated with the snapshot that
 produced them so stale results can be rejected.
 
-## 14. Validation and testing
+## 15. Validation and testing
 
 ### Pure validation
 
@@ -1420,6 +1708,7 @@ Before rendering generated or complex surfaces, use:
 validateControlCatalog controls
 validateWorkspaceSpec workspace
 validateLayout layout
+validateDrawing drawing
 ```
 
 Validation checks include duplicate keys, invalid frames and numeric bounds,
@@ -1465,7 +1754,9 @@ rendered <- latestView
 ```
 
 Use it to verify complete windows, commands, nested controls, stable identity,
-and platform-independent rendering logic.
+and platform-independent rendering logic. For drawing surfaces,
+`captureDrawingSurfaces` exposes the normalized command list consumed by native
+executors without introducing platform-dependent raster snapshots.
 
 ### Native conformance
 
@@ -1486,9 +1777,10 @@ and every portable layout strategy:
 stack exec haskelui-control-gallery
 stack exec haskelui-control-gallery -- --collections
 stack exec haskelui-control-gallery -- --layout
+stack exec haskelui-drawing-primitives
 ```
 
-## 15. Current boundaries
+## 16. Current boundaries
 
 HaskeLUI is a substantial working vertical slice, not yet a released general-purpose
 application framework. Plan around these current boundaries:
@@ -1516,13 +1808,18 @@ application framework. Plan around these current boundaries:
 - Live automatic relayout from public window-resize events is incomplete.
 - Authored rich-text persistence and editing operations are not complete;
   derived text presentation layers are implemented.
+- Portable retained drawing surfaces, validation, headless display-list
+  capture, and the AppKit executor are implemented. Paints are currently solid
+  colors; images, gradients, portable text measurement, retained pointer input,
+  partial damage, animation clocks, and Windows/SDL executors remain future
+  work.
 - Animations and transitions are outside the current layout contract.
 
 These boundaries are deliberately kept visible. Application code should not
 reach into AppKit to paper over them because doing so would make later Windows
 and custom-renderer backends much harder to support.
 
-## 16. Examples and deeper references
+## 17. Examples and deeper references
 
 Start with these executable examples:
 
@@ -1532,6 +1829,9 @@ Start with these executable examples:
   panes, tabs, file effects, dirty-state workflow, native text editing, and
   Haskell syntax presentation.
 - `examples/control-gallery`: every Core control and portable layout strategy.
+- `examples/drawing-primitives`: every supported drawing geometry, fill rule,
+  path segment, stroke style, transform, clip, opacity, and text option, with
+  headless and native AppKit paint-pass tests.
 
 Then consult the focused design documents:
 

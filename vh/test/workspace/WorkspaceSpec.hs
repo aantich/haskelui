@@ -3,6 +3,7 @@
 
 module Main (main) where
 
+import Control.Concurrent (threadDelay)
 import Control.Exception (bracket)
 import Data.IORef
   ( IORef
@@ -12,7 +13,8 @@ import Data.IORef
   )
 import qualified Data.Text as Text
 import VisualHaskell
-  ( applicationWithWorkspaceRegistry
+  ( applicationWithEnvironment
+  , applicationWithWorkspaceRegistry
   , firstDocumentTabKey
   , projectTreeKey
   )
@@ -20,13 +22,29 @@ import VisualHaskell.WorkspaceState
   ( WorkspaceState (..)
   , decodeWorkspaceState
   )
+import VisualHaskell.Paths
+  ( ensureVisualHaskellPaths
+  , resolveVisualHaskellPaths
+  , visualHaskellExtensionDirectory
+  , visualHaskellGrammarDirectory
+  , visualHaskellHome
+  , visualHaskellSettingsPath
+  , visualHaskellThemeDirectory
+  )
+import VisualHaskell.TextMate
+  ( defaultTextMateConfiguration
+  , textMateSyntaxLayerKey
+  )
 import System.Directory
   ( createDirectory
+  , doesDirectoryExist
+  , doesFileExist
   , getTemporaryDirectory
   , listDirectory
   , removeDirectoryRecursive
   , removeFile
   )
+import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.FilePath ((</>))
 import System.IO
   ( hClose
@@ -38,6 +56,9 @@ import HaskeLUI.Runtime
 main :: IO ()
 main =
   bracket createFixture removeDirectoryRecursive $ \fixtureRoot -> do
+    let providerHome = fixtureRoot </> "portable-vh-home"
+    testVisualHaskellHome providerHome
+    testProductionTextMateIntegration fixtureRoot providerHome
     let workspaceRoot = fixtureRoot </> "workspace"
         registryPath = fixtureRoot </> "state" </> "last-workspace"
         mainPath = workspaceRoot </> "src" </> "Main.hs"
@@ -94,6 +115,80 @@ main =
     assert "workspace metadata stays hidden from the project tree" $
       all ((/= ".vihs") . (.collectionItemLabel)) (projectItems restoredView)
     putStrLn "Visual Haskell workspace survives a complete runtime restart"
+
+testProductionTextMateIntegration :: FilePath -> FilePath -> IO ()
+testProductionTextMateIntegration fixtureRoot providerHome = do
+  configuration <- defaultTextMateConfiguration providerHome
+  let sourcePath = fixtureRoot </> "workspace" </> "src" </> "Main.hs"
+      registryPath = fixtureRoot </> "state" </> "textmate-last-workspace"
+      applicationValue = applicationWithEnvironment registryPath configuration
+  latestView <- newIORef (applicationValue.appView applicationValue.appInitialModel)
+  runApp
+    ( scriptedBackend latestView $ \dispatch -> do
+        dispatch (TextFileRead sourcePath (Right "module Main where\nvalue = 42\n"))
+        highlighted <- waitForTextMateLayer latestView (ElementKey 1001000) 80
+        assert "production runtime applies the asynchronous TextMate layer" highlighted
+        let customGrammarPath = providerHome </> "grammars" </> "custom.tmLanguage.json"
+            customSourcePath = fixtureRoot </> "Sample.foo"
+        writeFile customGrammarPath customGrammar
+        threadDelay 1500000
+        dispatch (TextFileRead customSourcePath (Right "special ordinary\n"))
+        reloaded <- waitForTextMateLayer latestView (ElementKey 1001001) 80
+        assert "copying a user grammar triggers discovery and live reload" reloaded
+        dispatch (WindowCloseRequested (WindowKey 10))
+    )
+    applicationValue
+  where
+    waitForTextMateLayer :: IORef AppView -> ElementKey -> Int -> IO Bool
+    waitForTextMateLayer _ _ 0 = pure False
+    waitForTextMateLayer latestView editorKey attempts = do
+      view <- readIORef latestView
+      if any
+          (\(key, layer) -> key == editorKey && layer.textLayerKey == textMateSyntaxLayerKey)
+          (editorLayers view)
+        then pure True
+        else threadDelay 50000 >> waitForTextMateLayer latestView editorKey (attempts - 1)
+
+    editorLayers :: AppView -> [(ElementKey, TextLayer)]
+    editorLayers view =
+      [ (editor.textEditorKey, layer)
+      | window <- view.appWindows
+      , TextEditor editor <- windowLeafControls window
+      , layer <- editor.textEditorLayers
+      ]
+
+    customGrammar =
+      unlines
+        [ "{"
+        , "  \"name\": \"Custom fixture\","
+        , "  \"scopeName\": \"source.custom\","
+        , "  \"fileTypes\": [\"foo\"],"
+        , "  \"patterns\": ["
+        , "    { \"name\": \"keyword.control.custom\", \"match\": \"\\\\bspecial\\\\b\" }"
+        , "  ]"
+        , "}"
+        ]
+
+testVisualHaskellHome :: FilePath -> IO ()
+testVisualHaskellHome requestedHome =
+  bracket (lookupEnv "VH_HOME") restoreEnvironment $ \_ -> do
+    setEnv "VH_HOME" requestedHome
+    paths <- resolveVisualHaskellPaths
+    ensureVisualHaskellPaths paths
+    assertEqual "VH_HOME override is normalized" requestedHome paths.visualHaskellHome
+    created <-
+      traverse
+        doesDirectoryExist
+        [ paths.visualHaskellExtensionDirectory
+        , paths.visualHaskellGrammarDirectory
+        , paths.visualHaskellThemeDirectory
+        ]
+    assert "Visual Haskell creates all user provider directories" (and created)
+    settingsExists <- doesFileExist paths.visualHaskellSettingsPath
+    assert "an absent settings file continues to mean defaults" (not settingsExists)
+  where
+    restoreEnvironment Nothing = unsetEnv "VH_HOME"
+    restoreEnvironment (Just previous) = setEnv "VH_HOME" previous
 
 scriptedBackend
   :: IORef AppView

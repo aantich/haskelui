@@ -5,12 +5,14 @@ module Main (main) where
 
 import LayoutSpec (runLayoutTests)
 import PropertySpec (runPropertyTests)
+import DrawingSpec (runDrawingTests)
 import HaskeLUI.Core
 
 main :: IO ()
 main = do
   runLayoutTests
   runPropertyTests
+  runDrawingTests
   let increment = transaction "Increment" (SingleUndo (UndoGroup "counter")) (+ 1)
   assert "transaction application" (applyTransaction increment (1 :: Int) == 2)
   let updateWithEffect =
