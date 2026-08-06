@@ -4,6 +4,11 @@ UIH is an experimental native Haskell application framework. Applications descri
 
 The repository is currently validating the architecture through small compiled and native vertical slices. It is not yet a usable application library.
 
+For a task-oriented explanation of the implemented application API, including
+state management, windows, workspaces, controls, layout, collections, styled
+text, effects, project structure, and testing, read the
+[UIH User Guide](docs/USER_GUIDE.md).
+
 ## Repository layout
 
 ```text
@@ -68,10 +73,12 @@ tests/macos/validate-deployment-target.sh 13.0
 
 ## Design documents
 
+- [User Guide](docs/USER_GUIDE.md)
 - [Architecture proposal](docs/design/architecture.md)
 - [Portable Core control catalog](docs/design/core-control-catalog.md)
 - [Document/workspace window surface API](docs/design/window-workspace-surface-api.md)
 - [Portable layout system](docs/design/layout-system.md)
+- [Property and binding API](docs/design/property-binding-api.md)
 - [ADR 0001: pure bindings, transactions, and async validation](docs/adr/0001-pure-bindings-transactions-and-async-validation.md)
 - [ADR 0002: backend layout and the AppKit C bridge](docs/adr/0002-backend-layout-and-appkit-c-bridge.md)
 - [ADR 0003: explicit file effects and the native text-editor slice](docs/adr/0003-file-effects-and-native-text-editor.md)

@@ -1,3 +1,4 @@
+{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -12,7 +13,10 @@ module Example.AppKitVertical
 
 import Data.Text (Text)
 import qualified Data.Text as Text
+import GHC.Generics (Generic)
+import UIH.Binding
 import UIH.Core
+import UIH.Property
 
 data Model = Model
   { name :: !Text
@@ -21,7 +25,26 @@ data Model = Model
   , mainWindowOpen :: !Bool
   , inspectorOpen :: !Bool
   }
-  deriving stock (Eq, Show)
+  deriving stock (Eq, Generic, Show)
+
+properties :: Path Model Model
+properties = rootPath
+
+nameBinding :: Binding Model Text
+nameBinding =
+  bindWith
+    properties.name
+    [ alsoWrite (const (properties.dirty .= True))
+    , alsoWrite
+        ( const
+            ( properties.status
+                .= "Unsaved changes — closing this window is currently vetoed"
+            )
+        )
+    , commitPolicy Live
+    , undoPolicy (Coalesce (UndoGroup "edit-name"))
+    , labelTransaction "Edit name"
+    ]
 
 mainWindowKey, inspectorWindowKey :: WindowKey
 mainWindowKey = WindowKey 1
@@ -70,7 +93,7 @@ mainWindow model =
     , windowFrame = Rect 120 180 540 320
     , windowControls =
         [ Label greetingLabelKey (Rect 24 260 480 24) ("Hello, " <> model.name <> "!")
-        , TextField nameFieldKey (Rect 24 215 300 28) model.name "Your name" True
+        , TextField nameFieldKey (Rect 24 215 300 28) (readBinding nameBinding model) "Your name" True
         , Button (ElementKey 102) (Rect 24 160 120 32) "Save" saveCommand model.dirty
         , Button (ElementKey 103) (Rect 156 160 168 32) inspectorTitle toggleInspectorCommand True
         , Label (ElementKey 104) (Rect 24 95 490 44) model.status
@@ -104,38 +127,39 @@ handleEvent event model =
   case event of
     TextChanged key updatedName
       | key == nameFieldKey ->
-          transaction
-            "Edit name"
-            (Coalesce (UndoGroup "edit-name"))
-            ( \current ->
-                current
-                  { name = updatedName
-                  , dirty = True
-                  , status = "Unsaved changes — closing this window is currently vetoed"
-                  }
-            )
+          case editBinding model InputChanged nameBinding updatedName of
+            EditCommitted _ committed -> committed
+            DraftStaged _ -> noTransaction
+            DraftInvalid _ _ -> noTransaction
     CommandInvoked command
       | command == saveCommand ->
-          transaction
+          transactionFromAction
             "Save"
             NoUndo
-            (\current -> current {dirty = False, status = "Saved — the main window may now close"})
+            ( batchActions
+                "Save"
+                [ properties.dirty .= False
+                , properties.status .= "Saved — the main window may now close"
+                ]
+            )
       | command == toggleInspectorCommand ->
-          transaction
-            "Toggle inspector"
-            NoUndo
-            (\current -> current {inspectorOpen = not current.inspectorOpen})
+          transactionFromAction "Toggle inspector" NoUndo (modify properties.inspectorOpen not)
     WindowCloseRequested key
       | key == inspectorWindowKey ->
-          transaction "Close inspector" NoUndo (\current -> current {inspectorOpen = False})
+          transactionFromAction "Close inspector" NoUndo (properties.inspectorOpen .= False)
       | key == mainWindowKey && model.dirty ->
           transaction
             "Veto close"
             NoUndo
             (\current -> current {status = "Close vetoed: save with Command-S, then close again"})
       | key == mainWindowKey ->
-          transaction
+          transactionFromAction
             "Close main window"
             NoUndo
-            (\current -> current {mainWindowOpen = False, inspectorOpen = False})
+            ( batchActions
+                "Close main window"
+                [ properties.mainWindowOpen .= False
+                , properties.inspectorOpen .= False
+                ]
+            )
     _ -> noTransaction

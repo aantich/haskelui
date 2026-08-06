@@ -9,6 +9,7 @@ copyright: 2026 UIH contributors
 dependencies:
   - base >= 4.20.2 && < 4.21
   - containers
+  - generic-lens
   - text
 
 ghc-options:

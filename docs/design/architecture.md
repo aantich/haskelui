@@ -467,7 +467,11 @@ The GHC 9.10.3 property spike validates this syntax with a generic virtual `HasF
 
 The dotted left side is an `OverloadedRecordDot` expression over UIH path values, followed by UIH's ordinary `.=` operator. It is not a nested record update and does not require `OverloadedRecordUpdate` or `RebindableSyntax`. `property "document.title" (#document . #title)` remains the explicit construction and interoperability form.
 
-Total `Property` values always focus exactly one model value. A partial focus into a collection or sum type must use a distinct partial-property type rather than weakening this guarantee; the exact partial-property contract remains open.
+Total `Property` values always focus exactly one model value. A partial focus
+into a collection or sum type uses the implemented, distinct
+`OptionalProperty`: reads return `Maybe`, while writes and modifications return
+`Either PropertyApplyError`. It deliberately does not support `.=` because an
+ordinary `Action model` has no failure channel.
 
 Model and element properties remain different types. Model properties are durable and authoritative. Element properties are runtime-owned, lifetime-scoped handles intended for uncontrolled or transient presentation state. A model-bound element must not expose an independently authoritative mutable element property for the same value.
 
@@ -946,7 +950,7 @@ If the local draft is pristine, the current value refreshes it. If only the loca
 The initial synchronization policies are:
 
 - `RefreshIfPristine`: refresh untouched drafts and otherwise preserve the local draft.
-- `PreserveLocalDraft`: preserve an edited draft across authoritative changes.
+- `PreserveLocalDraft`: always preserve the local draft across authoritative changes.
 - `DetectConcurrentChange`: report a three-way conflict when both sides changed.
 
 Live bindings default to `RefreshIfPristine`; staged bindings default to `DetectConcurrentChange`. IME composition temporarily preserves the native draft regardless of ordinary synchronization policy.
@@ -974,7 +978,11 @@ textField
 
 `asyncValidation` visibly accepts an `IO` runner; it is not a `BindingOption` and cannot make the pure binding implicitly effectful. The retained runtime owns each request and must associate it with the element identity and edit revision, cancel obsolete work where possible, ignore stale results unconditionally, and dispose it with the element.
 
-The production modules should reinforce this boundary: `UIH.Binding` contains only the pure binding, draft, conflict, and transaction-construction surface, while `UIH.Validation.Async` contains `AsyncValidation`, its `IO` constructor, and runtime policies. The umbrella `UIH` package may re-export both, but types and call sites continue to expose which layer is impure.
+The production module `UIH.Binding` contains only the pure binding, draft,
+conflict, and transaction-construction surface. The future
+`UIH.Validation.Async` module will contain `AsyncValidation`, its `IO`
+constructor, and runtime policies. An umbrella `UIH` package may re-export both,
+but types and call sites continue to expose which layer is impure.
 
 The initial pending-result policies are:
 
@@ -996,7 +1004,12 @@ It is not another option alongside independent `value` and `onChange` options, b
 textField (controlled currentTitle onTitleChanged) []
 ```
 
-The GHC 9.10.3 public API spike compiles and executes direct assignment, dirty-state batching, synchronous validation, formatted `Text`/`Int` editing, invalid-draft preservation, commit triggers, explicit transactions, pure three-way synchronization, and conflict reporting. It also compiles the separate async-validation declaration without executing its `IO`. It does not yet implement retained controls, request cancellation, or the undo interpreter.
+The production GHC 9.10.3 Core implementation compiles and tests direct
+assignment, dirty-state batching, value-only and model-aware synchronous
+validation, generic codecs, invalid-draft preservation, commit triggers,
+explicit transactions, pure three-way synchronization, and conflict reporting.
+It does not yet implement retained staged-draft controls, async request
+cancellation, or the undo interpreter.
 
 These decisions are recorded in [ADR 0001](../adr/0001-pure-bindings-transactions-and-async-validation.md).
 
@@ -1862,20 +1875,21 @@ Mitigation: Center documentation and control APIs on `Property`, `get`, `.=`, `m
 
 ## 30. Open decisions
 
-The lens representation, default dotted path syntax, distinct element-assignment operation, and core binding surface are resolved by the GHC 9.10.3 property and public API spikes. The following questions remain intentionally open.
+The lens representation, default dotted path syntax, total/optional property
+distinction, and pure binding surface are now implemented in Core. The
+following questions remain intentionally open.
 
 ### 30.1 Public API decisions needed early
 
-1. Whether generic lens derivation and record-dot path support live directly in `uih-core` or in a standard adapter re-exported by the umbrella `uih` package
-2. How `PropertyId` values are versioned and migrated when actions cross process, persistence, collaboration, or application-version boundaries
-3. The exact types for partial focus and keyed child scopes, including collection generality, action lifting, and whether a missing or removed target diagnoses, no-ops, or invokes explicit insertion policy
-4. The exact API and persistence contract for uncontrolled local reactive properties
-5. The async-validation runtime protocol: executor abstraction, exception mapping, cancellation guarantees, revision ownership, and presentation after optimistic failure; the pure/impure API boundary is resolved
-6. The transaction and undo interpreter: snapshot and patch representation, nested batches, reducer/event support, coalescing boundaries, effects, and persistence; the public `Transaction` envelope is resolved
-7. Whether subscriptions and effects use a closed algebra, extensible requests, or both, including cancellation and component disposal
-8. The initial public boundary of `SceneDriver` and driven render/game content
-9. How themes expose reusable style definitions without recreating CSS specificity
-10. The document-framework boundary between reusable policy and application-owned model
+1. How `PropertyId` values are versioned and migrated when actions cross process, persistence, collaboration, or application-version boundaries
+2. The exact types for keyed child scopes, including collection generality, action lifting, and whether a removed target diagnoses, no-ops, or invokes explicit insertion policy
+3. The exact API and persistence contract for uncontrolled local reactive properties
+4. The async-validation runtime protocol: executor abstraction, exception mapping, cancellation guarantees, revision ownership, and presentation after optimistic failure; the pure/impure API boundary is resolved
+5. The transaction and undo interpreter: snapshot and patch representation, nested batches, reducer/event support, coalescing boundaries, effects, and persistence; the public `Transaction` envelope is resolved
+6. Whether subscriptions and effects use a closed algebra, extensible requests, or both, including cancellation and component disposal
+7. The initial public boundary of `SceneDriver` and driven render/game content
+8. How themes expose reusable style definitions without recreating CSS specificity
+9. The document-framework boundary between reusable policy and application-owned model
 
 ### 30.2 Backend and implementation decisions that may follow spikes
 
@@ -1928,7 +1942,8 @@ The following are accepted unless later superseded by an ADR:
 28. The ordinary property vocabulary is `get`, `.=`, `modify`, `bind`, and property composition; users are not required to learn general lens machinery.
 29. `property`/`fromLens` with an explicit `PropertyId` is the guaranteed baseline constructor, including support for overloaded-label lenses such as `#document . #title`.
 30. Property composition combines both the underlying lens and qualified UIH identity.
-31. Partial focus will use a type distinct from total `Property`; its exact contract is still open.
+31. Partial focus uses `OptionalProperty`; reads return `Maybe`, updates return
+    `Either PropertyApplyError`, and it does not masquerade as total `.=`.
 32. Stack is the standard project workflow for building, testing, benchmarking, and running UIH.
 33. The initial compiler baseline is the system GHC 9.10.3 with `base-4.20.2.0`; Stack should use that installation rather than substituting another compiler.
 34. UIH property syntax may use GHC 9.10.3 overloaded labels and record-dot expressions, but the public API does not depend on experimental `OverloadedRecordUpdate`.
@@ -1936,7 +1951,8 @@ The following are accepted unless later superseded by an ADR:
 36. `generic-lens` interoperates directly with that representation and supplies checked overloaded-label and record-field lenses.
 37. The preferred generated model-property form is `properties.document.title`; it derives both the lens and qualified identity without Template Haskell. The explicit `property id (#document . #title)` form remains supported.
 38. Model properties use `.=` while model-free element properties use `setElement`; UIH does not overload `.=` across both ownership domains.
-39. Total and partial model focus remain separate types. The spike proves the distinction is implementable, while the final `OptionalProperty` failure policy remains open.
+39. Total and partial model focus remain separate types. The production
+    `OptionalProperty` contract exposes missing or rejected updates explicitly.
 40. Application scenes are desired-state declarations; keyed windows, settings, and state-driven dialogs are top-level resources rather than ordinary view nodes.
 41. Focus is retained runtime state by default. Applications do not mirror the focused document or control into their durable model merely to route commands.
 42. Commands separate global metadata from focused handlers. Buttons, menus, and shortcuts invoke the same command identity, while the active scope supplies behavior and availability.
@@ -2046,9 +2062,9 @@ These references are research inputs. UIH’s public contract is defined by this
 
 The next artifacts should be created in this order:
 
-1. In progress: the [multiwindow editor public API spike](../../spikes/public-api/README.md) compiles and now validates the initial binding surface; the counter/settings and IDE-like workspace sketches remain
-2. Completed: the [GHC 9.10.3 property API spike](../../spikes/property-api/README.md) validates the minimal lens core, overloaded labels, record-dot path composition, partial focus, element assignment, and compiler diagnostics
-3. In progress: [ADR 0001](../adr/0001-pure-bindings-transactions-and-async-validation.md) fixes the binding, transaction envelope, draft synchronization, and async-validation boundary; a follow-up ADR must finish action interpretation, partial properties, typed events, and the undo runtime
+1. In progress: the [multiwindow editor public API spike](../../spikes/public-api/README.md) validates future opaque control combinators; the concrete control surface remains available today
+2. Completed and productionized: the [GHC 9.10.3 property API spike](../../spikes/property-api/README.md) led to `UIH.Property`, `UIH.Binding`, Core tests, and the [production design](property-binding-api.md)
+3. Accepted and partially implemented: [ADR 0001](../adr/0001-pure-bindings-transactions-and-async-validation.md) fixes the pure binding, transaction envelope, draft synchronization, and async-validation boundary; retained draft sessions, async execution, and the undo runtime remain
 4. An ADR defining property identity, declaration, derivation, and persistence/versioning
 5. An ADR defining semantic view identity and reconciliation
 6. An ADR defining commands, focus scopes, and event routing

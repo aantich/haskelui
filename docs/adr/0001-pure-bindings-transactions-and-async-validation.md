@@ -3,6 +3,9 @@
 Status: Accepted  
 Date: 2026-08-05
 
+Implementation: `UIH.Property` and the pure `UIH.Binding` layer are implemented;
+retained edit sessions, async validation, and the undo interpreter remain.
+
 ## Context
 
 Editable controls must support direct property assignment, formatted values, invalid drafts, synchronous validation, commit timing, dirty-state updates, undo grouping, and concurrent authoritative updates. Some validation also requires network, file-system, or other asynchronous work.
@@ -75,7 +78,7 @@ Pending validation explicitly selects `BlockCommit`, `OptimisticCommit`, or `Adv
 
 ### Module boundary
 
-The production package will place pure editing in `UIH.Binding` and impure validation declarations in `UIH.Validation.Async`. The umbrella module may re-export both without erasing their type-level distinction.
+The production package places pure editing in `UIH.Binding`. Impure validation declarations will live in `UIH.Validation.Async`. An umbrella module may re-export both without erasing their type-level distinction.
 
 ## Alternatives considered
 

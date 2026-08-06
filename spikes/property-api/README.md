@@ -1,5 +1,9 @@
 # Property API spike
 
+Status: completed and superseded by the production `UIH.Property` and
+`UIH.Binding` modules. This package remains as a compiler-diagnostic and design
+history fixture; application code should use `uih-core`.
+
 This is deliberately disposable architecture-testing code. It checks the proposed UIH property surface against GHC 9.10.3 rather than establishing a stable package API.
 
 The spike exercises:

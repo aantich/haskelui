@@ -58,6 +58,7 @@ module UIH.Core
   , PresentationResult (..)
   , PresentationSpec (..)
   , ProgressControlSpec (..)
+  , PropertyId (..)
   , RichTextSpec (..)
   , SplitButtonSpec (..)
   , TextEditorSpec (..)
@@ -95,12 +96,17 @@ module UIH.Core
   , SplitKey (..)
   , SplitOrientation (..)
   , action
+  , actionDescription
+  , actionPropertyIds
+  , actionWithProperties
+  , applyAction
   , applyTransaction
   , attributedTextFromRuns
   , attributedTextFromSpans
   , attributedTextSpans
   , attributedTextToRuns
   , attributedTextValue
+  , batchActions
   , controlChildren
   , controlCatalogKind
   , controlFrame
@@ -121,6 +127,7 @@ module UIH.Core
   , windowWorkspace
   , workspaceTabKeys
   , transaction
+  , transactionFromAction
   , transactionWithEffects
   ) where
 
@@ -164,6 +171,11 @@ newtype CommandId = CommandId {unCommandId :: Word64}
   deriving stock (Eq, Ord, Show)
 
 newtype EffectKey = EffectKey {unEffectKey :: Word64}
+  deriving stock (Eq, Ord, Show)
+
+-- | Stable identity for an authoritative application-model property. Actions
+-- retain these values for diagnostics and eventual undo/change tracking.
+newtype PropertyId = PropertyId {unPropertyId :: Text}
   deriving stock (Eq, Ord, Show)
 
 newtype TextRevision = TextRevision {unTextRevision :: Word64}
@@ -1693,10 +1705,35 @@ data App model = App
 
 data Action model = Action
   !Text
+  !(Set PropertyId)
   (model -> model)
 
 action :: Text -> (model -> model) -> Action model
-action = Action
+action description = Action description Set.empty
+
+actionWithProperties
+  :: Text
+  -> [PropertyId]
+  -> (model -> model)
+  -> Action model
+actionWithProperties description touched =
+  Action description (Set.fromList touched)
+
+actionDescription :: Action model -> Text
+actionDescription (Action description _ _) = description
+
+actionPropertyIds :: Action model -> [PropertyId]
+actionPropertyIds (Action _ touched _) = Set.toAscList touched
+
+applyAction :: Action model -> model -> model
+applyAction (Action _ _ change) = change
+
+batchActions :: Text -> [Action model] -> Action model
+batchActions description actions =
+  Action
+    description
+    (Set.unions [touched | Action _ touched _ <- actions])
+    (\model -> foldl (flip applyAction) model actions)
 
 newtype UndoGroup = UndoGroup Text
   deriving stock (Eq, Show)
@@ -1722,6 +1759,19 @@ transaction
   -> Transaction model
 transaction description undo change =
   transactionWithEffects description undo [] change
+
+transactionFromAction
+  :: Text
+  -> UndoPolicy
+  -> Action model
+  -> Transaction model
+transactionFromAction description undo appliedAction =
+  Transaction
+    { transactionAction = appliedAction
+    , transactionUndo = undo
+    , transactionDescription = Just description
+    , transactionEffects = []
+    }
 
 transactionWithEffects
   :: Text
@@ -1751,4 +1801,4 @@ noTransaction =
     }
 
 applyTransaction :: Transaction model -> model -> model
-applyTransaction (Transaction (Action _ change) _ _ _) = change
+applyTransaction transactionValue = applyAction transactionValue.transactionAction

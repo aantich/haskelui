@@ -4,11 +4,13 @@
 module Main (main) where
 
 import LayoutSpec (runLayoutTests)
+import PropertySpec (runPropertyTests)
 import UIH.Core
 
 main :: IO ()
 main = do
   runLayoutTests
+  runPropertyTests
   let increment = transaction "Increment" (SingleUndo (UndoGroup "counter")) (+ 1)
   assert "transaction application" (applyTransaction increment (1 :: Int) == 2)
 
