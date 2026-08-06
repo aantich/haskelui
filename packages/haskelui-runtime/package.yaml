@@ -7,12 +7,15 @@ maintainer: HaskeLUI contributors
 copyright: 2026 HaskeLUI contributors
 
 dependencies:
+  - async
   - base >= 4.20.2 && < 4.21
   - bytestring
+  - containers
   - directory
   - filepath
   - text
   - haskelui-core
+  - stm
 
 ghc-options:
   - -Wall

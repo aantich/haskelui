@@ -22,8 +22,11 @@ library
   exposed-modules:
       HaskeLUI.Binding
       HaskeLUI.Core
+      HaskeLUI.ExternalEvent
       HaskeLUI.Layout
       HaskeLUI.Property
+      HaskeLUI.Service
+      HaskeLUI.Task
   other-modules:
       Paths_haskelui_core
   autogen-modules:

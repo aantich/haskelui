@@ -70,6 +70,9 @@ application =
           , inspectorOpen = True
         }
     , appInitialEffects = []
+    , appInitialCommands = []
+    , appServices = []
+    , appSubscriptions = const []
     , appView = render
     , appHandleEvent = handleEvent
     }

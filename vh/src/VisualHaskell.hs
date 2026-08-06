@@ -213,6 +213,9 @@ editorApplication startingModel =
   App
     { appInitialModel = startingModel
     , appInitialEffects = []
+    , appInitialCommands = []
+    , appServices = []
+    , appSubscriptions = const []
     , appView = render
     , appHandleEvent = handleEvent
     }

@@ -20,6 +20,7 @@ import qualified Data.ByteString as ByteString
 import Data.Char (ord)
 import Data.IORef
   ( IORef
+  , atomicModifyIORef'
   , newIORef
   , readIORef
   , writeIORef
@@ -91,7 +92,8 @@ appKitBackend = Backend openAppKit
 
 openAppKit :: (UIEvent -> IO ()) -> IO BackendSession
 openAppKit dispatch = do
-  callback <- makeEventCallback (receiveEvent dispatch)
+  scheduledActions <- newIORef []
+  callback <- makeEventCallback (receiveEvent dispatch (drainScheduledActions scheduledActions))
   initialized <- c_initialize callback nullPtr
   unless (initialized /= 0) $ do
     freeHaskellFunPtr callback
@@ -101,6 +103,7 @@ openAppKit dispatch = do
   pure
     BackendSession
       { backendRender = reconcile stateReference
+      , backendScheduleOnUI = scheduleOnUI scheduledActions
       , backendRequestOpenTextFiles = c_openTextFiles
       , backendRequestOpenProjectFolder = c_openProjectFolder
       , backendRun = c_run
@@ -108,14 +111,25 @@ openAppKit dispatch = do
       , backendShutdown = shutdown stateReference callback
       }
 
+scheduleOnUI :: IORef [IO ()] -> IO () -> IO ()
+scheduleOnUI scheduledActions operation = do
+  atomicModifyIORef' scheduledActions $ \pending -> (operation : pending, ())
+  c_scheduleRuntimeWake
+
+drainScheduledActions :: IORef [IO ()] -> IO ()
+drainScheduledActions scheduledActions = do
+  pending <- atomicModifyIORef' scheduledActions $ \operations -> ([], reverse operations)
+  sequence_ pending
+
 receiveEvent
   :: (UIEvent -> IO ())
+  -> IO ()
   -> Ptr ()
   -> CInt
   -> Word64
   -> CString
   -> IO ()
-receiveEvent dispatch _ eventKind identity textPointer =
+receiveEvent dispatch drainRuntime _ eventKind identity textPointer =
   case eventKind of
     1 -> dispatch (CommandInvoked (CommandId identity))
     2 -> do
@@ -176,6 +190,7 @@ receiveEvent dispatch _ eventKind identity textPointer =
     19 -> do
       path <- decodeText textPointer
       dispatch (ProjectFolderChosen (Text.unpack path))
+    20 -> drainRuntime
     _ -> pure ()
 
 readText :: Read value => Text -> Maybe value

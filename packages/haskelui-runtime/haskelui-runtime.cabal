@@ -29,11 +29,14 @@ library
       src
   ghc-options: -Wall -Wcompat
   build-depends:
-      base >=4.20.2 && <4.21
+      async
+    , base >=4.20.2 && <4.21
     , bytestring
+    , containers
     , directory
     , filepath
     , haskelui-core
+    , stm
     , text
   default-language: Haskell2010
 
@@ -48,11 +51,14 @@ test-suite haskelui-runtime-test
       test
   ghc-options: -Wall -Wcompat
   build-depends:
-      base >=4.20.2 && <4.21
+      async
+    , base >=4.20.2 && <4.21
     , bytestring
+    , containers
     , directory
     , filepath
     , haskelui-core
     , haskelui-runtime
+    , stm
     , text
   default-language: Haskell2010

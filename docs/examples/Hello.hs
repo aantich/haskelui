@@ -27,12 +27,7 @@ saveCommand = CommandId 1
 
 application :: App Model
 application =
-  App
-    { appInitialModel = Model "Haskell" False True
-    , appInitialEffects = []
-    , appView = view
-    , appHandleEvent = update
-    }
+  simpleApp (Model "Haskell" False True) view update
 
 view :: Model -> AppView
 view model =

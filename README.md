@@ -2,11 +2,15 @@
 
 HaskeLUI is an experimental native Haskell application framework. Applications describe semantic scenes, windows, controls, commands, bindings, and transactions without depending on SDL, AppKit, WinUI, or another backend API.
 
-The repository is currently validating the architecture through small compiled and native vertical slices. It is not yet a usable application library.
+The repository is currently validating the architecture through compiled and
+native vertical slices. The Core surface, pure layout/bindings, AppKit backend,
+and generic external-event/task/service/subscription runtime are usable in the
+included applications, but the framework is not yet a stable released library.
 
 For a task-oriented explanation of the implemented application API, including
 state management, windows, workspaces, controls, layout, collections, styled
-text, effects, project structure, and testing, read the
+text, finite tasks, typed supervised services, subscriptions, project
+structure, and testing, read the
 [HaskeLUI User Guide](docs/USER_GUIDE.md).
 
 ## Repository layout
@@ -76,6 +80,8 @@ tests/macos/validate-deployment-target.sh 13.0
 
 - [User Guide](docs/USER_GUIDE.md)
 - [Architecture proposal](docs/design/architecture.md)
+- [HaskeLUI services, tasks, and external events](docs/design/services-tasks-external-events.md)
+- [Visual Haskell long-term vision](docs/design/visual-haskell-vision.md)
 - [Portable Core control catalog](docs/design/core-control-catalog.md)
 - [Document/workspace window surface API](docs/design/window-workspace-surface-api.md)
 - [Portable layout system](docs/design/layout-system.md)

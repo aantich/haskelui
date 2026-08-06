@@ -369,6 +369,7 @@ editBinding
                     , transactionUndo = undo
                     , transactionDescription = description
                     , transactionEffects = []
+                    , transactionCommands = []
                     }
             | otherwise -> DraftStaged draft
           issues -> DraftInvalid draft issues

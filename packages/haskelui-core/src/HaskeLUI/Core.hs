@@ -1,5 +1,6 @@
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE GADTs #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -38,6 +39,11 @@ module HaskeLUI.Core
   , Effect (..)
   , EffectKey (..)
   , ElementKey (..)
+  , EventCoalescingKey (..)
+  , EventDelivery (..)
+  , ExceptionSummary (..)
+  , ExternalEvent
+  , ExternalSink (..)
   , FileSystemEntry (..)
   , FileSystemEntryKind (..)
   , FontFamily (..)
@@ -61,6 +67,33 @@ module HaskeLUI.Core
   , PresentationSpec (..)
   , ProgressControlSpec (..)
   , PropertyId (..)
+  , RuntimeCommand (..)
+  , RuntimeGeneration (..)
+  , TaskKey (..)
+  , TaskScope (..)
+  , TaskStartPolicy (..)
+  , TaskOptions (..)
+  , TaskFailure (..)
+  , TaskOutcome (..)
+  , TaskCancellationRequested (..)
+  , CancellationToken (..)
+  , ServiceKey (..)
+  , ServiceEndpoint (..)
+  , ServiceContext (..)
+  , Service (..)
+  , ServiceOptions (..)
+  , ServiceHealth (..)
+  , ServiceStatus (..)
+  , ServiceExit (..)
+  , ServiceSendResult (..)
+  , RestartPolicy (..)
+  , BackoffPolicy (..)
+  , OverflowPolicy (..)
+  , SubscriptionKey (..)
+  , SubscriptionFingerprint (..)
+  , Subscription (..)
+  , SubscriptionStop
+  , LifetimeKey (..)
   , RichTextSpec (..)
   , SplitButtonSpec (..)
   , TextEditorSpec (..)
@@ -101,6 +134,7 @@ module HaskeLUI.Core
   , actionDescription
   , actionPropertyIds
   , actionWithProperties
+  , appendRuntimeCommands
   , applyAction
   , applyTransaction
   , attributedTextFromRuns
@@ -120,7 +154,22 @@ module HaskeLUI.Core
   , resolveAppViewLayoutsWith
   , flattenControls
   , noTransaction
+  , cancelScope
+  , cancelTask
+  , closeLifetime
+  , defaultBackoffPolicy
+  , defaultServiceOptions
+  , defaultTaskOptions
+  , emitExternalEvent
+  , externalEvent
+  , externalEventDelivery
+  , externalEventDescription
+  , handleExternalEvent
+  , latestExternalEvent
+  , openLifetime
   , requestEffect
+  , requestRuntimeCommand
+  , restartService
   , resolveTextLayers
   , nextTabAfterRemoval
   , validateWorkspaceSpec
@@ -131,10 +180,27 @@ module HaskeLUI.Core
   , transaction
   , transactionFromAction
   , transactionFromActionWithEffects
+  , transactionFromActionWithCommands
+  , transactionWithCommands
   , transactionWithEffects
+  , service
+  , serviceDescription
+  , serviceEndpointKey
+  , serviceKey
+  , serviceWithStatus
+  , sendService
+  , sendServiceWithResult
+  , simpleApp
+  , startTask
+  , startTaskWith
+  , subscription
+  , subscriptionFingerprint
+  , subscriptionKey
+  , throwIfCancelled
   ) where
 
 import Control.Applicative ((<|>))
+import Control.Exception (Exception, throwIO)
 import Data.List (group, sort)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -143,6 +209,7 @@ import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
+import Data.Typeable (Typeable)
 import Data.Word (Word64)
 import HaskeLUI.Layout
 
@@ -174,6 +241,29 @@ newtype CommandId = CommandId {unCommandId :: Word64}
   deriving stock (Eq, Ord, Show)
 
 newtype EffectKey = EffectKey {unEffectKey :: Word64}
+  deriving stock (Eq, Ord, Show)
+
+-- | Stable identities used by the asynchronous runtime. Textual keys are
+-- intentionally easy to namespace and useful in diagnostics.
+newtype TaskKey = TaskKey {unTaskKey :: Text}
+  deriving stock (Eq, Ord, Show)
+
+newtype ServiceKey = ServiceKey {unServiceKey :: Text}
+  deriving stock (Eq, Ord, Show)
+
+newtype SubscriptionKey = SubscriptionKey {unSubscriptionKey :: Text}
+  deriving stock (Eq, Ord, Show)
+
+newtype LifetimeKey = LifetimeKey {unLifetimeKey :: Text}
+  deriving stock (Eq, Ord, Show)
+
+newtype EventCoalescingKey = EventCoalescingKey {unEventCoalescingKey :: Text}
+  deriving stock (Eq, Ord, Show)
+
+newtype SubscriptionFingerprint = SubscriptionFingerprint {unSubscriptionFingerprint :: Text}
+  deriving stock (Eq, Ord, Show)
+
+newtype RuntimeGeneration = RuntimeGeneration {unRuntimeGeneration :: Word64}
   deriving stock (Eq, Ord, Show)
 
 -- | Stable identity for an authoritative application-model property. Actions
@@ -1724,12 +1814,363 @@ data Effect
   | WriteTextFileAtomically !EffectKey !FilePath !Text
   deriving stock (Eq, Show)
 
+-- | A callback-oriented event produced outside the native control event
+-- vocabulary. The callback is applied to the current model when the runtime
+-- accepts the event, never to a model captured when work started.
+data ExternalEvent model = ExternalEvent
+  !Text
+  !EventDelivery
+  (model -> Transaction model)
+
+data EventDelivery
+  = DeliverEvery
+  | KeepLatest !EventCoalescingKey
+  deriving stock (Eq, Show)
+
+externalEvent :: Text -> (model -> Transaction model) -> ExternalEvent model
+externalEvent description = ExternalEvent description DeliverEvery
+
+latestExternalEvent
+  :: EventCoalescingKey
+  -> Text
+  -> (model -> Transaction model)
+  -> ExternalEvent model
+latestExternalEvent key description =
+  ExternalEvent description (KeepLatest key)
+
+externalEventDescription :: ExternalEvent model -> Text
+externalEventDescription (ExternalEvent description _ _) = description
+
+externalEventDelivery :: ExternalEvent model -> EventDelivery
+externalEventDelivery (ExternalEvent _ delivery _) = delivery
+
+handleExternalEvent :: ExternalEvent model -> model -> Transaction model
+handleExternalEvent (ExternalEvent _ _ handle) = handle
+
+-- | Runtime-owned sink handed to services and subscriptions. Producers can
+-- choose lossless delivery or explicit latest-value coalescing, but cannot
+-- read or mutate the application model.
+data ExternalSink model = ExternalSink
+  { emitEvery :: ExternalEvent model -> IO ()
+  , emitLatest :: EventCoalescingKey -> ExternalEvent model -> IO ()
+  }
+
+emitExternalEvent :: ExternalSink model -> ExternalEvent model -> IO ()
+emitExternalEvent sink event =
+  case externalEventDelivery event of
+    DeliverEvery -> sink.emitEvery event
+    KeepLatest key -> sink.emitLatest key event
+
+data TaskScope
+  = ApplicationScope
+  | WindowScope !WindowKey
+  | ElementScope !ElementKey
+  | LifetimeScope !LifetimeKey
+  deriving stock (Eq, Ord, Show)
+
+data TaskStartPolicy
+  = ReplaceRunning
+  | KeepRunning
+  | RequireIdle
+  deriving stock (Eq, Show)
+
+-- | Per-task execution options. Timeouts are expressed in milliseconds so
+-- call sites name a human-scale unit and do not depend on a particular clock
+-- library.
+data TaskOptions = TaskOptions
+  { taskScope :: !TaskScope
+  , taskStartPolicy :: !TaskStartPolicy
+  , taskTimeoutMilliseconds :: !(Maybe Word64)
+  }
+  deriving stock (Eq, Show)
+
+defaultTaskOptions :: TaskScope -> TaskStartPolicy -> TaskOptions
+defaultTaskOptions scope startPolicy =
+  TaskOptions
+    { taskScope = scope
+    , taskStartPolicy = startPolicy
+    , taskTimeoutMilliseconds = Nothing
+    }
+
+newtype ExceptionSummary = ExceptionSummary {unExceptionSummary :: Text}
+  deriving stock (Eq, Show)
+
+data TaskFailure
+  = TaskException !ExceptionSummary
+  | TaskTimedOut
+  | TaskExecutorStopped
+  deriving stock (Eq, Show)
+
+data TaskOutcome result
+  = TaskSucceeded !result
+  | TaskCancelled
+  | TaskFailed !TaskFailure
+  deriving stock (Eq, Show)
+
+-- | Cooperative cancellation observation. Runtime invalidation and
+-- generation checks, rather than cancellation, provide correctness.
+data CancellationToken = CancellationToken
+  { cancellationRequested :: IO Bool
+  , waitForCancellation :: IO ()
+  }
+
+data TaskCancellationRequested = TaskCancellationRequested
+  deriving stock (Show)
+
+instance Exception TaskCancellationRequested
+
+throwIfCancelled :: CancellationToken -> IO ()
+throwIfCancelled token = do
+  requested <- cancellationRequested token
+  if requested then throwIO TaskCancellationRequested else pure ()
+
+data BackoffPolicy = BackoffPolicy
+  { backoffInitialMilliseconds :: !Word64
+  , backoffMaximumMilliseconds :: !Word64
+  , backoffMultiplier :: !Double
+  , backoffJitterRatio :: !Double
+  , backoffMaximumRestarts :: !Int
+  }
+  deriving stock (Eq, Show)
+
+defaultBackoffPolicy :: BackoffPolicy
+defaultBackoffPolicy =
+  BackoffPolicy
+    { backoffInitialMilliseconds = 100
+    , backoffMaximumMilliseconds = 5000
+    , backoffMultiplier = 2
+    , backoffJitterRatio = 0.2
+    , backoffMaximumRestarts = 5
+    }
+
+data RestartPolicy
+  = DoNotRestart
+  | RestartOnFailure !BackoffPolicy
+  deriving stock (Eq, Show)
+
+-- | Bounded service input behavior. Replacing by a key coalesces pending
+-- commands without ever blocking the UI thread.
+data OverflowPolicy command
+  = RejectNewCommand
+  | DropOldestCommand
+  | ReplacePendingCommand !(command -> Text)
+
+data ServiceOptions command = ServiceOptions
+  { serviceRestartPolicy :: !RestartPolicy
+  , serviceCommandCapacity :: !Int
+  , serviceOverflowPolicy :: !(OverflowPolicy command)
+  }
+
+defaultServiceOptions :: ServiceOptions command
+defaultServiceOptions =
+  ServiceOptions
+    { serviceRestartPolicy = RestartOnFailure defaultBackoffPolicy
+    , serviceCommandCapacity = 64
+    , serviceOverflowPolicy = RejectNewCommand
+    }
+
+data ServiceHealth
+  = ServiceHealthy
+  | ServiceDegraded !Text
+  deriving stock (Eq, Show)
+
+data ServiceExit
+  = ServiceStoppedNormally
+  | ServiceCancelled
+  | ServiceFailed !ExceptionSummary
+  deriving stock (Eq, Show)
+
+data ServiceStatus
+  = ServiceStarting
+  | ServiceRunning
+  | ServiceHealthChanged !ServiceHealth
+  | ServiceRestartScheduled !Int !Word64
+  | ServiceExited !ServiceExit
+  | ServiceCircuitOpen !Int !ServiceExit
+  deriving stock (Eq, Show)
+
+data ServiceSendResult
+  = ServiceCommandQueued
+  | ServiceCommandCoalesced
+  | ServiceCommandDroppedOldest
+  | ServiceCommandRejected
+  | ServiceEndpointMismatch
+  | ServiceUnavailable
+  deriving stock (Eq, Show)
+
+data ServiceEndpoint command = ServiceEndpoint !ServiceKey
+
+serviceEndpointKey :: ServiceEndpoint command -> ServiceKey
+serviceEndpointKey (ServiceEndpoint key) = key
+
+data ServiceContext model command = ServiceContext
+  { receiveCommand :: IO (Maybe command)
+  , serviceEvents :: ExternalSink model
+  , serviceCancellation :: CancellationToken
+  , reportServiceHealth :: ServiceHealth -> IO ()
+  }
+
+-- | Existential service specifications keep command types private while the
+-- endpoint preserves them at every application call site.
+data Service model where
+  Service
+    :: Typeable command
+    => ServiceKey
+    -> Text
+    -> ServiceOptions command
+    -> Maybe (ServiceStatus -> ExternalEvent model)
+    -> (ServiceContext model command -> IO ())
+    -> Service model
+
+service
+  :: Typeable command
+  => ServiceKey
+  -> Text
+  -> ServiceOptions command
+  -> (ServiceContext model command -> IO ())
+  -> (Service model, ServiceEndpoint command)
+service key description options run =
+  (Service key description options Nothing run, ServiceEndpoint key)
+
+serviceWithStatus
+  :: Typeable command
+  => ServiceKey
+  -> Text
+  -> ServiceOptions command
+  -> (ServiceStatus -> ExternalEvent model)
+  -> (ServiceContext model command -> IO ())
+  -> (Service model, ServiceEndpoint command)
+serviceWithStatus key description options onStatus run =
+  (Service key description options (Just onStatus) run, ServiceEndpoint key)
+
+serviceKey :: Service model -> ServiceKey
+serviceKey (Service key _ _ _ _) = key
+
+serviceDescription :: Service model -> Text
+serviceDescription (Service _ description _ _ _) = description
+
+type SubscriptionStop = IO ()
+
+data Subscription model = Subscription
+  !SubscriptionKey
+  !SubscriptionFingerprint
+  (ExternalSink model -> IO SubscriptionStop)
+
+subscription
+  :: SubscriptionKey
+  -> SubscriptionFingerprint
+  -> (ExternalSink model -> IO SubscriptionStop)
+  -> Subscription model
+subscription = Subscription
+
+subscriptionKey :: Subscription model -> SubscriptionKey
+subscriptionKey (Subscription key _ _) = key
+
+subscriptionFingerprint :: Subscription model -> SubscriptionFingerprint
+subscriptionFingerprint (Subscription _ fingerprint _) = fingerprint
+
+-- | Opaque work declarations retained in pure transactions. Constructors are
+-- exported for the executor package; application code should prefer the smart
+-- constructors below.
+data RuntimeCommand model where
+  StartTaskCommand
+    :: TaskKey
+    -> TaskOptions
+    -> Text
+    -> (CancellationToken -> IO result)
+    -> (TaskOutcome result -> ExternalEvent model)
+    -> RuntimeCommand model
+  CancelTaskCommand :: TaskKey -> RuntimeCommand model
+  CancelScopeCommand :: TaskScope -> RuntimeCommand model
+  SendServiceCommand
+    :: Typeable command
+    => ServiceEndpoint command
+    -> command
+    -> Maybe (ServiceSendResult -> ExternalEvent model)
+    -> RuntimeCommand model
+  RestartServiceCommand :: ServiceKey -> RuntimeCommand model
+  OpenLifetimeCommand :: LifetimeKey -> RuntimeCommand model
+  CloseLifetimeCommand :: LifetimeKey -> RuntimeCommand model
+
+startTask
+  :: TaskKey
+  -> TaskScope
+  -> TaskStartPolicy
+  -> Text
+  -> (CancellationToken -> IO result)
+  -> (TaskOutcome result -> ExternalEvent model)
+  -> RuntimeCommand model
+startTask key scope startPolicy description =
+  startTaskWith key (defaultTaskOptions scope startPolicy) description
+
+startTaskWith
+  :: TaskKey
+  -> TaskOptions
+  -> Text
+  -> (CancellationToken -> IO result)
+  -> (TaskOutcome result -> ExternalEvent model)
+  -> RuntimeCommand model
+startTaskWith = StartTaskCommand
+
+cancelTask :: TaskKey -> RuntimeCommand model
+cancelTask = CancelTaskCommand
+
+cancelScope :: TaskScope -> RuntimeCommand model
+cancelScope = CancelScopeCommand
+
+sendService
+  :: Typeable command
+  => ServiceEndpoint command
+  -> command
+  -> RuntimeCommand model
+sendService endpoint command = SendServiceCommand endpoint command Nothing
+
+sendServiceWithResult
+  :: Typeable command
+  => ServiceEndpoint command
+  -> command
+  -> (ServiceSendResult -> ExternalEvent model)
+  -> RuntimeCommand model
+sendServiceWithResult endpoint command onResult =
+  SendServiceCommand endpoint command (Just onResult)
+
+restartService :: ServiceKey -> RuntimeCommand model
+restartService = RestartServiceCommand
+
+openLifetime :: LifetimeKey -> RuntimeCommand model
+openLifetime = OpenLifetimeCommand
+
+closeLifetime :: LifetimeKey -> RuntimeCommand model
+closeLifetime = CloseLifetimeCommand
+
 data App model = App
   { appInitialModel :: !model
   , appInitialEffects :: ![Effect]
+  , appInitialCommands :: ![RuntimeCommand model]
+  , appServices :: ![Service model]
+  , appSubscriptions :: model -> [Subscription model]
   , appView :: model -> AppView
   , appHandleEvent :: UIEvent -> model -> Transaction model
   }
+
+-- | Construct an application with no startup work, services, or dynamic
+-- subscriptions. Add those declarations with ordinary record updates as the
+-- application grows.
+simpleApp
+  :: model
+  -> (model -> AppView)
+  -> (UIEvent -> model -> Transaction model)
+  -> App model
+simpleApp initialModel view handleEvent =
+  App
+    { appInitialModel = initialModel
+    , appInitialEffects = []
+    , appInitialCommands = []
+    , appServices = []
+    , appSubscriptions = const []
+    , appView = view
+    , appHandleEvent = handleEvent
+    }
 
 data Action model = Action
   !Text
@@ -1778,6 +2219,7 @@ data Transaction model = Transaction
   , transactionUndo :: !UndoPolicy
   , transactionDescription :: !(Maybe Text)
   , transactionEffects :: ![Effect]
+  , transactionCommands :: ![RuntimeCommand model]
   }
 
 transaction
@@ -1808,6 +2250,22 @@ transactionFromActionWithEffects description undo effects appliedAction =
     , transactionUndo = undo
     , transactionDescription = Just description
     , transactionEffects = effects
+    , transactionCommands = []
+    }
+
+transactionFromActionWithCommands
+  :: Text
+  -> UndoPolicy
+  -> [RuntimeCommand model]
+  -> Action model
+  -> Transaction model
+transactionFromActionWithCommands description undo commands appliedAction =
+  Transaction
+    { transactionAction = appliedAction
+    , transactionUndo = undo
+    , transactionDescription = Just description
+    , transactionEffects = []
+    , transactionCommands = commands
     }
 
 transactionWithEffects
@@ -1823,9 +2281,35 @@ transactionWithEffects description undo effects change =
     effects
     (action description change)
 
+transactionWithCommands
+  :: Text
+  -> UndoPolicy
+  -> [RuntimeCommand model]
+  -> (model -> model)
+  -> Transaction model
+transactionWithCommands description undo commands change =
+  transactionFromActionWithCommands
+    description
+    undo
+    commands
+    (action description change)
+
+appendRuntimeCommands
+  :: [RuntimeCommand model]
+  -> Transaction model
+  -> Transaction model
+appendRuntimeCommands commands transactionValue =
+  transactionValue
+    { transactionCommands = transactionValue.transactionCommands <> commands
+    }
+
 requestEffect :: Text -> Effect -> Transaction model
 requestEffect description requested =
   transactionWithEffects description NoUndo [requested] id
+
+requestRuntimeCommand :: Text -> RuntimeCommand model -> Transaction model
+requestRuntimeCommand description requested =
+  transactionWithCommands description NoUndo [requested] id
 
 noTransaction :: Transaction model
 noTransaction =
@@ -1834,6 +2318,7 @@ noTransaction =
     , transactionUndo = NoUndo
     , transactionDescription = Nothing
     , transactionEffects = []
+    , transactionCommands = []
     }
 
 applyTransaction :: Transaction model -> model -> model

@@ -104,6 +104,7 @@ scriptedBackend latestView script =
     pure
       BackendSession
         { backendRender = writeIORef latestView
+        , backendScheduleOnUI = id
         , backendRequestOpenTextFiles = pure ()
         , backendRequestOpenProjectFolder = pure ()
         , backendRun = script dispatch

@@ -21,6 +21,7 @@ newHeadlessBackend = do
           pure
             BackendSession
               { backendRender = writeIORef latestView . Just
+              , backendScheduleOnUI = id
               , backendRequestOpenTextFiles = pure ()
               , backendRequestOpenProjectFolder = pure ()
               , backendRun = pure ()

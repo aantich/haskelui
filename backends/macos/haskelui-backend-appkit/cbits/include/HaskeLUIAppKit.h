@@ -29,7 +29,9 @@ typedef enum HaskeLUIMacEventKind {
   HaskeLUIMacEventDisclosureChanged = 16,
   HaskeLUIMacEventPresentationClosed = 17,
   HaskeLUIMacEventCollectionExpansionChanged = 18,
-  HaskeLUIMacEventProjectFolderChosen = 19
+  HaskeLUIMacEventProjectFolderChosen = 19,
+  /* Backend-private wakeup; it is never exposed as a HaskeLUI UIEvent. */
+  HaskeLUIMacEventRuntimeWake = 20
 } HaskeLUIMacEventKind;
 
 typedef enum HaskeLUIMacCatalogControlKind {
@@ -145,6 +147,7 @@ int32_t haskelui_macos_initialize(HaskeLUIMacEventCallback callback, void *conte
 void haskelui_macos_run(void);
 void haskelui_macos_stop(void);
 void haskelui_macos_shutdown(void);
+void haskelui_macos_schedule_runtime_wake(void);
 
 int32_t haskelui_macos_version_major(void);
 int32_t haskelui_macos_version_minor(void);

@@ -932,6 +932,7 @@ data Transaction model = Transaction
   , transactionUndo        :: UndoPolicy
   , transactionDescription :: Maybe Text
   , transactionEffects     :: [Effect]
+  , transactionCommands    :: [RuntimeCommand model]
   }
 ```
 
@@ -1492,26 +1493,30 @@ That early sketch is refined as follows:
 
 ## 21. Effects, subscriptions, and concurrency
 
-Effects are interpreted by the runtime and return results as actions:
+The implemented production-runtime foundation distinguishes current-model
+external-event callbacks, finite tasks, long-lived typed-command services, and
+declarative subscriptions:
 
 ```haskell
-data Effect model where
-  Task
-    :: IO result
-    -> (result -> Action model)
-    -> Effect model
+data ExternalEvent model = ExternalEvent
+  { externalEventDescription :: Text
+  , externalEventHandle      :: model -> Transaction model
+  }
 
-  RequestPlatform
-    :: PlatformRequest result
-    -> (result -> Action model)
-    -> Effect model
-
-  OpenExternalUrl
-    :: Url
-    -> Effect model
+startTask
+  :: TaskKey
+  -> TaskScope
+  -> TaskStartPolicy
+  -> Text
+  -> (CancellationToken -> IO result)
+  -> (TaskOutcome result -> ExternalEvent model)
+  -> RuntimeCommand model
 ```
 
-Exact constructors remain to be designed. Required properties are:
+The detailed surface, ordering, ownership, backend-thread, supervision,
+backpressure, testing, and migration design is in
+[HaskeLUI services, tasks, and external events](services-tasks-external-events.md).
+Required properties are:
 
 - Effects are explicit action values rather than arbitrary `IO` hidden in view callbacks.
 - Completion actions are delivered on the UI runtime in a defined order.
@@ -1519,7 +1524,12 @@ Exact constructors remain to be designed. Required properties are:
 - Effects can be scoped to a scene or element lifetime.
 - Background work cannot mutate UI runtime objects directly.
 
-`AsyncValidation control` is a specialized, element-owned consumer of the same eventual task and cancellation substrate. It is declared on a control rather than started by a model action because its pending/result state is transient element presentation. Its `IO` remains explicit in the declaration, and any authoritative domain consequence still returns through an ordinary typed effect/event path.
+`AsyncValidation control` remains a future specialized, element-owned consumer
+of the now-implemented task and cancellation substrate. It is declared on a
+control rather than started by a model action because its pending/result state
+is transient element presentation. Its `IO` remains explicit in the
+declaration, and any authoritative domain consequence still returns through an
+ordinary typed task/service event path.
 
 Subscriptions cover timers, external streams, file-system watching, application activation, frame ticks, and platform lifecycle events. Each subscription converts incoming values into actions. The runtime diffs subscriptions just as it diffs scenes and views.
 
@@ -1894,9 +1904,9 @@ following questions remain intentionally open.
 1. How `PropertyId` values are versioned and migrated when actions cross process, persistence, collaboration, or application-version boundaries
 2. The exact types for keyed child scopes, including collection generality, action lifting, and whether a removed target diagnoses, no-ops, or invokes explicit insertion policy
 3. The exact API and persistence contract for uncontrolled local reactive properties
-4. The async-validation runtime protocol: executor abstraction, exception mapping, cancellation guarantees, revision ownership, and presentation after optimistic failure; the pure/impure API boundary is resolved
+4. Validation and implementation of the async-validation control protocol: the shared task substrate now implements executor outcomes, cancellation, timeout, owner/generation rejection, and the separate validation mapping, while retained-control integration still needs implementation
 5. The transaction and undo interpreter: snapshot and patch representation, nested batches, reducer/event support, coalescing boundaries, effects, and persistence; the public `Transaction` envelope is resolved
-6. Whether subscriptions and effects use a closed algebra, extensible requests, or both, including cancellation and component disposal
+6. Completion of the platform-command migration and runtime observability: extensible tasks, typed supervised services, declarative subscriptions, TypeRep-checked endpoints, and a deterministic count-bounded micro-batch are implemented; callback-oriented native panels, production timing budgets, and structured metrics remain
 7. The initial public boundary of `SceneDriver` and driven render/game content
 8. How themes expose reusable style definitions without recreating CSS specificity
 9. The document-framework boundary between reusable policy and application-owned model

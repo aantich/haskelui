@@ -51,6 +51,7 @@ module HaskeLUI.Backend.AppKit.Internal.FFI
   , c_openProjectFolder
   , c_openTextFiles
   , c_run
+  , c_scheduleRuntimeWake
   , c_shutdown
   , c_stop
   , c_testLastFailure
@@ -323,6 +324,9 @@ foreign import ccall unsafe "haskelui_macos_initialize"
 
 foreign import ccall safe "haskelui_macos_run"
   c_run :: IO ()
+
+foreign import ccall unsafe "haskelui_macos_schedule_runtime_wake"
+  c_scheduleRuntimeWake :: IO ()
 
 foreign import ccall unsafe "haskelui_macos_stop"
   c_stop :: IO ()

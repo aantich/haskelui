@@ -35,7 +35,10 @@ walking `.git`, build products, dependency caches, or symlink-heavy trees.
 
 The semantic `TextEditor` control maps to an AppKit `NSTextView` hosted by `NSScrollView`. AppKit owns caret, selection, scrolling, find UI, local undo, accessibility, and native text input. The Haskell model remains authoritative for document contents and dirty state. `WindowActivated` supplies the minimal focus context needed by global commands.
 
-The current file interpreter is deliberately synchronous and UTF-8-only. This proves the effect boundary but is not the final task executor. Production background I/O must deliver completion back on the UI runtime, carry owner/revision identity, support cancellation where meaningful, and never call backend UI objects from worker threads.
+The compatibility file interpreter is deliberately synchronous and UTF-8-only.
+The generic task executor is now implemented and supplies UI-thread delivery,
+owner/generation identity, timeout, and cancellation; migrating this editor
+workflow to task commands remains document-layer work.
 
 ## Syntax-highlighting direction
 
@@ -60,3 +63,7 @@ Workspace restoration is now implemented for Visual Haskell metadata. The
 versioned `.vihs` format and its failure rules are specified in
 `docs/design/visual-haskell-workspaces.md`; unsaved-buffer crash recovery and
 background execution remain separate work.
+
+The available migration from synchronous file effects to finite background
+tasks is specified in
+[HaskeLUI services, tasks, and external events](../design/services-tasks-external-events.md).

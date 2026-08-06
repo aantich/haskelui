@@ -93,6 +93,9 @@ application =
   App
     { appInitialModel = initialModel
     , appInitialEffects = []
+    , appInitialCommands = []
+    , appServices = []
+    , appSubscriptions = const []
     , appView = renderGallery
     , appHandleEvent = handleGalleryEvent
     }

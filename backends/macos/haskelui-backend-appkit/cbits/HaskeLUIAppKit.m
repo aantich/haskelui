@@ -63,7 +63,7 @@ static NSRect HaskeLUIRect(const HaskeLUIMacRect *frame) {
 
 static void HaskeLUIEmit(int32_t kind, uint64_t identity, NSString *text) {
   NSString *copiedText = text == nil ? @"" : [text copy];
-  HaskeLUIQueuedCallbacks += 1;
+  __sync_add_and_fetch(&HaskeLUIQueuedCallbacks, 1);
   dispatch_async(dispatch_get_main_queue(), ^{
     HaskeLUIMacApplicationState *state = HaskeLUIState;
     if (state != nil && state.callback != NULL) {
@@ -73,7 +73,7 @@ static void HaskeLUIEmit(int32_t kind, uint64_t identity, NSString *text) {
           identity,
           [copiedText UTF8String]);
     }
-    HaskeLUIQueuedCallbacks -= 1;
+    __sync_sub_and_fetch(&HaskeLUIQueuedCallbacks, 1);
   });
 }
 
@@ -776,6 +776,21 @@ void haskelui_macos_stop(void) {
                               data1:0
                               data2:0];
     [application postEvent:wakeEvent atStart:NO];
+  });
+}
+
+void haskelui_macos_schedule_runtime_wake(void) {
+  /* Runtime wakeups are implementation scheduling, not retained native event
+     callbacks. They deliberately do not participate in the leak counter. */
+  dispatch_async(dispatch_get_main_queue(), ^{
+    HaskeLUIMacApplicationState *state = HaskeLUIState;
+    if (state != nil && state.callback != NULL) {
+      state.callback(
+          state.callbackContext,
+          HaskeLUIMacEventRuntimeWake,
+          0,
+          "");
+    }
   });
 }
 
@@ -4245,7 +4260,7 @@ void haskelui_macos_test_schedule_text_editor_script(
       }
     }
     HaskeLUIEmit(HaskeLUIMacEventCommand, openFolderCommandIdentity, @"");
-    HaskeLUITestAfter(0.12, ^{
+    HaskeLUITestAfter(0.30, ^{
     if (HaskeLUIState.openPanel == nil || !HaskeLUIState.openPanel.visible ||
         !HaskeLUIState.openPanel.canChooseDirectories || HaskeLUIState.openPanel.canChooseFiles ||
         HaskeLUIState.openPanel.allowsMultipleSelection) {
@@ -4277,7 +4292,7 @@ void haskelui_macos_test_schedule_text_editor_script(
     [editor.delegate textDidChange:
         [NSNotification notificationWithName:NSTextDidChangeNotification object:editor]];
 
-    HaskeLUITestAfter(0.12, ^{
+    HaskeLUITestAfter(0.30, ^{
       HaskeLUIMacWindowHandle *editedWindow = HaskeLUIState.windows[@(documentWindowIdentity)];
       NSMenuItem *enabledSaveItem = HaskeLUIState.commandItems[@(saveCommandIdentity)];
       if (editedWindow == nil || enabledSaveItem == nil) {
@@ -4321,7 +4336,7 @@ void haskelui_macos_test_schedule_text_editor_script(
         HaskeLUITestFail(@"text editor Save command did not handle Command-S");
       }
 
-      HaskeLUITestAfter(0.12, ^{
+      HaskeLUITestAfter(0.30, ^{
         HaskeLUIMacWindowHandle *savedWindow = HaskeLUIState.windows[@(documentWindowIdentity)];
         NSMenuItem *disabledSaveItem = HaskeLUIState.commandItems[@(saveCommandIdentity)];
         if (savedWindow == nil || disabledSaveItem == nil) {
@@ -4346,7 +4361,7 @@ void haskelui_macos_test_schedule_text_editor_script(
         }
         [savedTab.closeButton performClick:nil];
 
-        HaskeLUITestAfter(0.12, ^{
+        HaskeLUITestAfter(0.30, ^{
           HaskeLUIMacWindowHandle *emptyWorkspace = HaskeLUIState.windows[@(documentWindowIdentity)];
           BOOL tabStillPresent = NO;
           for (HaskeLUIMacTabGroupHandle *group in emptyWorkspace.tabGroups.allValues) {

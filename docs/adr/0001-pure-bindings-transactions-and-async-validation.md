@@ -109,7 +109,16 @@ Deferred because arbitrary typed domain events may not be invertible. Initial sn
 
 ## Remaining implementation decisions
 
-Two implementation choices remain, with current direction recorded so they are not merely unspecified:
+The generic task executor and error taxonomy are now implemented: successful
+domain data is distinct from timeout, requested cancellation, executor stop,
+and summarized thrown exceptions; generation and owner checks reject stale
+results. Two validation/undo choices remain:
 
-1. **Task executor and error taxonomy.** We must distinguish a valid negative response from timeout, cancellation, transport failure, and thrown exception. Reusing the general runtime task substrate minimizes machinery; a validation-specific result state still provides control presentation. The current recommendation is a shared cancellable executor plus a validation-specific unavailable/error result, with cancellation never treated as validation failure.
+1. **Validation-specific result mapping.** `AsyncValidation control` still must
+   map task outcomes to valid negative feedback, unavailable/error, or silent
+   cancellation without weakening authoritative domain validation.
 2. **Snapshot retention and coalescing boundaries.** Complete model snapshots are simplest but may retain large structures. Patches are smaller but cannot automatically describe opaque reducers. The current recommendation is snapshot correctness first, measurement before optimization, and coalescing only when undo group, retained element identity, scene/document scope, and uninterrupted interaction all match.
+
+The implemented task/service executor, including outcome taxonomy, generation
+rejection, owner lifetimes, and the remaining validation specialization, is in
+[HaskeLUI services, tasks, and external events](../design/services-tasks-external-events.md).

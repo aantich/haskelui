@@ -13,15 +13,17 @@ UI toolkit. A backend retains and updates the corresponding native objects.
 
 This guide documents the API that exists and compiles in this repository. It
 does not present types from design sketches or `spikes/` as finished features.
-The pure lens-based `Property` and `Binding` layers are implemented. A general
-asynchronous task/validation API and the Windows backend are not implemented
-yet.
+The pure lens-based `Property` and `Binding` layers and the generic
+external-event/task/service/subscription runtime are implemented. The
+validation-specific asynchronous control layer and Windows backend are not yet
+implemented.
 
 ## Contents
 
 1. [The programming model](#1-the-programming-model)
 2. [Run a first application](#2-run-a-first-application)
 3. [State, events, and transactions](#3-state-events-and-transactions)
+   - [External events, tasks, services, and subscriptions](#external-events-tasks-services-and-subscriptions)
 4. [Identity and reconciliation](#4-identity-and-reconciliation)
 5. [Windows and real desktop workspaces](#5-windows-and-real-desktop-workspaces)
 6. [Commands](#6-commands)
@@ -44,6 +46,9 @@ Every HaskeLUI application is an `App model`:
 data App model = App
   { appInitialModel :: model
   , appInitialEffects :: [Effect]
+  , appInitialCommands :: [RuntimeCommand model]
+  , appServices :: [Service model]
+  , appSubscriptions :: model -> [Subscription model]
   , appView         :: model -> AppView
   , appHandleEvent  :: UIEvent -> model -> Transaction model
   }
@@ -63,19 +68,23 @@ flowchart LR
   E --> U["appHandleEvent"]
   U --> T["Transaction model"]
   T --> M
-  T --> F["explicit effects"]
-  F --> E
+  T --> F["effects and typed runtime commands"]
+  F --> I["serialized runtime inbox"]
+  I --> E
 ```
 
 The runtime performs the cycle:
 
 1. Render the initial model.
-2. Interpret `appInitialEffects` and return their results as normal events.
-3. Reconcile the desired window and control trees with retained native peers.
-4. Normalize a native callback into `UIEvent`.
-5. Apply the returned transaction.
-6. Render the updated model.
-7. Interpret explicitly requested effects and return their results as events.
+2. Start static services, desired subscriptions, initial runtime commands, and
+   compatibility effects.
+3. Enqueue native and external callbacks in one serialized inbox.
+4. Apply a bounded batch of accepted transactions in order; every callback
+   sees the current model.
+5. Reconcile the final desired window/control tree once on the backend UI
+   thread.
+6. Interpret compatibility effects after reconciliation and enqueue their
+   completions normally.
 
 This architecture keeps application behavior deterministic and makes most of
 the program testable without AppKit.
@@ -85,10 +94,10 @@ the program testable without AppKit.
 | Layer | Main types | Responsibility |
 |---|---|---|
 | Application | your `model` | Documents, selection, dirty state, visibility, domain rules |
-| State transition | `UIEvent`, `Transaction model` | Pure event handling and declared effects |
+| State transition | `UIEvent`, `ExternalEvent model`, `Transaction model` | Pure current-model handling and declared work |
 | Surface | `AppView`, `WindowSpec`, `Control` | Desired semantic UI |
 | Layout | `Layout ElementKey`, `LayoutContainerSpec` | Pure sizing and placement |
-| Runtime | `runApp`, `Backend` | Event loop, reconciliation, effect interpretation |
+| Runtime | `runApp`, `RuntimeCommand`, `Backend` | Serialized inbox, tasks, services, subscriptions, reconciliation |
 | Backend | AppKit or headless | Native peers, measurement, focus, accessibility, disposal |
 
 ## 2. Run a first application
@@ -137,12 +146,7 @@ saveCommand = CommandId 1
 
 application :: App Model
 application =
-  App
-    { appInitialModel = Model "Haskell" False True
-    , appInitialEffects = []
-    , appView = view
-    , appHandleEvent = update
-    }
+  simpleApp (Model "Haskell" False True) view update
 
 view :: Model -> AppView
 view model =
@@ -280,8 +284,274 @@ not treat the transaction metadata as a finished cross-control undo manager.
 ### Keep effects out of reducers
 
 `appHandleEvent` is pure. Do not call file, network, timer, or native APIs from
-it. Put supported work in `transactionEffects`, and handle the resulting
-`UIEvent` explicitly. This preserves ordering and makes failure states visible.
+it. The older closed `Effect` algebra remains for native file panels and the
+existing editor workflow. New finite/background work should use typed runtime
+commands, and long-lived infrastructure should use services or subscriptions.
+All three keep `IO` visible at declaration sites while reducers still return
+ordinary pure values.
+
+### External events, tasks, services, and subscriptions
+
+Import the focused modules instead of treating asynchronous work as part of
+the control vocabulary:
+
+```haskell
+import HaskeLUI.ExternalEvent
+import HaskeLUI.Service
+import HaskeLUI.Task
+```
+
+The runtime uses four deliberately different abstractions:
+
+| Abstraction | Lifetime | Input/output shape | Typical use |
+|---|---|---|---|
+| `ExternalEvent model` | one delivery | current model to `Transaction model` | completion or stream item |
+| task command | finite | one `IO result`, one `TaskOutcome result` | read, save, query, computation |
+| `Service model` | application | typed command stream, many external events | compiler worker, process, database connection |
+| `Subscription model` | while declared by the model | many external events, no command endpoint | watcher, timer, application lifecycle stream |
+
+They are not aliases for the same generic effect. The distinctions give the
+runtime enough information to own cancellation, replacement, restart,
+backpressure, and teardown correctly.
+
+#### External events use the current model
+
+An external event stores a description and a pure callback:
+
+```haskell
+externalEvent "Document read completed" $ \currentModel ->
+  acceptDocumentRead requestedRevision result currentModel
+```
+
+The callback is run only after the event reaches the serialized UI-thread
+inbox. It receives the model at that time, not a snapshot retained when the
+work started. Keep domain evidence such as document identity, requested text
+revision, or protocol request ID in the closure and check it before accepting
+the result.
+
+For replaceable progress or snapshots, make coalescing explicit:
+
+```haskell
+latestExternalEvent
+  (EventCoalescingKey "analysis:Main.hs")
+  "Newest Main.hs analysis snapshot"
+  acceptAnalysisSnapshot
+```
+
+`DeliverEvery` is lossless. `KeepLatest key` retains only the newest still
+pending event for that key. Never coalesce terminal results that callers must
+observe.
+
+#### Finite tasks
+
+Start finite work from a transaction:
+
+```haskell
+loadDocument :: FilePath -> TextRevision -> RuntimeCommand EditorModel
+loadDocument path requestedRevision =
+  startTaskWith
+    (TaskKey ("document.read:" <> Text.pack path))
+    ( (defaultTaskOptions (LifetimeScope (LifetimeKey "document:1")) ReplaceRunning)
+        { taskTimeoutMilliseconds = Just 10000
+        }
+    )
+    "Read UTF-8 document"
+    (\cancel -> do
+      throwIfCancelled cancel
+      readDocumentUtf8 path
+    )
+    (\outcome ->
+      externalEvent "Document read finished" $ \model ->
+        handleDocumentRead path requestedRevision outcome model
+    )
+```
+
+Attach it to an immediate model update with `transactionWithCommands`, or to
+an existing transaction with `appendRuntimeCommands`:
+
+```haskell
+transactionWithCommands
+  "Begin document load"
+  NoUndo
+  [loadDocument path revision]
+  (\model -> model {status = "Loading…"})
+```
+
+Task start policies are semantic:
+
+- `ReplaceRunning` invalidates and requests cancellation of the old generation.
+- `KeepRunning` ignores a duplicate while the key is active.
+- `RequireIdle` also refuses a duplicate and is intended for operations whose
+  overlap indicates a programming error.
+
+Parallel work uses different `TaskKey` values. Every completion is checked
+against its key, runtime generation, owner scope, and shutdown state before its
+callback runs. Cancellation is cooperative optimization; these checks provide
+correctness even when old `IO` races or catches cancellation.
+
+`TaskOutcome result` separates executor failure from domain failure:
+
+- `TaskSucceeded result`
+- `TaskCancelled`
+- `TaskFailed TaskTimedOut`
+- `TaskFailed (TaskException summary)`
+- `TaskFailed TaskExecutorStopped`
+
+Return expected domain failure as data, commonly `Either DomainError value`,
+inside `TaskSucceeded`. Open exceptions are converted to retainable text and
+are never placed directly in the application model.
+
+Task scopes are `ApplicationScope`, `WindowScope`, `ElementScope`, and
+`LifetimeScope`. Window and element liveness is derived automatically from the
+latest desired `AppView`. Custom lifetimes are explicit and can bracket a
+document or workspace:
+
+```haskell
+transactionWithCommands
+  "Open document lifetime"
+  NoUndo
+  [openLifetime documentLifetime, loadDocument path revision]
+  insertDocument
+
+transactionWithCommands
+  "Close document lifetime"
+  NoUndo
+  [closeLifetime documentLifetime]
+  removeDocument
+```
+
+Closing a lifetime or removing an owning window/element invalidates all later
+completion events before it requests cancellation.
+
+#### Typed, supervised services
+
+`service` returns both an application-lifetime specification and the only
+correctly typed endpoint for its commands:
+
+```haskell
+data AnalysisCommand
+  = AnalyzeDocument DocumentKey TextRevision Text
+  | ForgetDocument DocumentKey
+
+(analysisService, analysisEndpoint) =
+  serviceWithStatus
+    (ServiceKey "visual-haskell.analysis")
+    "Visual Haskell GHC worker"
+    ( defaultServiceOptions
+        { serviceCommandCapacity = 64
+        , serviceOverflowPolicy =
+            ReplacePendingCommand analysisDocumentKey
+        }
+    )
+    analysisStatusEvent
+    runAnalysisService
+```
+
+The implementation receives a `ServiceContext`:
+
+```haskell
+runAnalysisService context = loop
+  where
+    loop = do
+      next <- context.receiveCommand
+      case next of
+        Nothing -> pure ()
+        Just command -> do
+          result <- analyze command
+          emitExternalEvent context.serviceEvents (analysisResultEvent result)
+          loop
+```
+
+`receiveCommand` returns `Nothing` during cancellation. The context also
+contains the cancellation token, `reportServiceHealth`, and an
+`ExternalSink`. Use `emitLatest` on that sink only for explicitly replaceable
+progress/snapshot events.
+
+Send typed commands from transactions:
+
+```haskell
+transactionWithCommands
+  "Request analysis"
+  NoUndo
+  [sendService analysisEndpoint (AnalyzeDocument key revision contents)]
+  markAnalysisPending
+```
+
+`sendServiceWithResult` additionally returns `ServiceSendResult` through an
+external event when the UI must surface `ServiceUnavailable`, queue rejection,
+coalescing, oldest-command replacement, or an impossible-in-well-formed-code
+`ServiceEndpointMismatch`. The default endpoint never blocks the UI thread.
+
+Service queues are bounded. Choose one policy:
+
+- `RejectNewCommand`
+- `DropOldestCommand`
+- `ReplacePendingCommand commandCoalescingKey`
+
+The default supervisor uses bounded exponential backoff with deterministic
+per-service jitter. `serviceWithStatus` can expose starting, running, health,
+exit, scheduled-restart, and circuit-open states in the application model.
+`restartService` provides an explicit Retry action. Runtime generations reject
+events emitted by a process or thread belonging to an older service instance.
+
+Declare services on the application:
+
+```haskell
+application =
+  (simpleApp initialModel view update)
+    { appServices = [analysisService]
+    , appInitialCommands = [sendService analysisEndpoint Initialize]
+    }
+```
+
+#### Declarative subscriptions
+
+A subscription is keyed and fingerprinted desired state:
+
+```haskell
+workspaceWatch root =
+  subscription
+    (SubscriptionKey "workspace.files")
+    (SubscriptionFingerprint (Text.pack root))
+    (\events -> startWorkspaceWatcher root events)
+
+subscriptions model =
+  maybe [] (pure . workspaceWatch) model.projectRoot
+```
+
+`startWorkspaceWatcher` returns an `IO ()` stop action. The runtime diffs
+`appSubscriptions model` after every accepted transaction:
+
+- same key and fingerprint: retain;
+- same key and a new fingerprint: stop/restart with a new generation;
+- removed key: stop and reject all later old-generation events;
+- new key: start it outside application callbacks.
+
+Subscriptions are for model-selected external streams. A compiler worker that
+accepts commands is a service; a single directory read is a task.
+
+#### Ordering and thread guarantees
+
+Native `UIEvent` values and every external event enter one lossless serialized
+inbox. A bounded drain applies callbacks in FIFO order, recomputes ownership
+between events, and reconciles only the final desired view for the batch.
+Tasks/services/subscriptions never receive the model reference or backend
+objects. Reducers, external callbacks, `appView`, layout, and native rendering
+all execute on the backend UI thread.
+
+`runApp` uses `defaultRuntimeOptions`, currently a maximum of 128 envelopes per
+batch. Tests or specialized applications can call `runAppWith` and set
+`runtimeMaximumBatchSize`; nonpositive values are safely clamped to one.
+`runtimeShutdownGraceMilliseconds` bounds how long shutdown waits for
+cooperative task, service, subscription, and restart-timer cancellation before
+releasing the backend (two seconds by default). Late events remain invalid even
+if arbitrary uninterruptible `IO` outlives that grace period.
+
+The AppKit backend schedules drains on its main dispatch queue. Other native
+backends must provide the equivalent dispatcher through
+`backendScheduleOnUI`. Shutdown invalidates producers before native resources
+are released, so a late completion cannot update the model or call a disposed
+backend.
 
 ### Named model properties
 
@@ -1041,13 +1311,17 @@ written snapshot with the document's current contents. An edit made while the
 write is in progress must remain dirty even when the older snapshot succeeds.
 Visual Haskell demonstrates this pattern.
 
-The current interpreter performs synchronous directory enumeration and UTF-8
-reads/writes. `WriteTextFileAtomically` writes a sibling temporary file and
-then replaces the destination; it is intended for compact metadata such as
-Visual Haskell's `.vihs` workspace state. Save As, atomic document-save policy,
-other encodings, filesystem watching, ignore-file rules, external-change
-detection, cancellation, and a general background task executor are not
-implemented yet.
+The compatibility interpreter still performs synchronous directory
+enumeration and UTF-8 reads/writes, after the batch's native reconciliation.
+`WriteTextFileAtomically` writes a sibling temporary file and then replaces the
+destination; it is intended for compact metadata such as Visual Haskell's
+`.vihs` workspace state. New portable file work should use the general task
+runtime so it can declare identity, scope, timeout, cancellation, and a domain
+result type. Native Open/Folder panels remain platform effects until the
+callback-oriented platform-command surface replaces them. Save As, document
+encoding policy, ignore-file rules, and external-change policy remain
+application/document-service work; filesystem watching can now be implemented
+as a declarative subscription.
 
 Visual Haskell is the complete persistence implementation. It uses an optional startup
 read for the per-user `last-workspace` locator, then restores the selected
@@ -1072,6 +1346,9 @@ src/
   Navigator/Update.hs
   Inspector/View.hs
   Inspector/Update.hs
+  Services/Analysis.hs   -- typed service protocol and worker loop
+  Services/Files.hs      -- task declarations and domain file policy
+  Subscriptions.hs       -- model-dependent watches and timers
   UI/Controls.hs         -- application-specific constructor helpers
   UI/Layout.hs           -- reusable layout builders
 app/
@@ -1090,6 +1367,13 @@ test/
 - Give feature event routers a result such as
   `UIEvent -> Model -> Maybe (Transaction Model)` and combine them at the root.
 - Keep `Main` thin; backend selection is an executable concern.
+- Assemble application-lifetime services in `App.hs`, not inside view code.
+- Put each service command type beside its service implementation and export
+  only the typed endpoint required by application updates.
+- Keep task constructors near their domain acceptance functions so runtime
+  generation checks and domain revision checks are both visible.
+- Derive `appSubscriptions` from authoritative model state; do not manually
+  retain watcher handles in the model.
 - Centralize static keys and allocate dynamic keys from stable domain IDs.
 - Build small helpers for repeated control and layout styles.
 
@@ -1104,6 +1388,8 @@ Put behaviorally relevant values in the model:
 - presentation visibility;
 - committed pane extent;
 - validation or file-operation status.
+- service health/restart state when it changes available application actions;
+- domain request/revision identities used to accept asynchronous results.
 
 Leave ephemeral mechanics to native controls and the backend where appropriate:
 
@@ -1153,6 +1439,21 @@ assert (changed.documentContents == "new")
 Test close veto, save correlation, tab successor choice, stale completions, and
 other domain behavior without opening a window.
 
+### Runtime lifecycle tests
+
+Use a queued test backend when ordering or lifetime matters. Its
+`backendScheduleOnUI` should record scheduled drains so a test can enqueue a
+burst before running one drain. Assert observable domain/view results rather
+than relying on worker timing.
+
+The runtime suite in `packages/haskelui-runtime/test/Spec.hs` demonstrates the
+required cases: current-model task callbacks, replacement of a
+cancellation-resistant task, exception conversion, typed service delivery,
+bounded command coalescing, service restart, subscription teardown, and one
+render for an ordered micro-batch. Domain packages should additionally test
+their own revision/request-ID acceptance rules; runtime generation checks do
+not replace them.
+
 ### Headless rendering
 
 The headless backend records the latest semantic tree:
@@ -1199,10 +1500,15 @@ application framework. Plan around these current boundaries:
   actions, codecs, pure validation, and draft reconciliation are implemented.
   Direct live bindings work in reducers today; retained staged/invalid draft
   sessions and direct binding arguments on controls remain runtime/API work.
-- General asynchronous validation and task execution are not implemented.
+- Generic external events, finite tasks, typed supervised services, declarative
+  subscriptions, bounded/coalescing queues, timeouts, scoped generations, and
+  AppKit UI-thread scheduling are implemented. `AsyncValidation control` is
+  still a future validation-specific layer over this substrate.
 - Transaction undo policies are represented, but a complete application undo
   interpreter is not.
-- File effects are synchronous and UTF-8-only.
+- Compatibility file effects are synchronous and UTF-8-only; new background
+  file/domain work can use tasks, but Visual Haskell has not yet migrated its
+  current file workflow.
 - `TableView` currently has a two-column collection-shaped schema rather than a
   full typed column/cell/sort/edit API.
 - Collection data is declared eagerly; scalable application data-source APIs
@@ -1230,6 +1536,8 @@ Start with these executable examples:
 Then consult the focused design documents:
 
 - [Architecture](design/architecture.md)
+- [HaskeLUI services, tasks, and external events](design/services-tasks-external-events.md)
+- [Visual Haskell long-term vision](design/visual-haskell-vision.md)
 - [Property and binding API](design/property-binding-api.md)
 - [Core control catalog](design/core-control-catalog.md)
 - [Portable layout system](design/layout-system.md)

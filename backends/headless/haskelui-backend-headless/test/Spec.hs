@@ -32,6 +32,9 @@ main = do
       App
         { appInitialModel = ()
         , appInitialEffects = []
+        , appInitialCommands = []
+        , appServices = []
+        , appSubscriptions = const []
         , appView = const (AppView [WindowSpec (WindowKey 1) "Headless" (Rect 0 0 100 100) []] [])
         , appHandleEvent = \_ _ -> noTransaction
         }
@@ -39,6 +42,9 @@ main = do
       App
         { appInitialModel = ()
         , appInitialEffects = []
+        , appInitialCommands = []
+        , appServices = []
+        , appSubscriptions = const []
         , appView = const (AppView [workspaceWindow] [])
         , appHandleEvent = \_ _ -> noTransaction
         }

@@ -58,13 +58,15 @@ This is also a concrete example of the future keyed-child adapter boundary:
 the lifting code is small and safe, but remains explicit until Core defines a
 general missing-key/stale-action policy.
 
-The V1 file interpreter reads and writes UTF-8, strips an input UTF-8 BOM, and
-performs file I/O synchronously. Directory enumeration is one level per
-`ReadDirectory` effect, with folders ordered before files. It does not yet
-provide filesystem watching, ignore-file rules, refresh, Save As, atomic
-replacement, external-change detection, encoding selection, app-level Quit
-negotiation, restoration, or background I/O. Those are production
-document-runtime concerns, not AppKit-specific editor behavior.
+The V1 compatibility file interpreter reads and writes UTF-8, strips an input
+UTF-8 BOM, and performs file I/O synchronously. Directory enumeration is one
+level per `ReadDirectory` effect, with folders ordered before files. HaskeLUI's
+generic task/service/subscription runtime is now available; migrating these
+operations to scoped tasks and adding a filesystem-watch subscription is the
+next document-layer step. Ignore-file rules, refresh policy, Save As, atomic
+document replacement, external-change conflict handling, encoding selection,
+and app-level Quit negotiation remain production document concerns rather than
+AppKit-specific behavior.
 
 ## V2 syntax highlighting
 
