@@ -28,7 +28,8 @@ typedef enum UIHMacEventKind {
   UIHMacEventCollectionSelectionChanged = 15,
   UIHMacEventDisclosureChanged = 16,
   UIHMacEventPresentationClosed = 17,
-  UIHMacEventCollectionExpansionChanged = 18
+  UIHMacEventCollectionExpansionChanged = 18,
+  UIHMacEventProjectFolderChosen = 19
 } UIHMacEventKind;
 
 typedef enum UIHMacCatalogControlKind {
@@ -257,6 +258,7 @@ void uih_macos_catalog_control_add_item(
     uint64_t item_identity,
     const char *utf8_label,
     const char *utf8_detail,
+    const char *utf8_icon,
     int32_t depth,
     int32_t flags,
     uint64_t command_identity);
@@ -321,6 +323,7 @@ void uih_macos_command_set(
     int32_t enabled);
 void uih_macos_command_remove(uint64_t identity);
 void uih_macos_open_text_files(void);
+void uih_macos_open_project_folder(void);
 
 /* Diagnostic API used by the native backend's deterministic integration test. */
 void uih_macos_debug_counters(UIHMacDebugCounters *counters);
@@ -334,7 +337,8 @@ void uih_macos_test_schedule_text_editor_script(
     uint64_t document_window_identity,
     uint64_t editor_identity,
     uint64_t tab_identity,
-    uint64_t save_command_identity);
+    uint64_t save_command_identity,
+    uint64_t open_folder_command_identity);
 void uih_macos_test_schedule_control_gallery_script(
     uint64_t window_identity,
     uint64_t root_tab_identity,

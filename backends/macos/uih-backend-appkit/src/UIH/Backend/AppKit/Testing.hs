@@ -52,6 +52,7 @@ data AppKitTextEditorTestSpec = AppKitTextEditorTestSpec
   , testTextEditor :: !ElementKey
   , testDocumentTab :: !TabKey
   , testEditorSaveCommand :: !CommandId
+  , testEditorOpenFolderCommand :: !CommandId
   }
   deriving stock (Eq, Show)
 
@@ -103,6 +104,7 @@ appKitBackendWithTextEditorTest spec =
       spec.testTextEditor.unElementKey
       spec.testDocumentTab.unTabKey
       spec.testEditorSaveCommand.unCommandId
+      spec.testEditorOpenFolderCommand.unCommandId
     pure session
 
 appKitBackendWithControlGalleryTest :: AppKitControlGalleryTestSpec -> Backend

@@ -9,8 +9,16 @@ stack exec uih-text-editor
 ## Workspace behavior
 
 - Open one or several UTF-8 files through the native AppKit Open panel or Command-O.
+- Choose a project root with **File > Open Folder…**. The sidebar renders a
+  native folder hierarchy with open/closed folder icons and file icons.
+- Load directory children lazily when a folder is expanded, instead of
+  recursively scanning build outputs and hidden dependency trees up front.
+- Toggle folders by activating their row or the native disclosure control.
+- Open a file from the hierarchy in a new document tab; selecting a file that
+  is already open activates its existing tab.
 - Keep files as keyed document tabs inside one native workspace window.
-- Compose a native split view with an open-documents sidebar, central tab group, document inspector, and shared status area.
+- Compose a native split view with a project sidebar, central tab group,
+  document inspector, and shared status area.
 - Keep pane hosts and movable workspace items as distinct identities so content can later move between pane locations without losing retained state.
 - Route text changes into the pure Haskell document model.
 - Route native tab selection and close requests into the pure Haskell workspace model.
@@ -21,7 +29,36 @@ stack exec uih-text-editor
 - Keep the empty workspace open after its last tab closes, while closing the clean workspace removes its OS window.
 - Report read/write failures in the UI without hiding file `IO` inside view callbacks.
 
-The V1 file interpreter reads and writes UTF-8, strips an input UTF-8 BOM, and performs file I/O synchronously. It does not yet provide Save As, atomic replacement, external-change detection, encoding selection, app-level Quit negotiation, restoration, or background I/O. Those are production document-runtime concerns, not AppKit-specific editor behavior.
+## Property and binding example
+
+The editor uses the production `UIH.Property` and `UIH.Binding` APIs rather
+than treating them as an isolated demo:
+
+- Total workspace fields use checked dotted paths such as
+  `editorProperties.selectedTab .= Just tabKey`.
+- Multi-field workspace changes use `batchActions` and preserve all touched
+  `PropertyId` values.
+- Documents live behind dynamic `Map DocumentKey Document` entries, so the
+  example does not pretend they are total lenses from `EditorModel`.
+  `documentContentsBinding` uses the callback-controlled binding escape hatch
+  and explicitly lifts total child-document actions through the established
+  key.
+- A text edit atomically updates contents, revision, status, and deferred-close
+  state with one coalescing undo policy.
+- Save uses `transactionFromActionWithEffects`, retaining property metadata
+  while launching the explicit file-write effect.
+
+This is also a concrete example of the future keyed-child adapter boundary:
+the lifting code is small and safe, but remains explicit until Core defines a
+general missing-key/stale-action policy.
+
+The V1 file interpreter reads and writes UTF-8, strips an input UTF-8 BOM, and
+performs file I/O synchronously. Directory enumeration is one level per
+`ReadDirectory` effect, with folders ordered before files. It does not yet
+provide filesystem watching, ignore-file rules, refresh, Save As, atomic
+replacement, external-change detection, encoding selection, app-level Quit
+negotiation, restoration, or background I/O. Those are production
+document-runtime concerns, not AppKit-specific editor behavior.
 
 ## V2 syntax highlighting
 

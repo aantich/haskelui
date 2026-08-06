@@ -213,7 +213,7 @@ important groups are:
 | Collections | `CollectionSelectionChanged`, `CollectionExpansionChanged` |
 | Containers and presentations | `DisclosureChanged`, `PresentationClosed` |
 | Desktop shell | `TabSelected`, `TabCloseRequested`, `PaneStateChanged`, `WindowCloseRequested`, `WindowActivated` |
-| Files | `TextFileChosen`, `TextFileRead`, `TextFileWritten` |
+| Files and folders | `TextFileChosen`, `ProjectFolderChosen`, `DirectoryRead`, `TextFileRead`, `TextFileWritten` |
 
 Control events carry stable identities, not native pointers or transient row
 indexes. Reducers should first match the event constructor and then its key.
@@ -238,6 +238,18 @@ transactionWithEffects
   NoUndo
   [WriteTextFile effectKey path contents]
   (\model -> model {status = "Saving…"})
+```
+
+When the transition is already an inspectable property action, use
+`transactionFromActionWithEffects` instead. This preserves touched-property
+metadata alongside the effect:
+
+```haskell
+transactionFromActionWithEffects
+  "Save document"
+  NoUndo
+  [WriteTextFile effectKey path contents]
+  (properties.document.status .= "Saving…")
 ```
 
 Use `requestEffect` when no immediate model change is required:
@@ -420,6 +432,25 @@ change during an edit. `RefreshIfPristine`, `PreserveLocalDraft`, and
 See [Property and binding API](design/property-binding-api.md) for the complete
 contract, codecs, controlled escape hatch, optional focus, reconciliation
 table, and exact current runtime boundary.
+
+### Bindings for dynamically keyed children
+
+A value behind `Map key child` is not a total property of the parent: its key
+may be absent by the time an action is interpreted. Do not disguise it as a
+total lens.
+
+The text editor demonstrates the current explicit pattern:
+
+1. Look up the document by its stable `DocumentKey` when handling the event.
+2. Build a `controlledWith` binding from that document's current value.
+3. Construct ordinary total child actions through `Path Document Document`.
+4. Lift each child action through the original key using `Map.adjust`, qualify
+   its touched IDs as `documents.<key>.<field>`, and safely no-op if missing.
+
+This preserves callback ergonomics, atomic batching, undo metadata, and stale
+key safety without claiming that a dynamic lookup is a lens. The eventual
+keyed-child adapter can package this pattern after Core fixes the public
+missing-key diagnostic and insertion policies.
 
 ## 4. Identity and reconciliation
 
@@ -796,8 +827,12 @@ CollectionControlSpec
   }
 ```
 
-Each `CollectionItem` has a key, primary label, detail, hierarchy depth, and
-expanded state. Selection is authoritative application state and arrives via
+Each `CollectionItem` has a key, primary label, detail, optional portable
+`ImageSource`, hierarchy depth, explicit expandability, and expanded state.
+Backends render the image in the native row's icon position. Expandability is
+independent of the current child list so a lazily loaded directory can show its
+native disclosure indicator before its children are read. Selection is
+authoritative application state and arrives via
 `CollectionSelectionChanged`. Tree expansion arrives separately through
 `CollectionExpansionChanged`.
 
@@ -948,6 +983,8 @@ The implemented effect algebra is intentionally small:
 ```haskell
 data Effect
   = RequestOpenTextFiles
+  | RequestOpenProjectFolder
+  | ReadDirectory FilePath
   | ReadTextFile FilePath
   | WriteTextFile EffectKey FilePath Text
 ```
@@ -955,6 +992,8 @@ data Effect
 The runtime converts results back into:
 
 - `TextFileChosen path`
+- `ProjectFolderChosen path`
+- `DirectoryRead path (Either Text [FileSystemEntry])`
 - `TextFileRead path (Either Text Text)`
 - `TextFileWritten key path writtenSnapshot (Either Text ())`
 
@@ -969,14 +1008,37 @@ CommandInvoked Open
   -> insert document or report failure
 ```
 
+Project navigators should read directories lazily:
+
+```text
+CommandInvoked OpenFolder
+  -> RequestOpenProjectFolder
+  -> ProjectFolderChosen root
+  -> ReadDirectory root
+  -> DirectoryRead root children
+
+CollectionExpansionChanged tree folder True
+  -> ReadDirectory folder       -- only if its children are not loaded
+  -> DirectoryRead folder children
+```
+
+`ReadDirectory` enumerates exactly one level. `FileSystemEntry` carries the
+normalized child path, display name, and whether the child is a file or
+directory. The runtime sorts directories before files, case-insensitively.
+The application remains responsible for stable item identities, loaded state,
+expansion, filtering/ignore policy, refresh, and mapping a file selection to a
+document tab. The example editor demonstrates all of those responsibilities
+except filtering and refresh.
+
 For saving, keep an `EffectKey` per document and compare the completion's exact
 written snapshot with the document's current contents. An edit made while the
 write is in progress must remain dirty even when the older snapshot succeeds.
 The included text editor demonstrates this pattern.
 
-The current interpreter performs synchronous UTF-8 reads and writes. Save As,
-atomic replacement, other encodings, external-change detection, cancellation,
-and a general background task executor are not implemented yet.
+The current interpreter performs synchronous directory enumeration and UTF-8
+reads/writes. Save As, atomic replacement, other encodings, filesystem
+watching, ignore-file rules, external-change detection, cancellation, and a
+general background task executor are not implemented yet.
 
 ## 13. Structuring a real application
 

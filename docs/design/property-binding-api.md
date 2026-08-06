@@ -75,7 +75,8 @@ properties = rootPath
 `properties.document.title` is now a statically checked path. Each record-dot
 segment contributes both its generic lens and its name, so it carries the
 derived `PropertyId "document.title"`. A missing or wrongly typed field fails
-at compile time.
+at compile time. `propertyId properties.document.title` exposes that identity
+without first converting the path into an explicit `Property`.
 
 The beginner-facing vocabulary is deliberately small:
 
@@ -89,7 +90,9 @@ modify properties.document.dirty not      -- Action Model
 
 Assignment creates an `Action`; it does not mutate the model. Interpret it
 with `applyAction` in tests, combine it with `batchActions`, or wrap it with
-`transactionFromAction` in a reducer.
+`transactionFromAction` in a reducer. When that transaction also launches an
+effect, `transactionFromActionWithEffects` retains the same property metadata
+alongside its explicit effect list.
 
 ### Explicit lens interoperability
 
@@ -331,6 +334,14 @@ Still runtime work:
 
 These are integration layers around the implemented pure semantics, not a
 reason to postpone using properties and live bindings in application code.
+
+The text-editor example also validates the intended interim treatment of
+dynamically keyed child state. A selected `Map DocumentKey Document` entry is
+not represented as a total lens. It uses `controlledWith`, creates total
+`Action Document` values, then explicitly lifts them through the established
+key while qualifying their property IDs. This is safe and testable today; a
+future keyed-child adapter can remove the small amount of lifting boilerplate
+once its missing-key policy is standardized.
 
 ## Critical design review
 

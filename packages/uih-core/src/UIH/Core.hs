@@ -38,6 +38,8 @@ module UIH.Core
   , Effect (..)
   , EffectKey (..)
   , ElementKey (..)
+  , FileSystemEntry (..)
+  , FileSystemEntryKind (..)
   , FontFamily (..)
   , FontSlant (..)
   , FontWeight (..)
@@ -128,6 +130,7 @@ module UIH.Core
   , workspaceTabKeys
   , transaction
   , transactionFromAction
+  , transactionFromActionWithEffects
   , transactionWithEffects
   ) where
 
@@ -431,8 +434,25 @@ data CollectionItem = CollectionItem
   { collectionItemKey :: !CollectionItemKey
   , collectionItemLabel :: !Text
   , collectionItemDetail :: !Text
+  , collectionItemIcon :: !(Maybe ImageSource)
   , collectionItemDepth :: !Int
+  , collectionItemExpandable :: !Bool
   , collectionItemExpanded :: !Bool
+  }
+  deriving stock (Eq, Show)
+
+-- | The portable information returned by a one-level directory read. The
+-- runtime deliberately does not recurse: applications decide which folders
+-- to expand and when to request their children.
+data FileSystemEntryKind
+  = FileSystemFile
+  | FileSystemDirectory
+  deriving stock (Eq, Ord, Show)
+
+data FileSystemEntry = FileSystemEntry
+  { fileSystemEntryPath :: !FilePath
+  , fileSystemEntryName :: !Text
+  , fileSystemEntryKind :: !FileSystemEntryKind
   }
   deriving stock (Eq, Show)
 
@@ -1687,12 +1707,16 @@ data UIEvent
   | WindowCloseRequested !WindowKey
   | WindowActivated !WindowKey
   | TextFileChosen !FilePath
+  | ProjectFolderChosen !FilePath
+  | DirectoryRead !FilePath !(Either Text [FileSystemEntry])
   | TextFileRead !FilePath !(Either Text Text)
   | TextFileWritten !EffectKey !FilePath !Text !(Either Text ())
   deriving stock (Eq, Show)
 
 data Effect
   = RequestOpenTextFiles
+  | RequestOpenProjectFolder
+  | ReadDirectory !FilePath
   | ReadTextFile !FilePath
   | WriteTextFile !EffectKey !FilePath !Text
   deriving stock (Eq, Show)
@@ -1766,11 +1790,20 @@ transactionFromAction
   -> Action model
   -> Transaction model
 transactionFromAction description undo appliedAction =
+  transactionFromActionWithEffects description undo [] appliedAction
+
+transactionFromActionWithEffects
+  :: Text
+  -> UndoPolicy
+  -> [Effect]
+  -> Action model
+  -> Transaction model
+transactionFromActionWithEffects description undo effects appliedAction =
   Transaction
     { transactionAction = appliedAction
     , transactionUndo = undo
     , transactionDescription = Just description
-    , transactionEffects = []
+    , transactionEffects = effects
     }
 
 transactionWithEffects
@@ -1780,12 +1813,11 @@ transactionWithEffects
   -> (model -> model)
   -> Transaction model
 transactionWithEffects description undo effects change =
-  Transaction
-    { transactionAction = action description change
-    , transactionUndo = undo
-    , transactionDescription = Just description
-    , transactionEffects = effects
-    }
+  transactionFromActionWithEffects
+    description
+    undo
+    effects
+    (action description change)
 
 requestEffect :: Text -> Effect -> Transaction model
 requestEffect description requested =

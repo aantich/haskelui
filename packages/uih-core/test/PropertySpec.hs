@@ -99,6 +99,8 @@ runPropertyTests = do
   assertEqual "dotted assignment updates nested state" "Renamed" renamed.document.title
   assertEqual "dotted assignment derives inspectable identity"
     [PropertyId "document.title"] (actionPropertyIds rename)
+  assertEqual "dotted paths expose the same identity directly"
+    (PropertyId "document.title") (propertyId properties.document.title)
   assertEqual "dotted assignment derives an action description"
     "Set document.title" (actionDescription rename)
 

@@ -811,10 +811,11 @@ galleryChoices =
 
 galleryCollectionItems :: GalleryModel -> [CollectionItem]
 galleryCollectionItems model =
-  [ CollectionItem (CollectionItemKey 1) "Project" "root" 0 (isExpanded 1)
-  , CollectionItem (CollectionItemKey 2) "Main.hs" "Haskell source" 1 False
-  , CollectionItem (CollectionItemKey 3) "UIH.Core" "library module" 1 False
-  , CollectionItem (CollectionItemKey 4) "README.md" "documentation" 0 False
+  [ CollectionItem (CollectionItemKey 1) "Project" "root" Nothing 0 True (isExpanded 1)
+  , CollectionItem (CollectionItemKey 2) "Main.hs" "Haskell source" Nothing 1 False False
+  , CollectionItem (CollectionItemKey 3) "UIH.Core" "library module" Nothing 1 False False
+  , CollectionItem (CollectionItemKey 4) "README.md" "documentation" Nothing 0 False False
+  , CollectionItem (CollectionItemKey 5) "Lazy folder" "children not loaded" Nothing 0 True False
   ]
   where
     isExpanded key = CollectionItemKey key `elem` model.galleryExpandedItems

@@ -48,6 +48,7 @@ module UIH.Backend.AppKit.Internal.FFI
   , c_createWindow
   , c_debugCounters
   , c_initialize
+  , c_openProjectFolder
   , c_openTextFiles
   , c_run
   , c_shutdown
@@ -411,7 +412,7 @@ foreign import ccall unsafe "uih_macos_catalog_control_begin_items"
   c_catalogBeginItems :: Ptr MacControlHandle -> IO ()
 
 foreign import ccall unsafe "uih_macos_catalog_control_add_item"
-  c_catalogAddItem :: Ptr MacControlHandle -> Word64 -> CString -> CString -> CInt -> CInt -> Word64 -> IO ()
+  c_catalogAddItem :: Ptr MacControlHandle -> Word64 -> CString -> CString -> CString -> CInt -> CInt -> Word64 -> IO ()
 
 foreign import ccall unsafe "uih_macos_catalog_control_end_items"
   c_catalogEndItems :: Ptr MacControlHandle -> IO ()
@@ -476,6 +477,9 @@ foreign import ccall unsafe "uih_macos_command_remove"
 foreign import ccall unsafe "uih_macos_open_text_files"
   c_openTextFiles :: IO ()
 
+foreign import ccall unsafe "uih_macos_open_project_folder"
+  c_openProjectFolder :: IO ()
+
 foreign import ccall unsafe "uih_macos_debug_counters"
   c_debugCounters :: Ptr CDebugCounters -> IO ()
 
@@ -486,7 +490,7 @@ foreign import ccall unsafe "uih_macos_test_schedule_vertical_script"
   c_testScheduleVerticalScript :: Word64 -> Word64 -> Word64 -> Word64 -> IO ()
 
 foreign import ccall unsafe "uih_macos_test_schedule_text_editor_script"
-  c_testScheduleTextEditorScript :: Word64 -> Word64 -> Word64 -> Word64 -> IO ()
+  c_testScheduleTextEditorScript :: Word64 -> Word64 -> Word64 -> Word64 -> Word64 -> IO ()
 
 foreign import ccall unsafe "uih_macos_test_schedule_control_gallery_script"
   c_testScheduleControlGalleryScript

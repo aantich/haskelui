@@ -1737,6 +1737,16 @@ The initial AppKit vertical slice now builds and renders two native windows thro
 
 The follow-up text-editor slice adds explicit file effects, a native multiple-selection Open panel, window activation, scrolling multiline `NSTextView` peers, active-document command routing, snapshot-correlated Save completion, and dirty-close negotiation. Its pure test opens two documents and exercises clean/dirty transitions; its native test displays and cancels the Open panel, edits a real text view, writes an actual fixture through Command-S, closes the final window, and asserts zero backend-owned resources and callbacks. File I/O is currently synchronous and UTF-8-only; the slice proves ownership and effect boundaries rather than the final asynchronous document service.
 
+The project-navigator follow-up adds a native single-folder picker, an explicit
+project root in the application model, one-level `ReadDirectory` effects, and
+portable filesystem-entry results. The editor owns stable tree identities,
+loaded/expanded/selected state, and file-to-tab routing. This intentionally
+keeps ignore policy and workspace behavior out of Core. Collection rows now
+carry a separate portable icon source; AppKit renders those icons in native
+table and outline cells. The navigator loads children only when a folder is
+opened, toggles open/closed folder symbols, and activates an existing document
+tab instead of duplicating it.
+
 The syntax-highlighting follow-up adds generic portable text styles, authored rich-text runs, scalar-indexed spans, revision-bound ordered presentation layers, and a pure Haskell lexer outside Core. The AppKit adapter resolves layer overlap, translates scalar offsets to UTF-16, and applies temporary layout attributes. Its native test places a keyword after a non-BMP character, confirms the correct native range is styled after initial render and editing, and verifies that presentation preserves selection and creates no undo action.
 
 The workspace follow-up adds distinct document, tab, tab-group, pane-host, movable-item, and window identities to the compiled Core IR. The editor now realizes one native AppKit split-view workspace with left sidebar information, a central native document tab group, a right inspector, and a shared status area. Native tab selection and close requests enter the pure Haskell model; clean tab close leaves the workspace alive, dirty tab close defers through Save, and clean workspace close removes the OS window. AppKit retains unchanged pane subtrees across reconciliation and reparents keyed item hosts independently of pane geometry. Core, headless, model, and native tests cover workspace validation, item swaps, multiple document tabs, native tab events, retained text selection/undo/presentation, and zero-resource shutdown. The current leaf IR still uses concrete `[Control]` values; the final opaque `View model`/`StateSource` surface will lower into these proven contracts.

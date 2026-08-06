@@ -13,6 +13,16 @@ main = do
   runPropertyTests
   let increment = transaction "Increment" (SingleUndo (UndoGroup "counter")) (+ 1)
   assert "transaction application" (applyTransaction increment (1 :: Int) == 2)
+  let updateWithEffect =
+        transactionFromActionWithEffects
+          "Update and request files"
+          NoUndo
+          [RequestOpenTextFiles]
+          (actionWithProperties "Set counter" [PropertyId "counter"] (const (3 :: Int)))
+  assert "action/effect transaction retains action metadata and effects" $
+    applyTransaction updateWithEffect 1 == 3
+      && actionPropertyIds updateWithEffect.transactionAction == [PropertyId "counter"]
+      && updateWithEffect.transactionEffects == [RequestOpenTextFiles]
 
   let revision = TextRevision 4
       black = RGBA 0 0 0 1

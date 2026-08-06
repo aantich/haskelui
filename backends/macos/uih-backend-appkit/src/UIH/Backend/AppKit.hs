@@ -59,10 +59,12 @@ data CatalogItem = CatalogItem
   { catalogItemIdentity :: !Word64
   , catalogItemLabel :: !Text
   , catalogItemDetail :: !Text
+  , catalogItemIcon :: !Text
   , catalogItemDepth :: !Int
   , catalogItemEnabled :: !Bool
   , catalogItemSelected :: !Bool
   , catalogItemExpanded :: !Bool
+  , catalogItemExpandable :: !Bool
   , catalogItemSeparator :: !Bool
   , catalogItemCommand :: !(Maybe CommandId)
   }
@@ -100,6 +102,7 @@ openAppKit dispatch = do
     BackendSession
       { backendRender = reconcile stateReference
       , backendRequestOpenTextFiles = c_openTextFiles
+      , backendRequestOpenProjectFolder = c_openProjectFolder
       , backendRun = c_run
       , backendStop = c_stop
       , backendShutdown = shutdown stateReference callback
@@ -170,6 +173,9 @@ receiveEvent dispatch _ eventKind identity textPointer =
       forM_ (decodeExpansion payload) $ \(item, expanded) ->
         dispatch
           (CollectionExpansionChanged (ElementKey identity) (CollectionItemKey item) expanded)
+    19 -> do
+      path <- decodeText textPointer
+      dispatch (ProjectFolderChosen (Text.unpack path))
     _ -> pure ()
 
 readText :: Read value => Text -> Maybe value
@@ -518,6 +524,12 @@ singleFillControl [RichTextEditor {}] = True
 singleFillControl [Container {}] = True
 singleFillControl [LayoutContainer {}] = True
 singleFillControl [TabView {}] = True
+singleFillControl [ListView {}] = True
+singleFillControl [CollectionView {}] = True
+singleFillControl [TreeView {}] = True
+singleFillControl [TableView {}] = True
+singleFillControl [ItemRepeater {}] = True
+singleFillControl [NavigationSidebar {}] = True
 singleFillControl _ = False
 
 destroyWindow :: NativeWindow -> IO ()
@@ -785,8 +797,8 @@ configureCatalogControl handle = \case
   ItemRepeater spec -> configureCollection spec
   TabView spec ->
     setCatalogItems handle
-      [ catalogItem page.tabPageKey.unChoiceKey page.tabPageTitle "" 0 True
-          (Just page.tabPageKey == spec.tabViewSelected) False False Nothing
+      [ catalogItem page.tabPageKey.unChoiceKey page.tabPageTitle "" "" 0 True
+          (Just page.tabPageKey == spec.tabViewSelected) False False False Nothing
       | page <- spec.tabViewPages
       ]
   Breadcrumb spec ->
@@ -803,7 +815,7 @@ configureCatalogControl handle = \case
   ContextMenu spec -> configureMenu spec
   Toolbar spec ->
     setCatalogItems handle
-      [ catalogItem command.unCommandId "" "" 0 True False False False (Just command)
+      [ catalogItem command.unCommandId "" "" "" 0 True False False False False (Just command)
       | command <- spec.toolbarCommands
       ]
   Dialog spec -> configurePresentation spec
@@ -843,10 +855,11 @@ configureCatalogControl handle = \case
       setCatalogItems handle
         [ catalogItem item.choiceItemKey.unChoiceKey
             item.choiceItemLabel.controlLabelText
+            ""
             (maybe "" encodeImageSource item.choiceItemLabel.controlLabelIcon)
             0 item.choiceItemEnabled
             (Just item.choiceItemKey == spec.choiceControlSelected)
-            False False Nothing
+            False False False Nothing
         | item <- spec.choiceControlItems
         ]
       c_controlSetEnabled handle (booleanInt spec.choiceControlEnabled)
@@ -868,7 +881,7 @@ configureCatalogControl handle = \case
         setCatalogItems handle
           [ catalogItem item.choiceItemKey.unChoiceKey
               item.choiceItemLabel.controlLabelText
-              "" 0 item.choiceItemEnabled False False False Nothing
+              "" "" 0 item.choiceItemEnabled False False False False Nothing
           | item <- spec.textInputSuggestions
           ]
       c_controlSetEnabled handle (booleanInt spec.textInputEnabled)
@@ -912,9 +925,11 @@ configureCatalogControl handle = \case
       c_catalogSetRowSizing handle sizing fixedHeight
       setCatalogItems handle
         [ catalogItem item.collectionItemKey.unCollectionItemKey
-            item.collectionItemLabel item.collectionItemDetail item.collectionItemDepth True
+            item.collectionItemLabel item.collectionItemDetail
+            (maybe "" encodeImageSource item.collectionItemIcon)
+            item.collectionItemDepth True
             (item.collectionItemKey `elem` spec.collectionControlSelection)
-            item.collectionItemExpanded False Nothing
+            item.collectionItemExpanded item.collectionItemExpandable False Nothing
         | item <- spec.collectionControlItems
         ]
       c_controlSetEnabled handle (booleanInt spec.collectionControlEnabled)
@@ -1027,7 +1042,7 @@ roundedSpacing :: Double -> CInt
 roundedSpacing value = fromIntegral (max 0 (min 99 (round value :: Int)))
 
 catalogItem
-  :: Word64 -> Text -> Text -> Int -> Bool -> Bool -> Bool -> Bool
+  :: Word64 -> Text -> Text -> Text -> Int -> Bool -> Bool -> Bool -> Bool -> Bool
   -> Maybe CommandId -> CatalogItem
 catalogItem = CatalogItem
 
@@ -1035,9 +1050,9 @@ menuCatalogItems :: [MenuEntry] -> [CatalogItem]
 menuCatalogItems entries = zipWith convert [1 ..] entries
   where
     convert index (MenuCommand label command enabled) =
-      catalogItem index label "" 0 enabled False False False (Just command)
+      catalogItem index label "" "" 0 enabled False False False False (Just command)
     convert index MenuSeparator =
-      catalogItem index "" "" 0 False False False True Nothing
+      catalogItem index "" "" "" 0 False False False False True Nothing
 
 setCatalogItems :: Ptr MacControlHandle -> [CatalogItem] -> IO ()
 setCatalogItems handle items = do
@@ -1045,11 +1060,12 @@ setCatalogItems handle items = do
   forM_ items $ \item ->
     withText item.catalogItemLabel $ \label ->
       withText item.catalogItemDetail $ \detail ->
-        c_catalogAddItem handle
-          item.catalogItemIdentity label detail
-          (fromIntegral item.catalogItemDepth)
-          (catalogItemFlags item)
-          (maybe 0 unCommandId item.catalogItemCommand)
+        withText item.catalogItemIcon $ \icon ->
+          c_catalogAddItem handle
+            item.catalogItemIdentity label detail icon
+            (fromIntegral item.catalogItemDepth)
+            (catalogItemFlags item)
+            (maybe 0 unCommandId item.catalogItemCommand)
   c_catalogEndItems handle
 
 catalogItemFlags :: CatalogItem -> CInt
@@ -1058,6 +1074,7 @@ catalogItemFlags item =
     + flag 2 item.catalogItemSelected
     + flag 4 item.catalogItemExpanded
     + flag 8 item.catalogItemSeparator
+    + flag 16 item.catalogItemExpandable
   where
     flag value present = if present then value else 0
 

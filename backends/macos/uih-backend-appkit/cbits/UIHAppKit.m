@@ -150,25 +150,53 @@ static void UIHEmit(int32_t kind, uint64_t identity, NSString *text) {
 }
 @end
 
+static NSImage *UIHImageSource(NSString *source);
+
 @interface UIHCenteredTableCellView : NSTableCellView
 @property(nonatomic, strong) NSTextField *centeredLabel;
-- (instancetype)initWithText:(NSString *)text contentSized:(BOOL)contentSized;
+- (instancetype)initWithText:(NSString *)text
+                  imageSource:(NSString *)imageSource
+                 contentSized:(BOOL)contentSized;
 @end
 
 @implementation UIHCenteredTableCellView
-- (instancetype)initWithText:(NSString *)text contentSized:(BOOL)contentSized {
+- (instancetype)initWithText:(NSString *)text
+                  imageSource:(NSString *)imageSource
+                 contentSized:(BOOL)contentSized {
   self = [super initWithFrame:NSZeroRect];
   if (self != nil) {
     NSTextField *label = [NSTextField labelWithString:text ?: @""];
     label.translatesAutoresizingMaskIntoConstraints = NO;
     label.lineBreakMode = NSLineBreakByTruncatingTail;
     [self addSubview:label];
+    NSImage *image = UIHImageSource(imageSource);
+    NSImageView *imageView = nil;
+    if (image != nil) {
+      imageView = [[NSImageView alloc] initWithFrame:NSZeroRect];
+      imageView.translatesAutoresizingMaskIntoConstraints = NO;
+      imageView.image = image;
+      imageView.imageScaling = NSImageScaleProportionallyDown;
+      [self addSubview:imageView];
+      self.imageView = imageView;
+    }
+    NSLayoutXAxisAnchor *leadingAnchor = imageView == nil
+        ? self.leadingAnchor
+        : imageView.trailingAnchor;
     NSMutableArray<NSLayoutConstraint *> *constraints = [NSMutableArray arrayWithArray:@[
-      [label.leadingAnchor constraintEqualToSystemSpacingAfterAnchor:self.leadingAnchor
+      [label.leadingAnchor constraintEqualToSystemSpacingAfterAnchor:leadingAnchor
                                                           multiplier:1],
       [self.trailingAnchor constraintGreaterThanOrEqualToSystemSpacingAfterAnchor:label.trailingAnchor
                                                                         multiplier:1]
     ]];
+    if (imageView != nil) {
+      [constraints addObjectsFromArray:@[
+        [imageView.leadingAnchor constraintEqualToSystemSpacingAfterAnchor:self.leadingAnchor
+                                                                 multiplier:1],
+        [imageView.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
+        [imageView.widthAnchor constraintEqualToConstant:16],
+        [imageView.heightAnchor constraintEqualToConstant:16]
+      ]];
+    }
     if (contentSized) {
       [constraints addObjectsFromArray:@[
         [label.topAnchor constraintEqualToSystemSpacingBelowAnchor:self.topAnchor
@@ -221,6 +249,8 @@ static void UIHEmit(int32_t kind, uint64_t identity, NSString *text) {
   }
   UIHCenteredTableCellView *cell =
       [[UIHCenteredTableCellView alloc] initWithText:value ?: @""
+                                         imageSource:[identifier isEqualToString:@"label"]
+                                             ? item[@"icon"] : @""
                                         contentSized:self.contentSizedRows];
   cell.centeredLabel.textColor = [item[@"enabled"] boolValue]
       ? NSColor.labelColor
@@ -432,7 +462,7 @@ static void UIHEmit(int32_t kind, uint64_t identity, NSString *text) {
 
 - (BOOL)outlineView:(NSOutlineView *)outlineView isItemExpandable:(id)item {
   (void)outlineView;
-  return ((UIHMacOutlineNode *)item).children.count > 0;
+  return [((UIHMacOutlineNode *)item).value[@"expandable"] boolValue];
 }
 
 - (NSView *)outlineView:(NSOutlineView *)outlineView
@@ -443,6 +473,7 @@ static void UIHEmit(int32_t kind, uint64_t identity, NSString *text) {
   UIHMacOutlineNode *node = item;
   return [[UIHCenteredTableCellView alloc]
       initWithText:node.value[@"label"] ?: @""
+      imageSource:node.value[@"icon"] ?: @""
       contentSized:self.contentSizedRows];
 }
 
@@ -1029,14 +1060,24 @@ static UIHMacTabGroupHandle *UIHEnsureTabGroup(
   NSStackView *bar = [[NSStackView alloc] initWithFrame:NSMakeRect(0, 0, 100, 32)];
   bar.orientation = NSUserInterfaceLayoutOrientationHorizontal;
   bar.alignment = NSLayoutAttributeCenterY;
+  bar.distribution = NSStackViewDistributionFill;
   bar.spacing = 2;
   bar.edgeInsets = NSEdgeInsetsMake(3, 6, 3, 6);
-  bar.autoresizingMask = NSViewWidthSizable | NSViewMinYMargin;
+  NSScrollView *tabScroll = [[NSScrollView alloc] initWithFrame:NSZeroRect];
+  tabScroll.drawsBackground = NO;
+  tabScroll.borderType = NSNoBorder;
+  tabScroll.hasHorizontalScroller = NO;
+  tabScroll.hasVerticalScroller = NO;
+  tabScroll.horizontalScrollElasticity = NSScrollElasticityAutomatic;
+  tabScroll.verticalScrollElasticity = NSScrollElasticityNone;
+  tabScroll.autoresizingMask = NSViewWidthSizable | NSViewMinYMargin;
+  tabScroll.documentView = bar;
   NSView *content = [[NSView alloc] initWithFrame:NSZeroRect];
   content.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
-  [root addSubview:bar];
+  [root addSubview:tabScroll];
   [root addSubview:content];
   group.rootView = root;
+  group.tabScrollView = tabScroll;
   group.tabBar = bar;
   group.contentHost = content;
   window.tabGroups[key] = group;
@@ -1046,10 +1087,25 @@ static UIHMacTabGroupHandle *UIHEnsureTabGroup(
 static void UIHLayoutTabGroup(UIHMacTabGroupHandle *group) {
   CGFloat barHeight = 34;
   NSRect bounds = group.rootView.bounds;
-  group.tabBar.frame = NSMakeRect(0, MAX(0, bounds.size.height - barHeight), bounds.size.width, barHeight);
+  group.tabScrollView.frame =
+      NSMakeRect(0, MAX(0, bounds.size.height - barHeight), bounds.size.width, barHeight);
+  CGFloat tabWidth = group.tabBar.edgeInsets.left + group.tabBar.edgeInsets.right;
+  NSArray<NSView *> *headers = group.tabBar.arrangedSubviews;
+  for (NSView *header in headers) {
+    tabWidth += ceil(header.fittingSize.width);
+  }
+  if (headers.count > 1) {
+    tabWidth += group.tabBar.spacing * (headers.count - 1);
+  }
+  group.tabBar.frame = NSMakeRect(0, 0, MAX(1, tabWidth), barHeight);
+  [group.tabBar layoutSubtreeIfNeeded];
   group.contentHost.frame = NSMakeRect(0, 0, bounds.size.width, MAX(0, bounds.size.height - barHeight));
   for (UIHMacTabHandle *tab in group.tabs.allValues) {
     tab.contentView.frame = group.contentHost.bounds;
+  }
+  UIHMacTabHandle *selected = group.tabs[group.selectedTab];
+  if (selected != nil && selected.tabHeader.superview == group.tabBar) {
+    [selected.tabHeader scrollRectToVisible:selected.tabHeader.bounds];
   }
 }
 
@@ -1102,7 +1158,14 @@ static UIHMacTabHandle *UIHEnsureTab(
   NSStackView *header = [NSStackView stackViewWithViews:@[selectButton, closeButton]];
   header.orientation = NSUserInterfaceLayoutOrientationHorizontal;
   header.alignment = NSLayoutAttributeCenterY;
+  header.distribution = NSStackViewDistributionFill;
   header.spacing = 1;
+  [selectButton setContentHuggingPriority:NSLayoutPriorityRequired
+                          forOrientation:NSLayoutConstraintOrientationHorizontal];
+  [closeButton setContentHuggingPriority:NSLayoutPriorityRequired
+                         forOrientation:NSLayoutConstraintOrientationHorizontal];
+  [header setContentHuggingPriority:NSLayoutPriorityRequired
+                    forOrientation:NSLayoutConstraintOrientationHorizontal];
   NSView *content = [[NSView alloc] initWithFrame:group.contentHost.bounds];
   content.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
   content.accessibilityElement = YES;
@@ -2590,6 +2653,7 @@ void uih_macos_catalog_control_add_item(
     uint64_t itemIdentity,
     const char *utf8Label,
     const char *utf8Detail,
+    const char *utf8Icon,
     int32_t depth,
     int32_t flags,
     uint64_t commandIdentity) {
@@ -2597,18 +2661,22 @@ void uih_macos_catalog_control_add_item(
   UIHMacControlHandle *handle = UIHControl(reference);
   NSString *label = UIHString(utf8Label);
   NSString *detail = UIHString(utf8Detail);
+  NSString *icon = UIHString(utf8Icon);
   BOOL enabled = (flags & 1) != 0;
   BOOL selected = (flags & 2) != 0;
   BOOL expanded = (flags & 4) != 0;
   BOOL separator = (flags & 8) != 0;
+  BOOL expandable = (flags & 16) != 0;
   NSDictionary *item = @{
     @"identity": @(itemIdentity),
     @"label": label,
     @"detail": detail,
+    @"icon": icon,
     @"depth": @(MAX(0, depth)),
     @"enabled": @(enabled),
     @"selected": @(selected),
     @"expanded": @(expanded),
+    @"expandable": @(expandable),
     @"command": @(commandIdentity)
   };
   [handle.items addObject:item];
@@ -2650,7 +2718,7 @@ void uih_macos_catalog_control_add_item(
     [segments setTag:(NSInteger)itemIdentity forSegment:index];
     [segments setEnabled:enabled forSegment:index];
     [segments setSelected:selected forSegment:index];
-    NSImage *image = UIHImageSource(detail);
+    NSImage *image = UIHImageSource(icon);
     if (image != nil) {
       [segments setImage:image forSegment:index];
     }
@@ -2662,7 +2730,7 @@ void uih_macos_catalog_control_add_item(
       [popup addItemWithTitle:label];
       popup.lastItem.representedObject = @(itemIdentity);
       popup.lastItem.enabled = enabled;
-      popup.lastItem.image = UIHImageSource(detail);
+      popup.lastItem.image = UIHImageSource(icon);
       if (commandIdentity != 0) {
         UIHMacActionTarget *target = UIHNewTarget(commandIdentity, UIHMacEventCommand);
         [handle.itemTargets addObject:target];
@@ -3431,6 +3499,25 @@ void uih_macos_open_text_files(void) {
   }];
 }
 
+void uih_macos_open_project_folder(void) {
+  UIHAssertMainThread();
+  NSOpenPanel *panel = [NSOpenPanel openPanel];
+  panel.canChooseFiles = NO;
+  panel.canChooseDirectories = YES;
+  panel.allowsMultipleSelection = NO;
+  panel.resolvesAliases = YES;
+  panel.title = @"Open Project Folder";
+  panel.prompt = @"Open";
+  UIHState.openPanel = panel;
+  [panel beginWithCompletionHandler:^(NSModalResponse response) {
+    UIHState.openPanel = nil;
+    if (response != NSModalResponseOK || panel.URL == nil) {
+      return;
+    }
+    UIHEmit(UIHMacEventProjectFolderChosen, 0, panel.URL.path);
+  }];
+}
+
 static void UIHTestFail(NSString *message) {
   UIHTestFailures += 1;
   if (UIHLastTestFailure == nil) {
@@ -3861,6 +3948,17 @@ void uih_macos_test_schedule_control_gallery_script(
         sidebarPeer.collectionAdapter.table.style != NSTableViewStyleSourceList) {
       UIHTestFail(@"collection families collapsed to indistinguishable native peers");
     }
+    UIHMacOutlineNode *lazyFolderNode = nil;
+    for (UIHMacOutlineNode *node in treePeer.outlineAdapter.roots) {
+      if ([node.value[@"identity"] unsignedLongLongValue] == 5) {
+        lazyFolderNode = node;
+        break;
+      }
+    }
+    if (lazyFolderNode == nil ||
+        ![treePeer.outlineAdapter.outline isExpandable:lazyFolderNode]) {
+      UIHTestFail(@"an explicitly expandable unloaded tree item has no native disclosure affordance");
+    }
     NSTableView *nativeTable = tablePeer.collectionAdapter.table;
     if (listPeer.collectionAdapter.table.rowSizeStyle != NSTableViewRowSizeStyleDefault ||
         treePeer.outlineAdapter.outline.rowSizeStyle != NSTableViewRowSizeStyleDefault ||
@@ -4078,21 +4176,27 @@ void uih_macos_test_schedule_text_editor_script(
     uint64_t documentWindowIdentity,
     uint64_t editorIdentity,
     uint64_t tabIdentity,
-    uint64_t saveCommandIdentity) {
+    uint64_t saveCommandIdentity,
+    uint64_t openFolderCommandIdentity) {
   UIHAssertMainThread();
 
   UIHTestAfter(0.10, ^{
     UIHMacWindowHandle *documentWindow = UIHState.windows[@(documentWindowIdentity)];
     UIHMacControlHandle *editorHandle = UIHState.controls[@(editorIdentity)];
     UIHMacTabHandle *tabHandle = nil;
+    UIHMacTabGroupHandle *documentTabGroup = nil;
     for (UIHMacTabGroupHandle *group in documentWindow.tabGroups.allValues) {
       tabHandle = group.tabs[@(tabIdentity)];
       if (tabHandle != nil) {
+        documentTabGroup = group;
         break;
       }
     }
     NSMenuItem *saveItem = UIHState.commandItems[@(saveCommandIdentity)];
-    if (documentWindow == nil || editorHandle == nil || tabHandle == nil || saveItem == nil ||
+    NSMenuItem *openFolderItem = UIHState.commandItems[@(openFolderCommandIdentity)];
+    if (documentWindow == nil || editorHandle == nil || tabHandle == nil ||
+        documentTabGroup == nil || saveItem == nil ||
+        openFolderItem == nil ||
         editorHandle.kind != UIHMacControlKindTextEditor) {
       UIHTestFail(@"native workspace, document tab, or text editor was not registered");
       [NSApplication.sharedApplication stop:nil];
@@ -4102,6 +4206,21 @@ void uih_macos_test_schedule_text_editor_script(
         documentWindow.workspaceSplit.subviews.count != 3 ||
         documentWindow.workspaceStatus == nil || tabHandle.contentView.hidden) {
       UIHTestFail(@"native workspace split, status area, or selected tab is incorrect");
+    }
+    NSArray<NSView *> *tabHeaders = documentTabGroup.tabBar.arrangedSubviews;
+    if (tabHeaders.count != 3) {
+      UIHTestFail(@"native multi-document fixture did not render all three tabs");
+    } else {
+      CGFloat expectedLeadingEdge = documentTabGroup.tabBar.edgeInsets.left;
+      CGFloat previousMaxX = expectedLeadingEdge - documentTabGroup.tabBar.spacing;
+      for (NSView *tabHeader in tabHeaders) {
+        CGFloat actualMinX = NSMinX(tabHeader.frame);
+        if (actualMinX > previousMaxX + documentTabGroup.tabBar.spacing + 1) {
+          UIHTestFail(@"native document tabs were split across the tab bar instead of leading-packed");
+          break;
+        }
+        previousMaxX = NSMaxX(tabHeader.frame);
+      }
     }
     [tabHandle.selectButton performClick:nil];
 
@@ -4125,6 +4244,21 @@ void uih_macos_test_schedule_text_editor_script(
         UIHTestFail(@"Unicode scalar ranges were not translated to the highlighted AppKit range");
       }
     }
+    UIHEmit(UIHMacEventCommand, openFolderCommandIdentity, @"");
+    UIHTestAfter(0.12, ^{
+    if (UIHState.openPanel == nil || !UIHState.openPanel.visible ||
+        !UIHState.openPanel.canChooseDirectories || UIHState.openPanel.canChooseFiles ||
+        UIHState.openPanel.allowsMultipleSelection) {
+      UIHTestFail([NSString stringWithFormat:
+          @"Open Folder command did not produce a single-directory native panel "
+           "(panel=%d visible=%d directories=%d files=%d multiple=%d)",
+          UIHState.openPanel != nil,
+          UIHState.openPanel.visible,
+          UIHState.openPanel.canChooseDirectories,
+          UIHState.openPanel.canChooseFiles,
+          UIHState.openPanel.allowsMultipleSelection]);
+    }
+    [UIHState.openPanel cancel:nil];
     uih_macos_open_text_files();
     if (UIHState.openPanel == nil || !UIHState.openPanel.visible) {
       UIHTestFail(@"native multi-file Open panel did not become visible");
@@ -4237,6 +4371,7 @@ void uih_macos_test_schedule_text_editor_script(
           });
         });
       });
+    });
     });
   });
 }

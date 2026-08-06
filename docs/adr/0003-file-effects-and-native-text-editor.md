@@ -14,10 +14,20 @@ Calling `IO` from a button callback would hide ordering, failure, testing, and f
 The current vertical runtime adds explicit first-order file effects to `Transaction`:
 
 - `RequestOpenTextFiles`
+- `RequestOpenProjectFolder`
+- `ReadDirectory path`
 - `ReadTextFile path`
 - `WriteTextFile effectKey path contents`
 
 Their normalized results return as `UIEvent` values. File chooser realization belongs to the shell backend; byte reading, UTF-8 decoding, encoding, and writing belong to the runtime effect interpreter. Views and event handlers remain pure descriptions.
+
+Project-folder enumeration follows the same boundary. A backend presents its
+native single-folder chooser and returns `ProjectFolderChosen`; the portable
+runtime reads exactly one directory level and returns `DirectoryRead` with
+file/directory entries. The application owns the project root, stable tree
+identities, expansion, loaded state, filtering policy, and file-to-document
+routing. One-level reads are intentional: a project opens without recursively
+walking `.git`, build products, dependency caches, or symlink-heavy trees.
 
 `EffectKey` correlates a write result with a document, and the completion event carries the exact written text. A document becomes clean only for that snapshot; edits made while a write is in flight remain dirty.
 
@@ -35,6 +45,11 @@ AppKit applies derived styles as temporary layout attributes without changing ch
 
 - Applications can test file workflows without AppKit.
 - The native Open panel and multiline editor stay behind the backend boundary.
+- Project navigators can use a native folder chooser and lazy hierarchy without
+  importing AppKit or committing Core to an IDE-specific workspace model.
 - Save completion cannot incorrectly erase newer dirty state.
 - The explicit effect list is a concrete vertical-slice subset of the eventual typed effect/executor API, not a commitment to a permanently closed algebra.
-- Production document services still need Save As, atomic replacement, encoding policy, external-change handling, app termination negotiation, restoration, and background execution.
+- Production document services still need Save As, atomic replacement,
+  encoding policy, ignore files, filesystem watching/refresh, external-change
+  handling, app termination negotiation, restoration, and background
+  execution.

@@ -86,8 +86,13 @@ property = Property
 fromLens :: PropertyId -> Lens' model value -> Property model value
 fromLens = property
 
-propertyId :: Property model value -> PropertyId
-propertyId (Property identifier _) = identifier
+propertyId
+  :: PropertyTarget target model value
+  => target
+  -> PropertyId
+propertyId target = identifier
+  where
+    Property identifier _ = asProperty target
 
 -- | Values accepted by property-reading, action, and binding constructors.
 class PropertyTarget target model value | target -> model value where

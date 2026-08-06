@@ -137,6 +137,13 @@ Every collection has stable item keys, explicit order, an explicit selection
 mode, typed authoritative or retained selection, and independently retained
 item content. Virtualization is backend-owned and must not change observable
 identity, selection, focus restoration, accessibility, or disposal semantics.
+Hierarchical items declare expandability separately from current children;
+this is required for lazy trees to expose native disclosure affordances before
+the first child-page result arrives.
+Compact collection rows also carry an optional portable `ImageSource` separate
+from their primary label and detail. Backends place it in the native row icon
+position; hierarchy controls may vary the icon with authoritative expanded
+state without embedding presentation markup in the label.
 
 Row-based collections also declare a typed density policy:
 

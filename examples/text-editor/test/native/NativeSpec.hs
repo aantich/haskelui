@@ -7,10 +7,11 @@ import Control.Exception (bracket)
 import Control.Monad (unless)
 import qualified Data.Text as Text
 import Example.TextEditor
-  ( applicationWithDocument
+  ( applicationWithDocuments
   , firstDocumentEditorKey
   , firstDocumentTabKey
   , firstDocumentWindowKey
+  , openFolderCommand
   , saveCommand
   )
 import System.Directory
@@ -48,8 +49,14 @@ main =
             , testTextEditor = firstDocumentEditorKey
             , testDocumentTab = firstDocumentTabKey
             , testEditorSaveCommand = saveCommand
+            , testEditorOpenFolderCommand = openFolderCommand
             }
-        testApplication = applicationWithDocument path (Text.pack "😀 module Initial where\n")
+        testApplication =
+          applicationWithDocuments
+            [ (path, Text.pack "😀 module Initial where\n")
+            , (path <> "-README.md", "# Fixture\n")
+            , (path <> "-stack.yaml", "resolver: lts-24.50\n")
+            ]
     unless (length (testApplication.appView testApplication.appInitialModel).appWindows == 1) $
       error "native text editor fixture must begin with exactly one workspace window"
     runApp (appKitBackendWithTextEditorTest testSpec) testApplication

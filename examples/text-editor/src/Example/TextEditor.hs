@@ -1,3 +1,4 @@
+{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -5,18 +6,29 @@
 module Example.TextEditor
   ( application
   , applicationWithDocument
+  , applicationWithDocuments
   , firstDocumentEditorKey
   , firstDocumentTabKey
   , firstDocumentWindowKey
   , openCommand
+  , openFolderCommand
+  , projectTreeKey
   , saveCommand
   , workspaceWindowKey
   ) where
 
-import Data.List (find)
+import Data.List
+  ( find
+  , foldl'
+  )
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (mapMaybe)
+import Data.Maybe
+  ( listToMaybe
+  , mapMaybe
+  )
+import Data.Set (Set)
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Word (Word64)
@@ -24,11 +36,15 @@ import Example.TextEditor.Highlighting
   ( codeEditorBaseStyle
   , haskellSyntaxLayer
   )
+import GHC.Generics (Generic)
 import System.FilePath
-  ( takeExtension
+  ( normalise
+  , takeExtension
   , takeFileName
   )
+import UIH.Binding
 import UIH.Core
+import UIH.Property
 
 data Document = Document
   { documentKey :: !DocumentKey
@@ -42,7 +58,17 @@ data Document = Document
   , documentStatus :: !Text
   , documentCloseAfterSave :: !Bool
   }
-  deriving stock (Eq, Show)
+  deriving stock (Eq, Generic, Show)
+
+data ProjectEntry = ProjectEntry
+  { projectEntryKey :: !CollectionItemKey
+  , projectEntryPath :: !FilePath
+  , projectEntryName :: !Text
+  , projectEntryKind :: !FileSystemEntryKind
+  , projectEntryChildren :: ![FilePath]
+  , projectEntryChildrenLoaded :: !Bool
+  }
+  deriving stock (Eq, Generic, Show)
 
 data EditorModel = EditorModel
   { documents :: !(Map DocumentKey Document)
@@ -51,8 +77,20 @@ data EditorModel = EditorModel
   , nextDocumentIdentity :: !Word64
   , workspaceOpen :: !Bool
   , workspaceMessage :: !Text
+  , projectRoot :: !(Maybe FilePath)
+  , projectEntries :: !(Map FilePath ProjectEntry)
+  , projectPathsByKey :: !(Map CollectionItemKey FilePath)
+  , projectExpandedFolders :: !(Set FilePath)
+  , projectSelectedEntry :: !(Maybe FilePath)
+  , nextProjectEntryIdentity :: !Word64
   }
-  deriving stock (Eq, Show)
+  deriving stock (Eq, Generic, Show)
+
+editorProperties :: Path EditorModel EditorModel
+editorProperties = rootPath
+
+documentProperties :: Path Document Document
+documentProperties = rootPath
 
 workspaceWindowKey :: WindowKey
 workspaceWindowKey = WindowKey 10
@@ -68,9 +106,13 @@ firstDocumentTabKey = TabKey 1000
 firstDocumentEditorKey :: ElementKey
 firstDocumentEditorKey = ElementKey 1001000
 
-openCommand, saveCommand :: CommandId
+openCommand, saveCommand, openFolderCommand :: CommandId
 openCommand = CommandId 10
 saveCommand = CommandId 11
+openFolderCommand = CommandId 12
+
+projectTreeKey :: ElementKey
+projectTreeKey = ElementKey 100
 
 navigatorPaneKey, editorPaneKey, inspectorPaneKey :: PaneKey
 navigatorPaneKey = PaneKey 10
@@ -90,7 +132,22 @@ application = editorApplication initialModel
 
 applicationWithDocument :: FilePath -> Text -> App EditorModel
 applicationWithDocument documentPath initialContents =
-  editorApplication (insertDocument documentPath initialContents initialModel)
+  applicationWithDocuments [(documentPath, initialContents)]
+
+applicationWithDocuments :: [(FilePath, Text)] -> App EditorModel
+applicationWithDocuments initialDocuments =
+  editorApplication
+    populatedModel
+      { selectedTab = listToMaybe populatedModel.tabOrder
+      }
+  where
+    populatedModel =
+      foldl'
+        (\model (documentPath, initialContents) ->
+          insertDocument documentPath initialContents model
+        )
+        initialModel
+        initialDocuments
 
 initialModel :: EditorModel
 initialModel =
@@ -100,7 +157,13 @@ initialModel =
     , selectedTab = Nothing
     , nextDocumentIdentity = 1000
     , workspaceOpen = True
-    , workspaceMessage = "Open one or more UTF-8 text files. Documents share this native workspace."
+    , workspaceMessage = "Open a folder or one or more UTF-8 text files."
+    , projectRoot = Nothing
+    , projectEntries = Map.empty
+    , projectPathsByKey = Map.empty
+    , projectExpandedFolders = Set.empty
+    , projectSelectedEntry = Nothing
+    , nextProjectEntryIdentity = 1
     }
 
 editorApplication :: EditorModel -> App EditorModel
@@ -116,7 +179,8 @@ render model =
   AppView
     { appWindows = [workspaceWindow model | model.workspaceOpen]
     , appCommands =
-        [ CommandSpec openCommand "Open…" (Just "o") True
+        [ CommandSpec openCommand "Open File…" (Just "o") True
+        , CommandSpec openFolderCommand "Open Folder…" Nothing True
         , CommandSpec saveCommand "Save" (Just "s") (maybe False documentDirty activeDocument)
         ]
     }
@@ -201,6 +265,7 @@ inspectorPane model =
 documentTab :: EditorModel -> TabKey -> Maybe WorkspaceTabSpec
 documentTab model tabKey = do
   document <- findDocumentByTab tabKey model
+  let contentsBinding = documentContentsBinding document
   pure
     WorkspaceTabSpec
       { workspaceTabKey = tabKey
@@ -213,7 +278,7 @@ documentTab model tabKey = do
               TextEditorSpec
                 { textEditorKey = document.documentEditorKey
                 , textEditorFrame = Rect 0 0 640 640
-                , textEditorText = document.documentContents
+                , textEditorText = readBinding contentsBinding model
                 , textEditorRevision = document.documentRevision
                 , textEditorBaseStyle = codeEditorBaseStyle
                 , textEditorLayers = documentPresentation document
@@ -224,19 +289,67 @@ documentTab model tabKey = do
 
 navigatorControls :: EditorModel -> [Control]
 navigatorControls model =
-  Label (ElementKey 100) (Rect 14 690 200 22) "OPEN DOCUMENTS"
-    : if null model.tabOrder
-        then [Label (ElementKey 101) (Rect 14 654 200 22) "No documents open"]
-        else zipWith renderEntry [0 ..] (mapMaybe (`findDocumentByTab` model) model.tabOrder)
+  case model.projectRoot of
+    Nothing ->
+      [ Label projectTreeKey (Rect 16 684 200 44) "No folder open\nFile > Open Folder…"
+      ]
+    Just _ ->
+      [ TreeView
+          CollectionControlSpec
+            { collectionControlKey = projectTreeKey
+            , collectionControlFrame = Rect 0 0 230 718
+            , collectionControlItems = projectCollectionItems model
+            , collectionControlSelectionMode = SingleCollectionSelection
+            , collectionControlSelection = projectSelection model
+            , collectionControlRowSizing = PlatformDefaultRows
+            , collectionControlEnabled = True
+            }
+      ]
+
+projectCollectionItems :: EditorModel -> [CollectionItem]
+projectCollectionItems model =
+  case model.projectRoot >>= (`Map.lookup` model.projectEntries) of
+    Nothing -> []
+    Just root -> flatten 0 root
   where
-    renderEntry index document =
-      Label
-        (documentNavigatorKey document)
-        (Rect 14 (654 - fromIntegral index * 28) 200 22)
-        ( (if model.selectedTab == Just document.documentTabKey then "› " else "  ")
-            <> Text.pack (takeFileName document.documentPath)
-            <> if documentDirty document then " ●" else ""
-        )
+    flatten depth entry =
+      collectionItem
+        : concatMap (maybe [] (flatten (depth + 1)) . (`Map.lookup` model.projectEntries))
+            entry.projectEntryChildren
+      where
+        expanded = Set.member entry.projectEntryPath model.projectExpandedFolders
+        collectionItem =
+          CollectionItem
+            { collectionItemKey = entry.projectEntryKey
+            , collectionItemLabel = entry.projectEntryName
+            , collectionItemDetail = ""
+            , collectionItemIcon = Just (projectEntryIcon entry expanded)
+            , collectionItemDepth = depth
+            , collectionItemExpandable = projectEntryExpandable entry
+            , collectionItemExpanded = expanded
+            }
+
+projectEntryIcon :: ProjectEntry -> Bool -> ImageSource
+projectEntryIcon entry expanded =
+  case entry.projectEntryKind of
+    FileSystemDirectory -> SystemSymbol (if expanded then "folder.fill" else "folder")
+    FileSystemFile -> SystemSymbol "doc.text"
+
+projectEntryExpandable :: ProjectEntry -> Bool
+projectEntryExpandable entry =
+  entry.projectEntryKind == FileSystemDirectory
+    && (not entry.projectEntryChildrenLoaded || not (null entry.projectEntryChildren))
+
+projectSelection :: EditorModel -> [CollectionItemKey]
+projectSelection model =
+  case model.projectSelectedEntry >>= (`Map.lookup` model.projectEntries) of
+    Nothing -> []
+    Just entry -> [entry.projectEntryKey]
+
+displayPathName :: FilePath -> Text
+displayPathName path =
+  let name = takeFileName path
+   in Text.pack (if null name then path else name)
 
 inspectorControls :: EditorModel -> [Control]
 inspectorControls model =
@@ -279,9 +392,95 @@ languageDescription document
 documentDirty :: Document -> Bool
 documentDirty document = document.documentContents /= document.documentSavedContents
 
-documentNavigatorKey :: Document -> ElementKey
-documentNavigatorKey document =
-  ElementKey (2000000 + document.documentKey.unDocumentKey)
+-- A document lives behind a dynamic Map key, so it is not a total lens from
+-- EditorModel. The controlled binding is the honest escape hatch: the event
+-- lookup establishes the current owner, while lifted child actions retain
+-- qualified property metadata and safely no-op if that key has disappeared.
+documentContentsBinding :: Document -> Binding EditorModel Text
+documentContentsBinding document =
+  controlledWith
+    document.documentContents
+    ( \newContents ->
+        liftDocumentAction
+          document.documentKey
+          (documentProperties.documentContents .= newContents)
+    )
+    [ alsoWrite
+        ( const
+            ( liftDocumentAction
+                document.documentKey
+                (modify documentProperties.documentRevision nextTextRevision)
+            )
+        )
+    , alsoWrite
+        ( const
+            ( liftDocumentAction
+                document.documentKey
+                (documentProperties.documentStatus .= "Unsaved changes")
+            )
+        )
+    , alsoWrite
+        ( const
+            ( liftDocumentAction
+                document.documentKey
+                (documentProperties.documentCloseAfterSave .= False)
+            )
+        )
+    , commitPolicy Live
+    , undoPolicy
+        ( Coalesce
+            (UndoGroup ("edit-document-" <> Text.pack (show document.documentKey.unDocumentKey)))
+        )
+    , labelTransaction "Edit text"
+    ]
+
+liftDocumentAction :: DocumentKey -> Action Document -> Action EditorModel
+liftDocumentAction key childAction =
+  actionWithProperties
+    ( "Document "
+        <> Text.pack (show key.unDocumentKey)
+        <> ": "
+        <> actionDescription childAction
+    )
+    (fmap (scopeDocumentProperty key) (actionPropertyIds childAction))
+    (updateDocument key (applyAction childAction))
+
+scopeDocumentProperty :: DocumentKey -> PropertyId -> PropertyId
+scopeDocumentProperty key (PropertyId childIdentifier) =
+  PropertyId
+    ( "documents."
+        <> Text.pack (show key.unDocumentKey)
+        <> if Text.null childIdentifier then "" else "." <> childIdentifier
+    )
+
+insertDocumentPropertyIds :: [PropertyId]
+insertDocumentPropertyIds =
+  [ propertyId editorProperties.documents
+  , propertyId editorProperties.tabOrder
+  , propertyId editorProperties.selectedTab
+  , propertyId editorProperties.nextDocumentIdentity
+  , propertyId editorProperties.workspaceOpen
+  , propertyId editorProperties.workspaceMessage
+  , propertyId editorProperties.projectSelectedEntry
+  ]
+
+insertDocumentAction :: FilePath -> Text -> Action EditorModel
+insertDocumentAction documentPath initialContents =
+  actionWithProperties
+    "Insert document"
+    insertDocumentPropertyIds
+    (insertDocument documentPath initialContents)
+
+removeDocumentAction :: DocumentKey -> Action EditorModel
+removeDocumentAction key =
+  actionWithProperties
+    "Remove document"
+    [ propertyId editorProperties.documents
+    , propertyId editorProperties.tabOrder
+    , propertyId editorProperties.selectedTab
+    , propertyId editorProperties.workspaceMessage
+    ]
+    (removeDocument key)
 
 handleEvent :: UIEvent -> EditorModel -> Transaction EditorModel
 handleEvent event model =
@@ -289,37 +488,69 @@ handleEvent event model =
     CommandInvoked command
       | command == openCommand ->
           requestEffect "Choose text files" RequestOpenTextFiles
+      | command == openFolderCommand ->
+          requestEffect "Choose project folder" RequestOpenProjectFolder
       | command == saveCommand ->
           saveActiveDocument model
+    ProjectFolderChosen chosenPath -> openProjectFolder chosenPath
+    DirectoryRead directoryPath _
+      | Map.notMember directoryPath model.projectEntries -> noTransaction
+    DirectoryRead directoryPath result ->
+      case result of
+        Left message ->
+          transactionFromAction
+            "Report directory read failure"
+            NoUndo
+            ( editorProperties.workspaceMessage
+                .= "Could not read " <> Text.pack directoryPath <> ": " <> message
+            )
+        Right entries ->
+          transactionFromAction
+            "Store project directory"
+            NoUndo
+            ( projectAction
+                "Store directory entries"
+                [ propertyId editorProperties.projectEntries
+                , propertyId editorProperties.projectPathsByKey
+                , propertyId editorProperties.nextProjectEntryIdentity
+                , propertyId editorProperties.workspaceMessage
+                ]
+                (storeDirectoryEntries directoryPath entries)
+            )
     TextFileChosen chosenPath ->
-      requestEffect "Read chosen text file" (ReadTextFile chosenPath)
+      openFilePath chosenPath model
     TextFileRead readPath result ->
       case result of
         Left message ->
-          transaction
+          transactionFromAction
             "Report file read failure"
             NoUndo
-            (\current -> current {workspaceMessage = "Could not open " <> Text.pack readPath <> ": " <> message})
+            ( editorProperties.workspaceMessage
+                .= "Could not open " <> Text.pack readPath <> ": " <> message
+            )
         Right readContents ->
-          transaction "Open text document" NoUndo (insertDocument readPath readContents)
+          transactionFromAction
+            "Open text document"
+            NoUndo
+            (insertDocumentAction readPath readContents)
     TextChanged changedKey changedContents ->
       case find ((== changedKey) . (.documentEditorKey)) (Map.elems model.documents) of
         Nothing -> noTransaction
         Just document ->
-          transaction
-            "Edit text"
-            (Coalesce (UndoGroup ("edit-document-" <> Text.pack (show document.documentKey.unDocumentKey))))
-            ( updateDocument document.documentKey $ \current ->
-                current
-                  { documentContents = changedContents
-                  , documentRevision = nextTextRevision current.documentRevision
-                  , documentStatus = "Unsaved changes"
-                  , documentCloseAfterSave = False
-                  }
-            )
+          case editBinding model InputChanged (documentContentsBinding document) changedContents of
+            EditCommitted _ committed -> committed
+            DraftStaged _ -> noTransaction
+            DraftInvalid _ _ -> noTransaction
+    CollectionSelectionChanged key [selectedKey]
+      | key == projectTreeKey -> selectProjectEntry selectedKey model
+    CollectionExpansionChanged key itemKey expanded
+      | key == projectTreeKey -> setProjectExpansion itemKey expanded model
     TabSelected tabKey
       | any ((== tabKey) . (.documentTabKey)) (Map.elems model.documents) ->
-          transaction "Select document tab" NoUndo (\current -> current {selectedTab = Just tabKey})
+          transactionFromAction
+            "Select document tab"
+            NoUndo
+            (editorProperties.selectedTab .= Just tabKey)
     TabCloseRequested tabKey -> closeTabRequested tabKey model
     WindowCloseRequested key
       | key == workspaceWindowKey -> closeWorkspaceRequested model
@@ -327,39 +558,250 @@ handleEvent event model =
       handleWriteResult writtenKey writtenPath writtenContents result model
     _ -> noTransaction
 
+projectPropertyIds :: [PropertyId]
+projectPropertyIds =
+  [ propertyId editorProperties.projectRoot
+  , propertyId editorProperties.projectEntries
+  , propertyId editorProperties.projectPathsByKey
+  , propertyId editorProperties.projectExpandedFolders
+  , propertyId editorProperties.projectSelectedEntry
+  , propertyId editorProperties.nextProjectEntryIdentity
+  , propertyId editorProperties.workspaceMessage
+  ]
+
+projectAction :: Text -> [PropertyId] -> (EditorModel -> EditorModel) -> Action EditorModel
+projectAction = actionWithProperties
+
+openProjectFolder :: FilePath -> Transaction EditorModel
+openProjectFolder chosenPath =
+  transactionFromActionWithEffects
+    "Open project folder"
+    NoUndo
+    [ReadDirectory rootPath]
+    (projectAction "Set project root" projectPropertyIds (setProjectRoot rootPath))
+  where
+    rootPath = normalise chosenPath
+
+setProjectRoot :: FilePath -> EditorModel -> EditorModel
+setProjectRoot rootPath model =
+  model
+    { projectRoot = Just rootPath
+    , projectEntries = Map.singleton rootPath rootEntry
+    , projectPathsByKey = Map.singleton (CollectionItemKey 1) rootPath
+    , projectExpandedFolders = Set.singleton rootPath
+    , projectSelectedEntry = Nothing
+    , nextProjectEntryIdentity = 2
+    , workspaceMessage = "Opened folder " <> Text.pack rootPath
+    }
+  where
+    rootEntry =
+      ProjectEntry
+        { projectEntryKey = CollectionItemKey 1
+        , projectEntryPath = rootPath
+        , projectEntryName = displayPathName rootPath
+        , projectEntryKind = FileSystemDirectory
+        , projectEntryChildren = []
+        , projectEntryChildrenLoaded = False
+        }
+
+storeDirectoryEntries :: FilePath -> [FileSystemEntry] -> EditorModel -> EditorModel
+storeDirectoryEntries directoryPath entries model =
+  case Map.lookup directoryPath model.projectEntries of
+    Nothing -> model
+    Just directory
+      | directory.projectEntryKind /= FileSystemDirectory -> model
+      | otherwise ->
+          model
+            { projectEntries = Map.insert directoryPath updatedDirectory updatedEntries
+            , projectPathsByKey = updatedPathsByKey
+            , nextProjectEntryIdentity = nextIdentity
+            , workspaceMessage = "Loaded " <> Text.pack directoryPath
+            }
+      where
+        (updatedEntries, updatedPathsByKey, nextIdentity, reversedChildPaths) =
+          foldl'
+            insertEntry
+            ( model.projectEntries
+            , model.projectPathsByKey
+            , model.nextProjectEntryIdentity
+            , []
+            )
+            entries
+        updatedDirectory =
+          directory
+            { projectEntryChildren = reverse reversedChildPaths
+            , projectEntryChildrenLoaded = True
+            }
+
+        insertEntry
+          :: (Map FilePath ProjectEntry, Map CollectionItemKey FilePath, Word64, [FilePath])
+          -> FileSystemEntry
+          -> (Map FilePath ProjectEntry, Map CollectionItemKey FilePath, Word64, [FilePath])
+        insertEntry (knownEntries, pathsByKey, identity, paths) fileSystemEntry =
+          case Map.lookup path knownEntries of
+            Just existing ->
+              ( knownEntries
+              , Map.insert existing.projectEntryKey path pathsByKey
+              , identity
+              , path : paths
+              )
+            Nothing ->
+              ( Map.insert path projectEntry knownEntries
+              , Map.insert projectEntry.projectEntryKey path pathsByKey
+              , identity + 1
+              , path : paths
+              )
+          where
+            path = normalise fileSystemEntry.fileSystemEntryPath
+            kind = fileSystemEntry.fileSystemEntryKind
+            projectEntry =
+              ProjectEntry
+                { projectEntryKey = CollectionItemKey identity
+                , projectEntryPath = path
+                , projectEntryName = fileSystemEntry.fileSystemEntryName
+                , projectEntryKind = kind
+                , projectEntryChildren = []
+                , projectEntryChildrenLoaded = kind == FileSystemFile
+                }
+
+selectProjectEntry :: CollectionItemKey -> EditorModel -> Transaction EditorModel
+selectProjectEntry selectedKey model =
+  case findProjectEntryByKey selectedKey model of
+    Nothing -> noTransaction
+    Just entry ->
+      case entry.projectEntryKind of
+        FileSystemFile -> openFilePath entry.projectEntryPath model
+        FileSystemDirectory ->
+          setFolderExpanded
+            entry
+            (not (Set.member entry.projectEntryPath model.projectExpandedFolders))
+            model
+
+setProjectExpansion :: CollectionItemKey -> Bool -> EditorModel -> Transaction EditorModel
+setProjectExpansion itemKey expanded model =
+  case findProjectEntryByKey itemKey model of
+    Just entry
+      | entry.projectEntryKind == FileSystemDirectory ->
+          setFolderExpanded entry expanded model
+    _ -> noTransaction
+
+setFolderExpanded :: ProjectEntry -> Bool -> EditorModel -> Transaction EditorModel
+setFolderExpanded entry expanded _ =
+  transactionFromActionWithEffects
+    "Change project folder expansion"
+    NoUndo
+    effects
+    ( projectAction
+        "Change folder expansion"
+        [ propertyId editorProperties.projectExpandedFolders
+        , propertyId editorProperties.projectSelectedEntry
+        ]
+        updateExpansion
+    )
+  where
+    effects =
+      [ ReadDirectory entry.projectEntryPath
+      | expanded && not entry.projectEntryChildrenLoaded
+      ]
+    updateExpansion model =
+      model
+        { projectExpandedFolders =
+            (if expanded then Set.insert else Set.delete)
+              entry.projectEntryPath
+              model.projectExpandedFolders
+        -- Folder rows are deliberately deselected after activation so clicking
+        -- the same row again reliably toggles it on native outline controls.
+        , projectSelectedEntry = Nothing
+        }
+
+openFilePath :: FilePath -> EditorModel -> Transaction EditorModel
+openFilePath requestedPath model =
+  case findDocumentByPath path model of
+    Just document ->
+      transactionFromAction
+        "Activate open project file"
+        NoUndo
+        ( actionWithProperties
+            "Activate open project file"
+            [ propertyId editorProperties.selectedTab
+            , propertyId editorProperties.projectSelectedEntry
+            , propertyId editorProperties.workspaceMessage
+            ]
+            ( \current ->
+                current
+                  { selectedTab = Just document.documentTabKey
+                  , projectSelectedEntry = Just path
+                  , workspaceMessage = "Selected " <> Text.pack path
+                  }
+            )
+        )
+    Nothing ->
+      transactionFromActionWithEffects
+        "Open project file"
+        NoUndo
+        [ReadTextFile path]
+        ( actionWithProperties
+            "Select project file"
+            [ propertyId editorProperties.projectSelectedEntry
+            , propertyId editorProperties.workspaceMessage
+            ]
+            ( \current ->
+                current
+                  { projectSelectedEntry = Just path
+                  , workspaceMessage = "Opening " <> Text.pack path
+                  }
+            )
+        )
+  where
+    path = normalise requestedPath
+
 closeTabRequested :: TabKey -> EditorModel -> Transaction EditorModel
 closeTabRequested tabKey model =
   case findDocumentByTab tabKey model of
     Nothing -> noTransaction
     Just document
       | documentDirty document ->
-          transaction
+          transactionFromAction
             "Defer dirty tab close"
             NoUndo
-            ( updateDocument document.documentKey $ \current ->
-                current
-                  { documentStatus = "Close deferred: save this document to close its tab"
-                  , documentCloseAfterSave = True
-                  }
+            ( liftDocumentAction document.documentKey
+                ( batchActions
+                    "Defer dirty tab close"
+                    [ documentProperties.documentStatus
+                        .= "Close deferred: save this document to close its tab"
+                    , documentProperties.documentCloseAfterSave .= True
+                    ]
+                )
             )
-      | otherwise -> transaction "Close document tab" NoUndo (removeDocument document.documentKey)
+      | otherwise ->
+          transactionFromAction
+            "Close document tab"
+            NoUndo
+            (removeDocumentAction document.documentKey)
 
 closeWorkspaceRequested :: EditorModel -> Transaction EditorModel
 closeWorkspaceRequested model =
   case find documentDirty (Map.elems model.documents) of
     Nothing ->
-      transaction "Close workspace" NoUndo (\current -> current {workspaceOpen = False})
+      transactionFromAction
+        "Close workspace"
+        NoUndo
+        (editorProperties.workspaceOpen .= False)
     Just dirtyDocument ->
-      transaction
+      transactionFromAction
         "Veto dirty workspace close"
         NoUndo
-        ( \current ->
-            (updateDocument dirtyDocument.documentKey
-              (\document -> document {documentStatus = "Workspace close deferred: save modified documents first"})
-              current)
-              { selectedTab = Just dirtyDocument.documentTabKey
-              , workspaceMessage = "Workspace close deferred: modified documents remain"
-              }
+        ( batchActions
+            "Veto dirty workspace close"
+            [ liftDocumentAction
+                dirtyDocument.documentKey
+                ( documentProperties.documentStatus
+                    .= "Workspace close deferred: save modified documents first"
+                )
+            , editorProperties.selectedTab .= Just dirtyDocument.documentTabKey
+            , editorProperties.workspaceMessage
+                .= "Workspace close deferred: modified documents remain"
+            ]
         )
 
 saveActiveDocument :: EditorModel -> Transaction EditorModel
@@ -369,12 +811,13 @@ saveActiveDocument model =
     Just document
       | not (documentDirty document) -> noTransaction
       | otherwise ->
-          transactionWithEffects
+          transactionFromActionWithEffects
             "Save text document"
             NoUndo
             [WriteTextFile document.documentEffectKey document.documentPath document.documentContents]
-            ( updateDocument document.documentKey $ \current ->
-                current {documentStatus = "Saving…"}
+            ( liftDocumentAction
+                document.documentKey
+                (documentProperties.documentStatus .= "Saving…")
             )
 
 handleWriteResult
@@ -392,43 +835,60 @@ handleWriteResult writtenKey writtenPath writtenContents result model =
       | otherwise ->
           case result of
             Left message ->
-              transaction
+              transactionFromAction
                 "Report file write failure"
                 NoUndo
-                ( updateDocument document.documentKey $ \current ->
-                    current
-                      { documentStatus = "Save failed: " <> message
-                      , documentCloseAfterSave = False
-                      }
+                ( liftDocumentAction document.documentKey
+                    ( batchActions
+                        "Report file write failure"
+                        [ documentProperties.documentStatus .= "Save failed: " <> message
+                        , documentProperties.documentCloseAfterSave .= False
+                        ]
+                    )
                 )
             Right ()
               | document.documentContents == writtenContents && document.documentCloseAfterSave ->
-                  transaction "Finish save and close tab" NoUndo (removeDocument document.documentKey)
+                  transactionFromAction
+                    "Finish save and close tab"
+                    NoUndo
+                    (removeDocumentAction document.documentKey)
               | otherwise ->
-                  transaction
+                  transactionFromAction
                     "Finish text save"
                     NoUndo
-                    ( updateDocument document.documentKey $ \current ->
-                        current
-                          { documentSavedContents = writtenContents
-                          , documentStatus =
-                              if current.documentContents == writtenContents
-                                then "Saved"
-                                else "Saved an older revision; newer edits remain unsaved"
-                          }
+                    ( liftDocumentAction document.documentKey
+                        ( batchActions
+                            "Finish text save"
+                            [ documentProperties.documentSavedContents .= writtenContents
+                            , documentProperties.documentStatus
+                                .= if document.documentContents == writtenContents
+                                  then "Saved"
+                                  else "Saved an older revision; newer edits remain unsaved"
+                            ]
+                        )
                     )
 
 insertDocument :: FilePath -> Text -> EditorModel -> EditorModel
 insertDocument documentPath initialContents model =
-  model
-    { documents = Map.insert key document model.documents
-    , tabOrder = model.tabOrder <> [tabKey]
-    , selectedTab = Just tabKey
-    , nextDocumentIdentity = identity + 1
-    , workspaceOpen = True
-    , workspaceMessage = "Opened " <> Text.pack documentPath
-    }
+  case findDocumentByPath normalizedPath model of
+    Just existing ->
+      model
+        { selectedTab = Just existing.documentTabKey
+        , projectSelectedEntry = Just normalizedPath
+        , workspaceMessage = "Selected " <> Text.pack normalizedPath
+        }
+    Nothing ->
+      model
+        { documents = Map.insert key document model.documents
+        , tabOrder = model.tabOrder <> [tabKey]
+        , selectedTab = Just tabKey
+        , nextDocumentIdentity = identity + 1
+        , workspaceOpen = True
+        , projectSelectedEntry = Just normalizedPath
+        , workspaceMessage = "Opened " <> Text.pack normalizedPath
+        }
   where
+    normalizedPath = normalise documentPath
     identity = model.nextDocumentIdentity
     key = DocumentKey identity
     tabKey = TabKey identity
@@ -438,7 +898,7 @@ insertDocument documentPath initialContents model =
         , documentTabKey = tabKey
         , documentEditorKey = ElementKey (1000000 + identity)
         , documentEffectKey = EffectKey identity
-        , documentPath = documentPath
+        , documentPath = normalizedPath
         , documentContents = initialContents
         , documentRevision = TextRevision 0
         , documentSavedContents = initialContents
@@ -461,6 +921,17 @@ selectedDocument model = model.selectedTab >>= (`findDocumentByTab` model)
 findDocumentByTab :: TabKey -> EditorModel -> Maybe Document
 findDocumentByTab tabKey =
   find ((== tabKey) . (.documentTabKey)) . Map.elems . documents
+
+findDocumentByPath :: FilePath -> EditorModel -> Maybe Document
+findDocumentByPath requestedPath =
+  find ((== normalise requestedPath) . normalise . (.documentPath))
+    . Map.elems
+    . documents
+
+findProjectEntryByKey :: CollectionItemKey -> EditorModel -> Maybe ProjectEntry
+findProjectEntryByKey itemKey model = do
+  path <- Map.lookup itemKey model.projectPathsByKey
+  Map.lookup path model.projectEntries
 
 updateDocument :: DocumentKey -> (Document -> Document) -> EditorModel -> EditorModel
 updateDocument key change model =

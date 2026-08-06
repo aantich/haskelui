@@ -14,10 +14,12 @@ import Control.Exception
   , try
   )
 import Control.Monad
-  ( forM_
+  ( forM
+  , forM_
   , when
   )
 import qualified Data.ByteString as ByteString
+import Data.List (sortOn)
 import Data.IORef
   ( newIORef
   , readIORef
@@ -25,10 +27,20 @@ import Data.IORef
   )
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
+import System.Directory
+  ( doesDirectoryExist
+  , listDirectory
+  )
+import System.FilePath
+  ( (</>)
+  , normalise
+  )
 import UIH.Core
   ( App (..)
   , AppView (..)
   , Effect (..)
+  , FileSystemEntry (..)
+  , FileSystemEntryKind (..)
   , UIEvent (..)
   , applyTransaction
   , resolveAppViewLayouts
@@ -42,6 +54,7 @@ newtype Backend = Backend
 data BackendSession = BackendSession
   { backendRender :: AppView -> IO ()
   , backendRequestOpenTextFiles :: IO ()
+  , backendRequestOpenProjectFolder :: IO ()
   , backendRun :: IO ()
   , backendStop :: IO ()
   , backendShutdown :: IO ()
@@ -74,6 +87,14 @@ runApp backend application = do
 interpretEffect :: BackendSession -> (UIEvent -> IO ()) -> Effect -> IO ()
 interpretEffect session dispatch = \case
   RequestOpenTextFiles -> backendRequestOpenTextFiles session
+  RequestOpenProjectFolder -> backendRequestOpenProjectFolder session
+  ReadDirectory path -> do
+    result <- try (readDirectoryEntries path) :: IO (Either IOException [FileSystemEntry])
+    dispatch $
+      DirectoryRead path $
+        case result of
+          Left exception -> Left (Text.pack (displayException exception))
+          Right entries -> Right entries
   ReadTextFile path -> do
     result <- try (ByteString.readFile path) :: IO (Either IOException ByteString.ByteString)
     dispatch $
@@ -95,3 +116,26 @@ interpretEffect session dispatch = \case
 dropUtf8Bom :: ByteString.ByteString -> ByteString.ByteString
 dropUtf8Bom bytes =
   maybe bytes id (ByteString.stripPrefix (ByteString.pack [0xEF, 0xBB, 0xBF]) bytes)
+
+readDirectoryEntries :: FilePath -> IO [FileSystemEntry]
+readDirectoryEntries directory = do
+  names <- listDirectory directory
+  entries <- forM names $ \name -> do
+    let path = normalise (directory </> name)
+    isDirectory <- doesDirectoryExist path
+    pure
+      FileSystemEntry
+        { fileSystemEntryPath = path
+        , fileSystemEntryName = Text.pack name
+        , fileSystemEntryKind =
+            if isDirectory then FileSystemDirectory else FileSystemFile
+        }
+  pure (sortOn entryOrder entries)
+  where
+    entryOrder :: FileSystemEntry -> (Int, Text.Text)
+    entryOrder entry =
+      ( case entry.fileSystemEntryKind of
+          FileSystemDirectory -> (0 :: Int)
+          FileSystemFile -> 1
+      , Text.toCaseFold entry.fileSystemEntryName
+      )

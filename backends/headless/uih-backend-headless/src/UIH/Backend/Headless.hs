@@ -22,6 +22,7 @@ newHeadlessBackend = do
             BackendSession
               { backendRender = writeIORef latestView . Just
               , backendRequestOpenTextFiles = pure ()
+              , backendRequestOpenProjectFolder = pure ()
               , backendRun = pure ()
               , backendStop = pure ()
               , backendShutdown = pure ()

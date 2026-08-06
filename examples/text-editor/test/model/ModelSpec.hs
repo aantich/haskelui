@@ -9,6 +9,8 @@ import Example.TextEditor
   , firstDocumentTabKey
   , firstDocumentWindowKey
   , openCommand
+  , openFolderCommand
+  , projectTreeKey
   , saveCommand
   )
 import Example.TextEditor.Highlighting
@@ -33,8 +35,116 @@ main = do
       initialView = application.appView initial
       openRequest = application.appHandleEvent (CommandInvoked openCommand) initial
   assertEqual "Open command effect" [RequestOpenTextFiles] openRequest.transactionEffects
+  let openFolderRequest = application.appHandleEvent (CommandInvoked openFolderCommand) initial
+  assertEqual
+    "Open Folder command effect"
+    [RequestOpenProjectFolder]
+    openFolderRequest.transactionEffects
   assert "editor starts with one workspace window" (length initialView.appWindows == 1)
   assert "empty workspace validates" (all (null . validateWindowWorkspace) initialView.appWindows)
+
+  let folderChosen = application.appHandleEvent (ProjectFolderChosen "/tmp/project") initial
+      projectOpening = applyTransaction folderChosen initial
+  assertEqual
+    "choosing a project lazily requests only its root directory"
+    [ReadDirectory "/tmp/project"]
+    folderChosen.transactionEffects
+  assertProjectItems
+    "project root is immediately visible with an expanded folder icon"
+    [ (CollectionItemKey 1, "project", 0, Just (SystemSymbol "folder.fill"), True, True)
+    ]
+    projectOpening
+
+  let rootLoaded =
+        applyEvent
+          ( DirectoryRead
+              "/tmp/project"
+              ( Right
+                  [ FileSystemEntry "/tmp/project/src" "src" FileSystemDirectory
+                  , FileSystemEntry "/tmp/project/README.md" "README.md" FileSystemFile
+                  ]
+              )
+          )
+          projectOpening
+      expandSource =
+        application.appHandleEvent
+          (CollectionSelectionChanged projectTreeKey [CollectionItemKey 2])
+          rootLoaded
+      sourceOpening = applyTransaction expandSource rootLoaded
+  assertProjectItems
+    "an unloaded folder advertises expansion before it has child rows"
+    [ (CollectionItemKey 1, "project", 0, Just (SystemSymbol "folder.fill"), True, True)
+    , (CollectionItemKey 2, "src", 1, Just (SystemSymbol "folder"), True, False)
+    , (CollectionItemKey 3, "README.md", 1, Just (SystemSymbol "doc.text"), False, False)
+    ]
+    rootLoaded
+  assertEqual
+    "activating an unloaded folder requests exactly that directory"
+    [ReadDirectory "/tmp/project/src"]
+    expandSource.transactionEffects
+
+  let sourceLoaded =
+        applyEvent
+          ( DirectoryRead
+              "/tmp/project/src"
+              (Right [FileSystemEntry "/tmp/project/src/Main.hs" "Main.hs" FileSystemFile])
+          )
+          sourceOpening
+  assertProjectItems
+    "loaded project hierarchy retains depth, folder state, and file icons"
+    [ (CollectionItemKey 1, "project", 0, Just (SystemSymbol "folder.fill"), True, True)
+    , (CollectionItemKey 2, "src", 1, Just (SystemSymbol "folder.fill"), True, True)
+    , (CollectionItemKey 4, "Main.hs", 2, Just (SystemSymbol "doc.text"), False, False)
+    , (CollectionItemKey 3, "README.md", 1, Just (SystemSymbol "doc.text"), False, False)
+    ]
+    sourceLoaded
+
+  let emptyRootLoaded =
+        applyEvent
+          ( DirectoryRead
+              "/tmp/project"
+              (Right [FileSystemEntry "/tmp/project/empty" "empty" FileSystemDirectory])
+          )
+          projectOpening
+      emptyOpening =
+        applyEvent
+          (CollectionSelectionChanged projectTreeKey [CollectionItemKey 2])
+          emptyRootLoaded
+      emptyLoaded =
+        applyEvent
+          (DirectoryRead "/tmp/project/empty" (Right []))
+          emptyOpening
+  assertProjectItems
+    "a directory known to be empty no longer advertises expansion"
+    [ (CollectionItemKey 1, "project", 0, Just (SystemSymbol "folder.fill"), True, True)
+    , (CollectionItemKey 2, "empty", 1, Just (SystemSymbol "folder.fill"), False, True)
+    ]
+    emptyLoaded
+
+  let mainSelected =
+        application.appHandleEvent
+          (CollectionSelectionChanged projectTreeKey [CollectionItemKey 4])
+          sourceLoaded
+      mainOpened =
+        applyEvent
+          (TextFileRead "/tmp/project/src/Main.hs" (Right "module Main where\n"))
+          (applyTransaction mainSelected sourceLoaded)
+      mainSelectedAgain =
+        application.appHandleEvent
+          (CollectionSelectionChanged projectTreeKey [CollectionItemKey 4])
+          mainOpened
+  assertEqual
+    "selecting a project file reads it"
+    [ReadTextFile "/tmp/project/src/Main.hs"]
+    mainSelected.transactionEffects
+  assertEqual
+    "selecting an already-open project file only activates its existing tab"
+    []
+    mainSelectedAgain.transactionEffects
+  assertEqual
+    "opening the same project file never creates a duplicate tab"
+    [TabKey 1000]
+    (concatMap windowTabKeys (application.appView (applyTransaction mainSelectedAgain mainOpened)).appWindows)
 
   let opened = applyEvent (TextFileRead "/tmp/example.hs" (Right "module Old where\n")) initial
       openedTwice = applyEvent (TextFileRead "/tmp/notes.txt" (Right "notes\n")) opened
@@ -46,9 +156,37 @@ main = do
       [window] -> maybe False (not . null . workspaceStatusControls) (windowWorkspace window)
       _ -> False
 
-  let selectedFirst = applyEvent (TabSelected firstDocumentTabKey) openedTwice
-      edited = applyEvent (TextChanged firstDocumentEditorKey "module New where\n") selectedFirst
+  let selectFirst = application.appHandleEvent (TabSelected firstDocumentTabKey) openedTwice
+      selectedFirst = applyTransaction selectFirst openedTwice
+      editText =
+        application.appHandleEvent
+          (TextChanged firstDocumentEditorKey "module New where\n")
+          selectedFirst
+      edited = applyTransaction editText selectedFirst
       editedView = application.appView edited
+  assertEqual
+    "tab selection uses its named property"
+    [PropertyId "selectedTab"]
+    (actionPropertyIds selectFirst.transactionAction)
+  assertEqual
+    "controlled document binding reports every qualified child property"
+    [ PropertyId "documents.1000.documentCloseAfterSave"
+    , PropertyId "documents.1000.documentContents"
+    , PropertyId "documents.1000.documentRevision"
+    , PropertyId "documents.1000.documentStatus"
+    ]
+    (actionPropertyIds editText.transactionAction)
+  assertEqual
+    "document binding keeps its coalescing policy"
+    (Coalesce (UndoGroup "edit-document-1000"))
+    editText.transactionUndo
+  let firstClosedBeforeStaleEdit =
+        applyEvent (TabCloseRequested firstDocumentTabKey) selectedFirst
+      staleEditApplied = applyTransaction editText firstClosedBeforeStaleEdit
+  assertEqual
+    "a lifted stale document edit never retargets the remaining document"
+    ["notes\n"]
+    (fmap (.textEditorText) (textEditorSpecs (application.appView staleEditApplied).appWindows))
   assert "edited active tab updates shared window title" (any windowIsEdited editedView.appWindows)
   assert "Save enabled for selected edited document" (isCommandEnabled saveCommand editedView.appCommands)
   assert "Haskell document receives a generic syntax presentation layer" $
@@ -67,6 +205,10 @@ main = do
     "Save command effect"
     [WriteTextFile (EffectKey 1000) "/tmp/example.hs" "module New where\n"]
     saveRequest.transactionEffects
+  assertEqual
+    "Save retains touched-property metadata alongside its effect"
+    [PropertyId "documents.1000.documentStatus"]
+    (actionPropertyIds saveRequest.transactionAction)
 
   let saving = applyTransaction saveRequest edited
       saved =
@@ -127,6 +269,23 @@ textEditorSpecs windows =
   | window <- windows
   , TextEditor editor <- windowLeafControls window
   ]
+
+assertProjectItems label expected model =
+  assertEqual label expected actual
+  where
+    actual =
+      [ ( item.collectionItemKey
+        , item.collectionItemLabel
+        , item.collectionItemDepth
+        , item.collectionItemIcon
+        , item.collectionItemExpandable
+        , item.collectionItemExpanded
+        )
+      | window <- (application.appView model).appWindows
+      , TreeView collection <- windowLeafControls window
+      , collection.collectionControlKey == projectTreeKey
+      , item <- collection.collectionControlItems
+      ]
 
 textIn :: String -> Text.Text -> Bool
 textIn needle = Text.isInfixOf (Text.pack needle)
