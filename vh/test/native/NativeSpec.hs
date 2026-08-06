@@ -5,6 +5,7 @@ module Main (main) where
 
 import Control.Exception (bracket)
 import Control.Monad (unless)
+import Data.IORef (modifyIORef', newIORef, readIORef)
 import qualified Data.Text as Text
 import VisualHaskell
   ( applicationWithDocuments
@@ -34,8 +35,13 @@ import HaskeLUI.Backend.AppKit.Testing
 import HaskeLUI.Core
   ( App (..)
   , AppView (..)
+  , TraceEvent (..)
   )
-import HaskeLUI.Runtime (runApp)
+import HaskeLUI.Runtime
+  ( RuntimeOptions (..)
+  , defaultRuntimeOptions
+  , runAppWith
+  )
 
 expectedContents :: String
 expectedContents = "module Saved where\nanswer = 42\n"
@@ -59,12 +65,27 @@ main =
             ]
     unless (length (testApplication.appView testApplication.appInitialModel).appWindows == 1) $
       error "native text editor fixture must begin with exactly one workspace window"
-    runApp (appKitBackendWithTextEditorTest testSpec) testApplication
+    traces <- newIORef ([] :: [TraceEvent])
+    runAppWith
+      (defaultRuntimeOptions {runtimeTraceSink = \event -> modifyIORef' traces (<> [event])})
+      (appKitBackendWithTextEditorTest testSpec)
+      testApplication
     actualContents <- readFile path
     counters <- queryAppKitDebugCounters
     lastFailure <- queryAppKitLastTestFailure
-    unless (counters.debugTestFailures == 0) $
-      error ("native text editor validation failed: " <> show lastFailure)
+    captured <- readIORef traces
+    unless (counters.debugTestFailures == 0) $ do
+      error ("native text editor validation failed: " <> show lastFailure <> "; traces: " <> show captured)
+    unless
+      ( length
+          [ ()
+          | event <- captured
+          , event.traceOperation == "event.backend"
+          , lookup "kind" event.traceFields == Just "pane-state-changed"
+          ]
+          >= 2
+      ) $
+      error ("native pane resize did not reach the typed runtime event stream: " <> show captured)
     unless (actualContents == expectedContents) $
       error ("native Save wrote unexpected contents: " <> show actualContents)
     unless (appKitResourcesReleased counters) $

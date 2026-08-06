@@ -1,0 +1,90 @@
+cradle:
+  stack:
+    - path: ./packages/haskelui-core/src
+      component: haskelui-core:lib
+    - path: ./packages/haskelui-core/test
+      component: haskelui-core:test:haskelui-core-test
+    - path: ./packages/haskelui-runtime/src
+      component: haskelui-runtime:lib
+    - path: ./packages/haskelui-runtime/test
+      component: haskelui-runtime:test:haskelui-runtime-test
+
+    - path: ./backends/headless/haskelui-backend-headless/src
+      component: haskelui-backend-headless:lib
+    - path: ./backends/headless/haskelui-backend-headless/test
+      component: haskelui-backend-headless:test:haskelui-backend-headless-test
+    - path: ./backends/macos/haskelui-backend-appkit/src
+      component: haskelui-backend-appkit:lib
+    - path: ./backends/macos/haskelui-backend-appkit/test
+      component: haskelui-backend-appkit:test:haskelui-backend-appkit-test
+
+    - path: ./examples/appkit-vertical/src
+      component: haskelui-example-appkit-vertical:lib
+    - path: ./examples/appkit-vertical/app
+      component: haskelui-example-appkit-vertical:exe:haskelui-appkit-vertical
+    - path: ./examples/appkit-vertical/test
+      component: haskelui-example-appkit-vertical:test:appkit-vertical-native-test
+    - path: ./examples/control-gallery/src
+      component: haskelui-example-control-gallery:lib
+    - path: ./examples/control-gallery/app
+      component: haskelui-example-control-gallery:exe:haskelui-control-gallery
+    - path: ./examples/control-gallery/test/model
+      component: haskelui-example-control-gallery:test:control-gallery-model-test
+    - path: ./examples/control-gallery/test/native
+      component: haskelui-example-control-gallery:test:control-gallery-native-test
+    - path: ./examples/drawing-primitives/src
+      component: haskelui-example-drawing-primitives:lib
+    - path: ./examples/drawing-primitives/app
+      component: haskelui-example-drawing-primitives:exe:haskelui-drawing-primitives
+    - path: ./examples/drawing-primitives/test/native
+      component: haskelui-example-drawing-primitives:test:drawing-primitives-native-test
+    - path: ./examples/drawing-primitives/test
+      component: haskelui-example-drawing-primitives:test:drawing-primitives-model-test
+
+    - path: ./vh/src
+      component: visual-haskell:lib
+    - path: ./vh/app
+      component: visual-haskell:exe:vh
+    - path: ./vh/test/model
+      component: visual-haskell:test:vh-model-test
+    - path: ./vh/test/native
+      component: visual-haskell:test:vh-native-test
+    - path: ./vh/test/explorer-native
+      component: visual-haskell:test:vh-explorer-native-test
+    - path: ./vh/test/workspace
+      component: visual-haskell:test:vh-workspace-persistence-test
+    - path: ./vh/test/analysis-service
+      component: visual-haskell:test:vh-analysis-service-test
+    - path: ./vh/packages/semantic-model/src
+      component: visual-haskell-semantic-model:lib
+    - path: ./vh/packages/semantic-model/test
+      component: visual-haskell-semantic-model:test:visual-haskell-semantic-model-test
+    - path: ./vh/packages/analysis-protocol/src
+      component: visual-haskell-analysis-protocol:lib
+    - path: ./vh/packages/analysis-protocol/test
+      component: visual-haskell-analysis-protocol:test:visual-haskell-analysis-protocol-test
+    - path: ./vh/packages/analysis-client/src
+      component: visual-haskell-analysis-client:lib
+    - path: ./vh/packages/analysis-client/test
+      component: visual-haskell-analysis-client:test:visual-haskell-analysis-client-test
+    - path: ./vh/packages/textmate/src
+      component: visual-haskell-textmate:lib
+    - path: ./vh/packages/textmate/test
+      component: visual-haskell-textmate:test:visual-haskell-textmate-test
+    - path: ./vh/workers/fake/app
+      component: visual-haskell-analysis-fake-worker:exe:visual-haskell-analysis-fake-worker
+    - path: ./vh/workers/ghc-9.10/src
+      component: visual-haskell-analysis-ghc910:lib
+    - path: ./vh/workers/ghc-9.10/app
+      component: visual-haskell-analysis-ghc910:exe:visual-haskell-analysis-ghc910
+    - path: ./vh/workers/ghc-9.10/test
+      component: visual-haskell-analysis-ghc910:test:visual-haskell-analysis-ghc-910-test
+
+    - path: ./spikes/property-api/src
+      component: haskelui-property-spike:lib
+    - path: ./spikes/property-api/test
+      component: haskelui-property-spike:test:property-api-test
+    - path: ./spikes/public-api/src
+      component: haskelui-public-api-spike:lib
+    - path: ./spikes/public-api/test
+      component: haskelui-public-api-spike:test:public-api-test

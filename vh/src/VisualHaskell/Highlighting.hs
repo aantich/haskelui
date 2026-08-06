@@ -33,48 +33,55 @@ data SyntaxClass
 syntaxLayerKey :: TextLayerKey
 syntaxLayerKey = TextLayerKey 1
 
+-- | Foreground/background are deliberately inherited from the native editor.
+-- AppKit therefore uses dynamic text/text-background semantic colors without
+-- waiting for an application event; syntax layers use the reported scheme.
 codeEditorBaseStyle :: TextStyle
 codeEditorBaseStyle =
   mempty
-    { textForeground = Just (RGBA 0.12 0.13 0.16 1)
-    , textBackground = Just (RGBA 0.98 0.98 0.97 1)
-    , textFontFamily = Just MonospaceFont
+    { textFontFamily = Just MonospaceFont
     , textFontSize = Just 13
     , textFontWeight = Just Regular
     , textFontSlant = Just Upright
     }
 
-haskellSyntaxLayer :: TextRevision -> Text -> TextLayer
-haskellSyntaxLayer revision source =
+haskellSyntaxLayer :: ColorScheme -> TextRevision -> Text -> TextLayer
+haskellSyntaxLayer scheme revision source =
   TextLayer
     { textLayerKey = syntaxLayerKey
     , textLayerRevision = revision
-    , textLayerSpans = fmap (fmap syntaxStyle) (highlightHaskell source)
+    , textLayerSpans = fmap (fmap (syntaxStyle scheme)) (highlightHaskell source)
     }
 
-syntaxStyle :: SyntaxClass -> TextStyle
-syntaxStyle syntaxClass =
+syntaxStyle :: ColorScheme -> SyntaxClass -> TextStyle
+syntaxStyle scheme syntaxClass =
   case syntaxClass of
     SyntaxKeyword ->
       mempty
-        { textForeground = Just (RGBA 0.48 0.18 0.58 1)
+        { textForeground = Just (schemeColor scheme (RGBA 0.48 0.18 0.58 1) (RGBA 0.78 0.54 0.88 1))
         , textFontWeight = Just SemiBold
         }
     SyntaxComment ->
       mempty
-        { textForeground = Just (RGBA 0.18 0.43 0.24 1)
+        { textForeground = Just (schemeColor scheme (RGBA 0.18 0.43 0.24 1) (RGBA 0.42 0.72 0.48 1))
         , textFontSlant = Just Italic
         }
     SyntaxString ->
-      mempty {textForeground = Just (RGBA 0.72 0.16 0.18 1)}
+      mempty {textForeground = Just (schemeColor scheme (RGBA 0.72 0.16 0.18 1) (RGBA 0.94 0.48 0.45 1))}
     SyntaxCharacter ->
-      mempty {textForeground = Just (RGBA 0.72 0.16 0.18 1)}
+      mempty {textForeground = Just (schemeColor scheme (RGBA 0.72 0.16 0.18 1) (RGBA 0.94 0.48 0.45 1))}
     SyntaxNumber ->
-      mempty {textForeground = Just (RGBA 0.12 0.30 0.72 1)}
+      mempty {textForeground = Just (schemeColor scheme (RGBA 0.12 0.30 0.72 1) (RGBA 0.48 0.68 0.96 1))}
     SyntaxTypeName ->
-      mempty {textForeground = Just (RGBA 0.02 0.42 0.52 1)}
+      mempty {textForeground = Just (schemeColor scheme (RGBA 0.02 0.42 0.52 1) (RGBA 0.40 0.78 0.86 1))}
     SyntaxOperator ->
-      mempty {textForeground = Just (RGBA 0.64 0.30 0.08 1)}
+      mempty {textForeground = Just (schemeColor scheme (RGBA 0.64 0.30 0.08 1) (RGBA 0.90 0.64 0.36 1))}
+
+schemeColor :: ColorScheme -> Color -> Color -> Color
+schemeColor scheme light dark =
+  case scheme of
+    LightColorScheme -> light
+    DarkColorScheme -> dark
 
 highlightHaskell :: Text -> [TextSpan SyntaxClass]
 highlightHaskell = go 0 . Text.unpack

@@ -193,6 +193,16 @@ receiveEvent dispatch drainRuntime _ eventKind identity textPointer =
       path <- decodeText textPointer
       dispatch (ProjectFolderChosen (Text.unpack path))
     20 -> drainRuntime
+    21 -> do
+      payload <- decodeText textPointer
+      dispatch
+        ( SystemColorSchemeChanged $
+            if payload == "dark" then DarkColorScheme else LightColorScheme
+        )
+    22 -> do
+      payload <- decodeText textPointer
+      forM_ (decodePaneState payload) $ \paneState ->
+        dispatch (PaneStateChanged (PaneKey identity) paneState)
     _ -> pure ()
 
 readText :: Read value => Text -> Maybe value
@@ -202,6 +212,19 @@ decodeToggle :: Text -> ToggleValue
 decodeToggle "0" = ToggleOff
 decodeToggle "-1" = ToggleMixed
 decodeToggle _ = ToggleOn
+
+decodePaneState :: Text -> Maybe PaneState
+decodePaneState payload =
+  case Text.splitOn "|" payload of
+    [visibilityText, extentText] -> do
+      visibility <-
+        case visibilityText of
+          "visible" -> Just PaneVisible
+          "collapsed" -> Just PaneCollapsed
+          _ -> Nothing
+      extent <- readText extentText
+      pure (PaneState visibility (Just extent))
+    _ -> Nothing
 
 decodeWords :: Text -> [Word64]
 decodeWords value =
@@ -382,7 +405,10 @@ configureWorkspaceStructure window spec = do
       window
       pane.workspacePaneKey.unPaneKey
       (encodePaneRole pane.workspacePaneRole)
+      (encodeOptionalExtent pane.workspacePaneSizing.paneMinimumExtent)
       (realToFrac (paneExtentForLayout pane))
+      (encodeOptionalExtent pane.workspacePaneSizing.paneMaximumExtent)
+      (realToFrac pane.workspacePaneSizing.paneStretchWeight)
       (booleanInt (pane.workspacePaneState.paneVisibility == PaneCollapsed))
     c_workspaceItemSet
       window
@@ -427,6 +453,9 @@ paneExtentForLayout pane =
   fromMaybe 0 $
     pane.workspacePaneState.paneExtent
       <|> pane.workspacePaneSizing.panePreferredExtent
+
+encodeOptionalExtent :: Maybe Double -> CDouble
+encodeOptionalExtent = realToFrac . fromMaybe (-1)
 
 encodePaneRole :: PaneRole -> CInt
 encodePaneRole SidebarPane = 0

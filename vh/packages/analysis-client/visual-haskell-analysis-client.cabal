@@ -1,0 +1,71 @@
+cabal-version: 2.2
+
+-- This file has been generated from package.yaml by hpack version 0.39.6.
+--
+-- see: https://github.com/sol/hpack
+
+name:           visual-haskell-analysis-client
+version:        0.1.0.0
+synopsis:       Supervised worker-process client for Visual Haskell analysis
+description:    Starts versioned analysis workers, validates handshakes, routes framed messages, and replays authoritative workspace snapshots after restart.
+category:       Development
+homepage:       https://github.com/aantich/haskelui#readme
+bug-reports:    https://github.com/aantich/haskelui/issues
+author:         Visual Haskell contributors
+maintainer:     Visual Haskell contributors
+copyright:      2026 Visual Haskell contributors
+license:        BSD-3-Clause
+build-type:     Simple
+
+source-repository head
+  type: git
+  location: https://github.com/aantich/haskelui
+
+library
+  exposed-modules:
+      VisualHaskell.Analysis.Acceptance
+      VisualHaskell.Analysis.Client
+  other-modules:
+      Paths_visual_haskell_analysis_client
+  autogen-modules:
+      Paths_visual_haskell_analysis_client
+  hs-source-dirs:
+      src
+  ghc-options: -Wall -Wcompat
+  build-depends:
+      async
+    , base >=4.20.2 && <4.21
+    , bytestring
+    , containers
+    , process
+    , stm
+    , text
+    , visual-haskell-analysis-protocol
+    , visual-haskell-semantic-model
+  default-language: Haskell2010
+
+test-suite visual-haskell-analysis-client-test
+  type: exitcode-stdio-1.0
+  main-is: Spec.hs
+  other-modules:
+      Paths_visual_haskell_analysis_client
+  autogen-modules:
+      Paths_visual_haskell_analysis_client
+  hs-source-dirs:
+      test
+  ghc-options: -Wall -Wcompat -threaded
+  build-tool-depends:
+      visual-haskell-analysis-fake-worker:visual-haskell-analysis-fake-worker
+  build-depends:
+      async
+    , base >=4.20.2 && <4.21
+    , bytestring
+    , containers
+    , directory
+    , process
+    , stm
+    , text
+    , visual-haskell-analysis-client
+    , visual-haskell-analysis-protocol
+    , visual-haskell-semantic-model
+  default-language: Haskell2010

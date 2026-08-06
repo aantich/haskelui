@@ -509,6 +509,37 @@ application =
     }
 ```
 
+Visual Haskell is the repository's production example of this boundary. Its
+VH-owned adapter exposes semantic commands without leaking framing or GHC
+values into HaskeLUI:
+
+```haskell
+data AnalysisCommand
+  = ConfigureAnalysisWorkspace WorkspaceGeneration WorkspaceRequest
+  | SelectAnalysisComponent WorkspaceGeneration WorkspaceId ComponentId
+  | UpsertAnalysisDocument
+      WorkspaceGeneration WorkspaceId (Maybe SessionId) DocumentSnapshot
+  | CloseAnalysisDocument
+      WorkspaceGeneration WorkspaceId (Maybe SessionId) DocumentId
+  | RequestDocumentAnalysis
+      WorkspaceGeneration WorkspaceId (Maybe SessionId) DocumentSnapshot
+  | ReloadAnalysisConfiguration
+      WorkspaceGeneration (Maybe WorkspaceId) (Maybe SessionId)
+  | RestartAnalysisWorker
+
+(compilerService, compilerEndpoint) =
+  analysisService
+    (defaultAnalysisConfiguration "visual-haskell-analysis-ghc910")
+    compilerExternalEvent
+```
+
+The adapter converts commands to the versioned worker protocol, launches the
+supervised client, and converts every client callback back to an
+`ExternalEvent`. The Visual Haskell reducer then rejects a result unless its
+worker generation, workspace generation, component session, document,
+revision, and content hash all match the current model. This is the recommended
+pattern for any long-lived process whose obsolete output must be harmless.
+
 #### Declarative subscriptions
 
 A subscription is keyed and fingerprinted desired state:
@@ -551,6 +582,22 @@ batch. Tests or specialized applications can call `runAppWith` and set
 cooperative task, service, subscription, and restart-timer cancellation before
 releasing the backend (two seconds by default). Late events remain invalid even
 if arbitrary uninterruptible `IO` outlives that grace period.
+
+`runtimeTraceSink` accepts structured `TraceEvent` values. It defaults to
+`noTrace`; applications can install one sink for runtime, backend, and domain
+services:
+
+```haskell
+options = defaultRuntimeOptions { runtimeTraceSink = myTraceSink }
+
+runAppWith options backend application
+```
+
+The runtime reports event acceptance, transaction descriptions/touched
+properties, effect and render boundaries, task/service/subscription
+generations, queue results, restarts, and shutdown. Keep payload policy in the
+producer: log identity, revision, hash, size, and outcome rather than user text.
+See [diagnostics and debug logging](design/diagnostics-and-debug-logging.md).
 
 The AppKit backend schedules drains on its main dispatch queue. Other native
 backends must provide the equivalent dispatcher through
@@ -819,6 +866,13 @@ Each pane declares:
   stretch weight.
 - Model-owned `PaneState`, including visibility and the last committed extent.
 - A `WorkspaceItemSpec` containing controls or a tab group.
+
+Native divider drags commit a typed `PaneStateChanged` event at the end of the
+gesture. The application updates its `PaneState`, after which reconciliation
+and persistence use the new extent. Backends suppress these callbacks while
+applying model-owned layout so a render cannot create a resize feedback loop.
+Minimum and maximum extents remain active native drag constraints; panes with
+positive stretch weight absorb window-size changes before fixed sidebars do.
 
 Pane identity and item identity are separate. This permits moving the same
 logical editor or visualization between the center and inspector panes without
@@ -1612,9 +1666,12 @@ application/document-service work; filesystem watching can now be implemented
 as a declarative subscription.
 
 Visual Haskell is the complete persistence implementation. It uses an optional startup
-read for the per-user `last-workspace` locator, then restores the selected
-folder's versioned `.vihs` file. Tabs, active file, expanded folders, explorer
-selection, and pane state are stored as safe project-relative paths. See
+read for the per-user `last-workspace` locator and user-owned trust registry,
+then restores the selected folder's versioned `.vihs` file. Tabs, active file,
+expanded folders, explorer selection, pane state, and the requested analysis
+trust mode are stored as safe portable state. Compiler trust is enabled only
+when `.vihs` requests it and the independent user registry authorizes the
+normalized root, so project-controlled metadata cannot self-trust. See
 [Visual Haskell workspace persistence](design/visual-haskell-workspaces.md).
 
 ## 14. Structuring a real application
@@ -1796,6 +1853,14 @@ application framework. Plan around these current boundaries:
   subscriptions, bounded/coalescing queues, timeouts, scoped generations, and
   AppKit UI-thread scheduling are implemented. `AsyncValidation control` is
   still a future validation-specific layer over this substrate.
+- Visual Haskell's compiler-independent semantic model, bounded protocol,
+  supervised process client, fake worker, GHC-9.10.3 worker, typed HaskeLUI
+  service adapter, and strict model acceptance are implemented. They
+  deliberately remain VH-owned rather than HaskeLUI APIs. Current compiler
+  analysis uses conservative full snapshots and rechecks every open Haskell
+  module after an edit; cancellation, incremental invalidation, semantic
+  editor overlays, hover, navigation, and component-selection UI are the next
+  product layers.
 - Transaction undo policies are represented, but a complete application undo
   interpreter is not.
 - Compatibility file effects are synchronous and UTF-8-only; new background

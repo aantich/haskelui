@@ -39,6 +39,7 @@ main = do
           , workspaceSelectedExplorerEntry = Just "src/Main.hs"
           , workspaceNavigatorPane = PaneState PaneVisible (Just 246)
           , workspaceInspectorPane = PaneState PaneCollapsed (Just 300)
+          , workspaceAnalysisTrusted = True
           }
   assertEqual
     "workspace JSON round-trips its versioned portable state"
@@ -88,7 +89,9 @@ main = do
   let persistedApplication = applicationWithWorkspaceRegistry "/tmp/visual-haskell/last-workspace"
   assertEqual
     "Visual Haskell asks for the last-workspace locator at startup"
-    [ReadOptionalTextFile "/tmp/visual-haskell/last-workspace"]
+    [ ReadOptionalTextFile "/tmp/visual-haskell/last-workspace"
+    , ReadOptionalTextFile "/tmp/visual-haskell/trusted-workspaces.json"
+    ]
     persistedApplication.appInitialEffects
   let startupRestore =
         persistedApplication.appHandleEvent
@@ -100,6 +103,51 @@ main = do
     , ReadOptionalTextFile "/tmp/project/.vihs"
     ]
     startupRestore.transactionEffects
+  let startupRootModel = applyTransaction startupRestore persistedApplication.appInitialModel
+      trustedWorkspaceRequest =
+        workspaceState
+          { workspaceOpenFiles = []
+          , workspaceActiveFile = Nothing
+          , workspaceExpandedFolders = ["."]
+          , workspaceSelectedExplorerEntry = Nothing
+          }
+      metadataRestore =
+        persistedApplication.appHandleEvent
+          ( OptionalTextFileRead
+              "/tmp/project/.vihs"
+              (Right (Just (encodeWorkspaceState trustedWorkspaceRequest)))
+          )
+          startupRootModel
+      awaitingTrust = applyTransaction metadataRestore startupRootModel
+      trustUpdate =
+        persistedApplication.appHandleEvent
+          (CommandInvoked (CommandId 13))
+          awaitingTrust
+      trustedModel = applyTransaction trustUpdate awaitingTrust
+  assert
+    "project metadata cannot grant compiler trust without user authorization"
+    (isCommandEnabled (CommandId 13) (persistedApplication.appView awaitingTrust).appCommands)
+  assert
+    "trusting writes both user authority and the workspace restoration preference"
+    ( any
+        ( \case
+            WriteTextFileAtomically _ "/tmp/visual-haskell/trusted-workspaces.json" _ -> True
+            _ -> False
+        )
+        trustUpdate.transactionEffects
+        && any
+          ( \case
+              WriteTextFileAtomically _ "/tmp/project/.vihs" contents ->
+                case decodeWorkspaceState contents of
+                  Right state -> state.workspaceAnalysisTrusted
+                  Left _ -> False
+              _ -> False
+          )
+          trustUpdate.transactionEffects
+    )
+  assert
+    "trusted workspace disables the trust command immediately"
+    (not (isCommandEnabled (CommandId 13) (persistedApplication.appView trustedModel).appCommands))
   let rememberedWorkspace =
         persistedApplication.appHandleEvent
           (ProjectFolderChosen "/tmp/remember-me")

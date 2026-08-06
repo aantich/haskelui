@@ -123,15 +123,41 @@ data BackendSession = BackendSession
 data RuntimeOptions = RuntimeOptions
   { runtimeMaximumBatchSize :: !Int
   , runtimeShutdownGraceMilliseconds :: !Word64
+  , runtimeTraceSink :: !TraceSink
   }
-  deriving stock (Eq, Show)
+
+-- Trace destinations are operational capabilities, not configuration
+-- identity. Equality and rendering deliberately compare/show only policy.
+instance Eq RuntimeOptions where
+  left == right =
+    left.runtimeMaximumBatchSize == right.runtimeMaximumBatchSize
+      && left.runtimeShutdownGraceMilliseconds == right.runtimeShutdownGraceMilliseconds
+
+instance Show RuntimeOptions where
+  show options =
+    "RuntimeOptions {runtimeMaximumBatchSize = "
+      <> show options.runtimeMaximumBatchSize
+      <> ", runtimeShutdownGraceMilliseconds = "
+      <> show options.runtimeShutdownGraceMilliseconds
+      <> ", runtimeTraceSink = <trace-sink>}"
 
 defaultRuntimeOptions :: RuntimeOptions
 defaultRuntimeOptions =
   RuntimeOptions
     { runtimeMaximumBatchSize = 128
     , runtimeShutdownGraceMilliseconds = 2000
+    , runtimeTraceSink = noTrace
     }
+
+runtimeTrace :: RuntimeOptions -> TraceSeverity -> Text.Text -> [(Text.Text, Text.Text)] -> IO ()
+runtimeTrace options severity operation =
+  trace options.runtimeTraceSink severity "haskelui.runtime" operation
+
+traceRuntime :: Runtime model -> TraceSeverity -> Text.Text -> [(Text.Text, Text.Text)] -> IO ()
+traceRuntime runtime = runtimeTrace runtime.runtimeOptions
+
+countText :: [value] -> Text.Text
+countText = Text.pack . show . length
 
 data EventSource
   = RuntimeSource
@@ -217,22 +243,35 @@ runApp = runAppWith defaultRuntimeOptions
 
 runAppWith :: RuntimeOptions -> Backend -> App model -> IO ()
 runAppWith options backend application = do
+  runtimeTrace options TraceInfo "runtime.start"
+    [ ("initialEffects", countText application.appInitialEffects)
+    , ("initialCommands", countText application.appInitialCommands)
+    , ("services", countText application.appServices)
+    ]
   let initialRawView = application.appView application.appInitialModel
   runtime <- newRuntime options application initialRawView
   session <- openBackend backend (postBackendEvent runtime)
   writeIORef runtime.runtimeSession (Just session)
+  traceRuntime runtime TraceInfo "backend.opened" []
 
   let initialResolved = fst (resolveAppViewLayouts initialRawView)
   session.backendRender initialResolved
+  traceRuntime runtime TraceDebug "render.initial"
+    [("windows", countText initialResolved.appWindows)]
   when (null initialResolved.appWindows) session.backendStop
   synchronizeViewOwnership runtime initialRawView
   startApplicationServices runtime
   executeRuntimeCommands runtime application.appInitialCommands
-  forM_ application.appInitialEffects (interpretEffect session (postBackendEvent runtime))
+  forM_ application.appInitialEffects (interpretEffect runtime session (postBackendEvent runtime))
   wakePendingRuntime runtime
 
+  traceRuntime runtime TraceInfo "backend.event-loop.start" []
   session.backendRun
-    `finally` (shutdownRuntime runtime `finally` session.backendShutdown)
+    `finally`
+      ( traceRuntime runtime TraceInfo "backend.event-loop.stop" []
+          >> (shutdownRuntime runtime `finally` session.backendShutdown)
+          >> traceRuntime runtime TraceInfo "runtime.stop" []
+      )
 
 newRuntime :: RuntimeOptions -> App model -> AppView -> IO (Runtime model)
 newRuntime options application initialView = do
@@ -393,11 +432,17 @@ takeOneEnvelope runtime = do
 processEnvelope :: Runtime model -> RuntimeEnvelope model -> IO Bool
 processEnvelope runtime = \case
   BackendEnvelope event -> do
+    traceRuntime runtime TraceDebug "event.backend" (uiEventTraceFields event)
     model <- readIORef runtime.runtimeModel
     commitTransaction runtime (runtime.runtimeApplication.appHandleEvent event model)
     pure True
   ExternalEnvelope source event -> do
     accepted <- acceptExternalSource runtime source
+    traceRuntime runtime (if accepted then TraceDebug else TraceWarning) "event.external"
+      [ ("description", externalEventDescription event)
+      , ("source", eventSourceText source)
+      , ("accepted", boolText accepted)
+      ]
     if not accepted
       then pure False
       else do
@@ -438,6 +483,16 @@ acceptExternalSource runtime source = do
 
 commitTransaction :: Runtime model -> Transaction model -> IO ()
 commitTransaction runtime update = do
+  traceRuntime runtime TraceDebug "transaction.commit"
+    [ ("description", maybe "<none>" id update.transactionDescription)
+    , ("action", actionDescription update.transactionAction)
+    , ( "properties"
+      , Text.intercalate "," (fmap unPropertyId (actionPropertyIds update.transactionAction))
+      )
+    , ("effects", countText update.transactionEffects)
+    , ("commands", countText update.transactionCommands)
+    , ("undo", Text.pack (show update.transactionUndo))
+    ]
   model <- readIORef runtime.runtimeModel
   let updated = applyTransaction update model
       desired = runtime.runtimeApplication.appView updated
@@ -452,7 +507,7 @@ executePendingEffects runtime = do
   pending <- atomicModifyIORef' runtime.runtimePendingEffects (\effects -> ([], effects))
   maybeSession <- readIORef runtime.runtimeSession
   forM_ maybeSession $ \session ->
-    traverse_ (interpretEffect session (postBackendEvent runtime)) pending
+    traverse_ (interpretEffect runtime session (postBackendEvent runtime)) pending
 
 renderCurrentView :: Runtime model -> IO ()
 renderCurrentView runtime = do
@@ -460,6 +515,15 @@ renderCurrentView runtime = do
   maybeSession <- readIORef runtime.runtimeSession
   forM_ maybeSession $ \session -> do
     let resolved = fst (resolveAppViewLayouts desired)
+    traceRuntime runtime TraceDebug "render.commit"
+      [ ("windows", countText resolved.appWindows)
+      , ( "controls"
+        , Text.pack . show . sum $
+            [ length (windowLeafControls window)
+            | window <- resolved.appWindows
+            ]
+        )
+      ]
     session.backendRender resolved
     when (null resolved.appWindows) session.backendStop
 
@@ -500,17 +564,35 @@ executeRuntimeCommands runtime = traverse_ (executeRuntimeCommand runtime)
 
 executeRuntimeCommand :: Runtime model -> RuntimeCommand model -> IO ()
 executeRuntimeCommand runtime = \case
-  StartTaskCommand key options description run onOutcome ->
+  StartTaskCommand key options description run onOutcome -> do
+    traceRuntime runtime TraceDebug "command.task.start"
+      [ ("key", key.unTaskKey)
+      , ("description", description)
+      , ("scope", Text.pack (show options.taskScope))
+      , ("policy", Text.pack (show options.taskStartPolicy))
+      ]
     startRuntimeTask runtime key options description run onOutcome
-  CancelTaskCommand key -> cancelTaskByKey runtime key
-  CancelScopeCommand scope -> cancelTasksInScope runtime scope
+  CancelTaskCommand key -> do
+    traceRuntime runtime TraceDebug "command.task.cancel" [("key", key.unTaskKey)]
+    cancelTaskByKey runtime key
+  CancelScopeCommand scope -> do
+    traceRuntime runtime TraceDebug "command.scope.cancel" [("scope", Text.pack (show scope))]
+    cancelTasksInScope runtime scope
   SendServiceCommand endpoint command onResult -> do
     result <- enqueueServiceCommand runtime endpoint command
+    traceRuntime runtime (serviceSendSeverity result) "command.service.send"
+      [ ("service", (serviceEndpointKey endpoint).unServiceKey)
+      , ("result", Text.pack (show result))
+      ]
     traverse_ (postExternalEvent runtime RuntimeSource . ($ result)) onResult
-  RestartServiceCommand key -> restartServiceNow runtime key
-  OpenLifetimeCommand key ->
+  RestartServiceCommand key -> do
+    traceRuntime runtime TraceInfo "command.service.restart" [("service", key.unServiceKey)]
+    restartServiceNow runtime key
+  OpenLifetimeCommand key -> do
+    traceRuntime runtime TraceDebug "command.lifetime.open" [("key", key.unLifetimeKey)]
     modifyIORef' runtime.runtimeOpenLifetimes (Set.insert key)
   CloseLifetimeCommand key -> do
+    traceRuntime runtime TraceDebug "command.lifetime.close" [("key", key.unLifetimeKey)]
     modifyIORef' runtime.runtimeOpenLifetimes (Set.delete key)
     cancelTasksInScope runtime (LifetimeScope key)
 
@@ -522,8 +604,11 @@ startRuntimeTask
   -> (CancellationToken -> IO result)
   -> (TaskOutcome result -> ExternalEvent model)
   -> IO ()
-startRuntimeTask runtime key options _description run onOutcome = do
+startRuntimeTask runtime key options description run onOutcome = do
   alive <- taskScopeAlive runtime options.taskScope
+  unless alive $
+    traceRuntime runtime TraceWarning "task.skipped"
+      [("key", key.unTaskKey), ("reason", "scope-not-alive")]
   when alive $ do
     tasks <- readIORef runtime.runtimeTasks
     let existing = Map.lookup key tasks
@@ -535,11 +620,21 @@ startRuntimeTask runtime key options _description run onOutcome = do
         (_, Nothing) -> pure True
     when shouldStart $ do
       generation <- nextGeneration runtime
+      traceRuntime runtime TraceInfo "task.started"
+        [ ("key", key.unTaskKey)
+        , ("description", description)
+        , ("generation", generationText generation)
+        ]
       cancellation <- newTVarIO False
       let pending = ActiveTask generation options.taskScope cancellation Nothing
       writeIORef runtime.runtimeTasks (Map.insert key pending tasks)
       worker <- async $ do
         outcome <- runTask options cancellation run
+        traceRuntime runtime (taskOutcomeSeverity outcome) "task.finished"
+          [ ("key", key.unTaskKey)
+          , ("generation", generationText generation)
+          , ("outcome", taskOutcomeText outcome)
+          ]
         postExternalEvent runtime (TaskSource key generation options.taskScope) (onOutcome outcome)
       current <- readIORef runtime.runtimeTasks
       case Map.lookup key current of
@@ -631,8 +726,14 @@ startApplicationServices runtime =
   traverse_ (\spec -> startServiceSpec runtime spec 0) (Map.elems runtime.runtimeServiceSpecs)
 
 startServiceSpec :: Runtime model -> Service model -> Int -> IO ()
-startServiceSpec runtime spec@(Service key _ options onStatus run) restartCount = do
+startServiceSpec runtime spec@(Service key description options onStatus run) restartCount = do
   generation <- nextGeneration runtime
+  traceRuntime runtime TraceInfo "service.started"
+    [ ("service", key.unServiceKey)
+    , ("description", description)
+    , ("generation", generationText generation)
+    , ("restartCount", Text.pack (show restartCount))
+    ]
   cancellation <- newTVarIO False
   queue <- newTBQueueIO (fromIntegral (max 1 options.serviceCommandCapacity))
   let source = ServiceSource key generation
@@ -748,6 +849,11 @@ handleServiceExit
   -> ServiceExit
   -> IO Bool
 handleServiceExit runtime key generation serviceExit = do
+  traceRuntime runtime (serviceExitSeverity serviceExit) "service.exited"
+    [ ("service", key.unServiceKey)
+    , ("generation", generationText generation)
+    , ("exit", Text.pack (show serviceExit))
+    ]
   services <- readIORef runtime.runtimeServices
   case Map.lookup key services of
     Just (ServiceRunningSlot running)
@@ -755,6 +861,11 @@ handleServiceExit runtime key generation serviceExit = do
           let (spec, restartCount) = runningServiceSpecAndRestarts running
           case serviceRestartDecision spec serviceExit restartCount of
             Just (attempt, delayMilliseconds) -> do
+              traceRuntime runtime TraceWarning "service.restart.scheduled"
+                [ ("service", key.unServiceKey)
+                , ("attempt", Text.pack (show attempt))
+                , ("delayMilliseconds", Text.pack (show delayMilliseconds))
+                ]
               timer <- async $ do
                 threadDelay (millisecondsToMicroseconds delayMilliseconds)
                 enqueueEnvelope runtime (QueuedDirect (RestartServiceEnvelope key generation attempt))
@@ -836,6 +947,7 @@ handleServiceRestart runtime key oldGeneration attempt = do
 
 restartServiceNow :: Runtime model -> ServiceKey -> IO ()
 restartServiceNow runtime key = do
+  traceRuntime runtime TraceInfo "service.restart.requested" [("service", key.unServiceKey)]
   services <- readIORef runtime.runtimeServices
   let maybeSpec =
         case Map.lookup key services of
@@ -873,6 +985,11 @@ synchronizeSubscriptions runtime = do
 startSubscriptionSpec :: Runtime model -> Subscription model -> IO ()
 startSubscriptionSpec runtime (Subscription key fingerprint start) = do
   generation <- nextGeneration runtime
+  traceRuntime runtime TraceInfo "subscription.started"
+    [ ("subscription", key.unSubscriptionKey)
+    , ("fingerprint", fingerprint.unSubscriptionFingerprint)
+    , ("generation", generationText generation)
+    ]
   cancellation <- newTVarIO False
   let source = SubscriptionSource key generation
       sink =
@@ -902,6 +1019,7 @@ invalidateActiveSubscription active = do
 
 shutdownRuntime :: Runtime model -> IO ()
 shutdownRuntime runtime = do
+  traceRuntime runtime TraceInfo "shutdown.begin" []
   writeIORef runtime.runtimeShuttingDown True
   atomically $ do
     writeTVar runtime.runtimeDrainScheduled False
@@ -920,11 +1038,18 @@ shutdownRuntime runtime = do
         catMaybes (fmap (.activeTaskThread) (Map.elems tasks))
           <> catMaybes (fmap (.activeSubscriptionThread) (Map.elems subscriptions))
           <> foldMap serviceSlotThreads (Map.elems services)
+  traceRuntime runtime TraceDebug "shutdown.cancel"
+    [ ("tasks", Text.pack (show (Map.size tasks)))
+    , ("subscriptions", Text.pack (show (Map.size subscriptions)))
+    , ("services", Text.pack (show (Map.size services)))
+    , ("threads", countText workers)
+    ]
   cancellationJobs <- traverse (async . cancel) workers
   void $
     timeout
       (millisecondsToMicroseconds runtime.runtimeOptions.runtimeShutdownGraceMilliseconds)
       (traverse_ waitCatch cancellationJobs)
+  traceRuntime runtime TraceInfo "shutdown.complete" []
 
 markServiceCancelled :: ServiceSlot model -> STM ()
 markServiceCancelled (ServiceRunningSlot (RunningService _ _ _ _ _ cancellation _)) =
@@ -936,8 +1061,150 @@ serviceSlotThreads (ServiceRunningSlot (RunningService _ _ _ _ _ _ worker)) = ma
 serviceSlotThreads (ServiceRestartPendingSlot _ _ _ timer) = [timer]
 serviceSlotThreads (ServiceStoppedSlot _ _) = []
 
-interpretEffect :: BackendSession -> (UIEvent -> IO ()) -> Effect -> IO ()
-interpretEffect session dispatch = \case
+eventSourceText :: EventSource -> Text.Text
+eventSourceText source =
+  case source of
+    RuntimeSource -> "runtime"
+    TaskSource key generation scope ->
+      "task:" <> key.unTaskKey <> ":" <> generationText generation <> ":" <> Text.pack (show scope)
+    ServiceSource key generation ->
+      "service:" <> key.unServiceKey <> ":" <> generationText generation
+    SubscriptionSource key generation ->
+      "subscription:" <> key.unSubscriptionKey <> ":" <> generationText generation
+
+generationText :: RuntimeGeneration -> Text.Text
+generationText = Text.pack . show . (.unRuntimeGeneration)
+
+boolText :: Bool -> Text.Text
+boolText True = "true"
+boolText False = "false"
+
+serviceSendSeverity :: ServiceSendResult -> TraceSeverity
+serviceSendSeverity result =
+  case result of
+    ServiceCommandQueued -> TraceDebug
+    ServiceCommandCoalesced -> TraceDebug
+    ServiceCommandDroppedOldest -> TraceWarning
+    ServiceCommandRejected -> TraceWarning
+    ServiceEndpointMismatch -> TraceError
+    ServiceUnavailable -> TraceWarning
+
+serviceExitSeverity :: ServiceExit -> TraceSeverity
+serviceExitSeverity exit =
+  case exit of
+    ServiceStoppedNormally -> TraceInfo
+    ServiceCancelled -> TraceDebug
+    ServiceFailed _ -> TraceError
+
+taskOutcomeSeverity :: TaskOutcome result -> TraceSeverity
+taskOutcomeSeverity outcome =
+  case outcome of
+    TaskSucceeded _ -> TraceInfo
+    TaskCancelled -> TraceDebug
+    TaskFailed _ -> TraceError
+
+taskOutcomeText :: TaskOutcome result -> Text.Text
+taskOutcomeText outcome =
+  case outcome of
+    TaskSucceeded _ -> "succeeded"
+    TaskCancelled -> "cancelled"
+    TaskFailed TaskTimedOut -> "timed-out"
+    TaskFailed TaskExecutorStopped -> "executor-stopped"
+    TaskFailed (TaskException _) -> "exception"
+
+uiEventTraceFields :: UIEvent -> [(Text.Text, Text.Text)]
+uiEventTraceFields event =
+  ("kind", uiEventKind event) :
+    case event of
+      CommandInvoked key -> [("command", Text.pack (show key.unCommandId))]
+      TextChanged key value -> keyFields key <> [("characters", Text.pack (show (Text.length value)))]
+      ControlInvoked key -> keyFields key
+      ToggleChanged key value -> keyFields key <> [("value", Text.pack (show value))]
+      ChoiceChanged key value -> keyFields key <> [("value", Text.pack (show value))]
+      NumberChanged key value -> keyFields key <> [("value", Text.pack (show value))]
+      DateChanged key value -> keyFields key <> [("value", Text.pack (show value))]
+      TimeChanged key value -> keyFields key <> [("value", Text.pack (show value))]
+      ColorChanged key value -> keyFields key <> [("value", Text.pack (show value))]
+      CollectionSelectionChanged key values ->
+        keyFields key <> [("selected", Text.pack (show (length values)))]
+      CollectionExpansionChanged key item expanded ->
+        keyFields key
+          <> [ ("item", Text.pack (show item.unCollectionItemKey))
+             , ("expanded", boolText expanded)
+             ]
+      DisclosureChanged key expanded -> keyFields key <> [("expanded", boolText expanded)]
+      PresentationClosed key result -> keyFields key <> [("result", Text.pack (show result))]
+      TabSelected key -> [("tab", Text.pack (show key.unTabKey))]
+      TabCloseRequested key -> [("tab", Text.pack (show key.unTabKey))]
+      PaneStateChanged key value -> [("pane", Text.pack (show key.unPaneKey)), ("state", Text.pack (show value))]
+      WindowCloseRequested key -> [("window", Text.pack (show key.unWindowKey))]
+      WindowActivated key -> [("window", Text.pack (show key.unWindowKey))]
+      SystemColorSchemeChanged scheme -> [("scheme", Text.pack (show scheme))]
+      TextFileChosen path -> [("path", Text.pack path)]
+      ProjectFolderChosen path -> [("path", Text.pack path)]
+      DirectoryRead path result ->
+        [("path", Text.pack path), ("result", either (const "error") (Text.pack . show . length) result)]
+      TextFileRead path result ->
+        [("path", Text.pack path), ("result", textReadResult result)]
+      OptionalTextFileRead path result ->
+        [("path", Text.pack path), ("result", optionalTextReadResult result)]
+      TextFileWritten key path contents result ->
+        [ ("effectKey", Text.pack (show key.unEffectKey))
+        , ("path", Text.pack path)
+        , ("characters", Text.pack (show (Text.length contents)))
+        , ("result", either (const "error") (const "ok") result)
+        ]
+  where
+    keyFields :: ElementKey -> [(Text.Text, Text.Text)]
+    keyFields key = [("element", Text.pack (show key.unElementKey))]
+    textReadResult = either (const "error") (\contents -> "ok:" <> Text.pack (show (Text.length contents)))
+    optionalTextReadResult =
+      either
+        (const "error")
+        (maybe "missing" (\contents -> "ok:" <> Text.pack (show (Text.length contents))))
+
+uiEventKind :: UIEvent -> Text.Text
+uiEventKind event =
+  case event of
+    CommandInvoked {} -> "command-invoked"
+    TextChanged {} -> "text-changed"
+    ControlInvoked {} -> "control-invoked"
+    ToggleChanged {} -> "toggle-changed"
+    ChoiceChanged {} -> "choice-changed"
+    NumberChanged {} -> "number-changed"
+    DateChanged {} -> "date-changed"
+    TimeChanged {} -> "time-changed"
+    ColorChanged {} -> "color-changed"
+    CollectionSelectionChanged {} -> "collection-selection-changed"
+    CollectionExpansionChanged {} -> "collection-expansion-changed"
+    DisclosureChanged {} -> "disclosure-changed"
+    PresentationClosed {} -> "presentation-closed"
+    TabSelected {} -> "tab-selected"
+    TabCloseRequested {} -> "tab-close-requested"
+    PaneStateChanged {} -> "pane-state-changed"
+    WindowCloseRequested {} -> "window-close-requested"
+    WindowActivated {} -> "window-activated"
+    SystemColorSchemeChanged {} -> "system-color-scheme-changed"
+    TextFileChosen {} -> "text-file-chosen"
+    ProjectFolderChosen {} -> "project-folder-chosen"
+    DirectoryRead {} -> "directory-read"
+    TextFileRead {} -> "text-file-read"
+    OptionalTextFileRead {} -> "optional-text-file-read"
+    TextFileWritten {} -> "text-file-written"
+
+interpretEffect :: Runtime model -> BackendSession -> (UIEvent -> IO ()) -> Effect -> IO ()
+interpretEffect runtime session dispatch effect = do
+  traceRuntime runtime TraceDebug "effect.start" (effectTraceFields effect)
+  attempted <- try (interpretEffectUnchecked session dispatch effect)
+  case attempted of
+    Right () -> traceRuntime runtime TraceDebug "effect.complete" (effectTraceFields effect)
+    Left (exception :: SomeException) -> do
+      traceRuntime runtime TraceError "effect.exception"
+        (effectTraceFields effect <> [("exception", Text.pack (displayException exception))])
+      throwIO exception
+
+interpretEffectUnchecked :: BackendSession -> (UIEvent -> IO ()) -> Effect -> IO ()
+interpretEffectUnchecked session dispatch = \case
   RequestOpenTextFiles -> session.backendRequestOpenTextFiles
   RequestOpenProjectFolder -> session.backendRequestOpenProjectFolder
   ReadDirectory path -> do
@@ -987,6 +1254,36 @@ interpretEffect session dispatch = \case
         case result of
           Left exception -> Left (Text.pack (displayException exception))
           Right () -> Right ()
+
+effectTraceFields :: Effect -> [(Text.Text, Text.Text)]
+effectTraceFields effect =
+  ("kind", effectKind effect) :
+    case effect of
+      RequestOpenTextFiles -> []
+      RequestOpenProjectFolder -> []
+      ReadDirectory path -> [("path", Text.pack path)]
+      ReadTextFile path -> [("path", Text.pack path)]
+      ReadOptionalTextFile path -> [("path", Text.pack path)]
+      WriteTextFile key path contents -> writeFields key path contents
+      WriteTextFileAtomically key path contents -> writeFields key path contents
+  where
+    writeFields :: EffectKey -> FilePath -> Text.Text -> [(Text.Text, Text.Text)]
+    writeFields key path contents =
+      [ ("effectKey", Text.pack (show key.unEffectKey))
+      , ("path", Text.pack path)
+      , ("characters", Text.pack (show (Text.length contents)))
+      ]
+
+effectKind :: Effect -> Text.Text
+effectKind effect =
+  case effect of
+    RequestOpenTextFiles -> "request-open-text-files"
+    RequestOpenProjectFolder -> "request-open-project-folder"
+    ReadDirectory {} -> "read-directory"
+    ReadTextFile {} -> "read-text-file"
+    ReadOptionalTextFile {} -> "read-optional-text-file"
+    WriteTextFile {} -> "write-text-file"
+    WriteTextFileAtomically {} -> "write-text-file-atomically"
 
 writeTextFileAtomically :: FilePath -> ByteString.ByteString -> IO ()
 writeTextFileAtomically path bytes =

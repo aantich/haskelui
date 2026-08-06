@@ -22,6 +22,11 @@ import VisualHaskell.WorkspaceState
   ( WorkspaceState (..)
   , decodeWorkspaceState
   )
+import VisualHaskell.TrustState
+  ( TrustRegistry (..)
+  , decodeTrustRegistry
+  )
+import qualified Data.Set as Set
 import VisualHaskell.Paths
   ( ensureVisualHaskellPaths
   , resolveVisualHaskellPaths
@@ -80,6 +85,7 @@ main =
 
     registryContents <- readFile registryPath
     workspaceContents <- readFile (workspaceRoot </> ".vihs")
+    trustContents <- readFile (fixtureRoot </> "state" </> "trusted-workspaces.json")
     workspaceNames <- listDirectory workspaceRoot
     assertEqual "last workspace locator" (workspaceRoot <> "\n") registryContents
     assert "atomic workspace write left no temporary sibling" $
@@ -91,6 +97,12 @@ main =
     assertEqual "saved tab order" ["src/Main.hs", "README.md"] savedState.workspaceOpenFiles
     assertEqual "saved active document" (Just "src/Main.hs") savedState.workspaceActiveFile
     assertEqual "saved expanded folders" [".", "src"] savedState.workspaceExpandedFolders
+    assert "saved workspace requests restoration of compiler trust" savedState.workspaceAnalysisTrusted
+    case decodeTrustRegistry (Text.pack trustContents) of
+      Left message -> error ("saved trust registry did not decode: " <> Text.unpack message)
+      Right registry ->
+        assert "user trust registry authorizes the workspace path" $
+          Set.member workspaceRoot registry.trustedWorkspaceRoots
     assertEqual
       "saved pane state"
       (PaneState PaneVisible (Just 252), PaneState PaneCollapsed (Just 318))
@@ -114,6 +126,8 @@ main =
         (projectItems restoredView)
     assert "workspace metadata stays hidden from the project tree" $
       all ((/= ".vihs") . (.collectionItemLabel)) (projectItems restoredView)
+    assert "restored trusted workspace is not downgraded to untrusted" $
+      all (not . Text.isInfixOf "workspace untrusted") (labelTexts restoredView)
     putStrLn "Visual Haskell workspace survives a complete runtime restart"
 
 testProductionTextMateIntegration :: FilePath -> FilePath -> IO ()
@@ -121,7 +135,8 @@ testProductionTextMateIntegration fixtureRoot providerHome = do
   configuration <- defaultTextMateConfiguration providerHome
   let sourcePath = fixtureRoot </> "workspace" </> "src" </> "Main.hs"
       registryPath = fixtureRoot </> "state" </> "textmate-last-workspace"
-      applicationValue = applicationWithEnvironment registryPath configuration
+      production = applicationWithEnvironment registryPath configuration
+      applicationValue = production {appServices = take 1 production.appServices}
   latestView <- newIORef (applicationValue.appView applicationValue.appInitialModel)
   runApp
     ( scriptedBackend latestView $ \dispatch -> do
@@ -240,6 +255,13 @@ projectItems view =
   , TreeView collection <- windowLeafControls window
   , collection.collectionControlKey == projectTreeKey
   , item <- collection.collectionControlItems
+  ]
+
+labelTexts :: AppView -> [Text.Text]
+labelTexts view =
+  [ contents
+  | window <- view.appWindows
+  , Label _ _ contents <- windowLeafControls window
   ]
 
 viewPanes :: AppView -> [WorkspacePaneSpec]

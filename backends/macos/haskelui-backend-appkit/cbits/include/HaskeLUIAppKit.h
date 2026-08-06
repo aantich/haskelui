@@ -31,7 +31,9 @@ typedef enum HaskeLUIMacEventKind {
   HaskeLUIMacEventCollectionExpansionChanged = 18,
   HaskeLUIMacEventProjectFolderChosen = 19,
   /* Backend-private wakeup; it is never exposed as a HaskeLUI UIEvent. */
-  HaskeLUIMacEventRuntimeWake = 20
+  HaskeLUIMacEventRuntimeWake = 20,
+  HaskeLUIMacEventSystemColorSchemeChanged = 21,
+  HaskeLUIMacEventPaneStateChanged = 22
 } HaskeLUIMacEventKind;
 
 typedef enum HaskeLUIMacCatalogControlKind {
@@ -172,7 +174,10 @@ void haskelui_macos_workspace_pane_set(
     HaskeLUIMacWindowRef window,
     uint64_t pane_identity,
     int32_t pane_role,
+    double minimum_extent,
     double preferred_extent,
+    double maximum_extent,
+    double stretch_weight,
     int32_t collapsed);
 void haskelui_macos_workspace_item_set(
     HaskeLUIMacWindowRef window,
@@ -400,6 +405,8 @@ void haskelui_macos_open_project_folder(void);
 /* Diagnostic API used by the native backend's deterministic integration test. */
 void haskelui_macos_debug_counters(HaskeLUIMacDebugCounters *counters);
 const char *haskelui_macos_test_last_failure(void);
+int32_t haskelui_macos_test_acquire_process_lock(void);
+void haskelui_macos_test_release_process_lock(void);
 void haskelui_macos_test_schedule_vertical_script(
     uint64_t main_window_identity,
     uint64_t name_field_identity,

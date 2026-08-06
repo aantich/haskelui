@@ -9,8 +9,13 @@
         "label": "Visual Haskell Light",
         "uiTheme": "vs",
         "path": "./themes/visual-haskell-light.json"
+      },
+      {
+        "id": "visual-haskell-dark",
+        "label": "Visual Haskell Dark",
+        "uiTheme": "vs-dark",
+        "path": "./themes/visual-haskell-dark.json"
       }
     ]
   }
 }
-

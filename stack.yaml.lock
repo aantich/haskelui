@@ -3,7 +3,14 @@
 # For more information, please see the documentation at:
 #   https://docs.haskellstack.org/en/stable/topics/lock_files
 
-packages: []
+packages:
+- completed:
+    hackage: hie-bios-0.18.0@sha256:aee2aed918a5864367efef2aeae632885a0e08bbc1849ee3d2e803adcf5de478,14161
+    pantry-tree:
+      sha256: add1fa00d94f044ec0e78b773c4d4724bdc14f14f7bd71d9148a9f1ed2751779
+      size: 14684
+  original:
+    hackage: hie-bios-0.18.0@sha256:aee2aed918a5864367efef2aeae632885a0e08bbc1849ee3d2e803adcf5de478,14161
 snapshots:
 - completed:
     sha256: f9f775487e1678844b9f031919ed508a88097aa883002a970d3cd6fc6308b5d2

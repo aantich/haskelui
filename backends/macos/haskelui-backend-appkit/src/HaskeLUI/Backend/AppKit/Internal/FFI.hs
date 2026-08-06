@@ -76,7 +76,9 @@ module HaskeLUI.Backend.AppKit.Internal.FFI
   , c_scheduleRuntimeWake
   , c_shutdown
   , c_stop
+  , c_testAcquireProcessLock
   , c_testLastFailure
+  , c_testReleaseProcessLock
   , c_testScheduleVerticalScript
   , c_testScheduleTextEditorScript
   , c_testScheduleExplorerScript
@@ -383,7 +385,16 @@ foreign import ccall unsafe "haskelui_macos_workspace_begin"
   c_workspaceBegin :: Ptr MacWindowHandle -> CInt -> CDouble -> IO ()
 
 foreign import ccall unsafe "haskelui_macos_workspace_pane_set"
-  c_workspacePaneSet :: Ptr MacWindowHandle -> Word64 -> CInt -> CDouble -> CInt -> IO ()
+  c_workspacePaneSet
+    :: Ptr MacWindowHandle
+    -> Word64
+    -> CInt
+    -> CDouble
+    -> CDouble
+    -> CDouble
+    -> CDouble
+    -> CInt
+    -> IO ()
 
 foreign import ccall unsafe "haskelui_macos_workspace_item_set"
   c_workspaceItemSet :: Ptr MacWindowHandle -> Word64 -> Word64 -> IO ()
@@ -597,6 +608,12 @@ foreign import ccall unsafe "haskelui_macos_debug_counters"
 
 foreign import ccall unsafe "haskelui_macos_test_last_failure"
   c_testLastFailure :: IO CString
+
+foreign import ccall safe "haskelui_macos_test_acquire_process_lock"
+  c_testAcquireProcessLock :: IO CInt
+
+foreign import ccall unsafe "haskelui_macos_test_release_process_lock"
+  c_testReleaseProcessLock :: IO ()
 
 foreign import ccall unsafe "haskelui_macos_test_schedule_vertical_script"
   c_testScheduleVerticalScript :: Word64 -> Word64 -> Word64 -> Word64 -> IO ()

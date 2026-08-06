@@ -21,8 +21,11 @@ source-repository head
 library
   exposed-modules:
       VisualHaskell
+      VisualHaskell.Analysis.Service
       VisualHaskell.Highlighting
+      VisualHaskell.Logging
       VisualHaskell.Paths
+      VisualHaskell.TrustState
       VisualHaskell.WorkspaceState
   other-modules:
       Paths_visual_haskell
@@ -32,6 +35,7 @@ library
       src
   build-depends:
       aeson
+    , async
     , base >=4.20.2 && <4.21
     , bytestring
     , containers
@@ -39,6 +43,10 @@ library
     , filepath
     , haskelui-core
     , text
+    , time
+    , visual-haskell-analysis-client
+    , visual-haskell-analysis-protocol
+    , visual-haskell-semantic-model
     , visual-haskell-textmate
   default-language: Haskell2010
 
@@ -51,8 +59,11 @@ executable vh
   hs-source-dirs:
       app
   ghc-options: -Wall -Wcompat -threaded
+  build-tool-depends:
+      visual-haskell-analysis-ghc910:visual-haskell-analysis-ghc910
   build-depends:
       aeson
+    , async
     , base >=4.20.2 && <4.21
     , bytestring
     , containers
@@ -62,11 +73,74 @@ executable vh
     , haskelui-core
     , haskelui-runtime
     , text
+    , time
     , visual-haskell
+    , visual-haskell-analysis-client
+    , visual-haskell-analysis-protocol
+    , visual-haskell-semantic-model
     , visual-haskell-textmate
   default-language: Haskell2010
   if !os(darwin)
     buildable: False
+
+test-suite vh-analysis-service-test
+  type: exitcode-stdio-1.0
+  main-is: Spec.hs
+  other-modules:
+      Paths_visual_haskell
+  autogen-modules:
+      Paths_visual_haskell
+  hs-source-dirs:
+      test/analysis-service
+  ghc-options: -threaded
+  build-tool-depends:
+      visual-haskell-analysis-ghc910:visual-haskell-analysis-ghc910
+  build-depends:
+      aeson
+    , async
+    , base >=4.20.2 && <4.21
+    , bytestring
+    , containers
+    , directory
+    , filepath
+    , haskelui-core
+    , haskelui-runtime
+    , stm
+    , text
+    , time
+    , visual-haskell
+    , visual-haskell-analysis-client
+    , visual-haskell-analysis-protocol
+    , visual-haskell-semantic-model
+    , visual-haskell-textmate
+  default-language: Haskell2010
+
+test-suite vh-debug-logging-test
+  type: exitcode-stdio-1.0
+  main-is: LoggingSpec.hs
+  other-modules:
+      Paths_visual_haskell
+  autogen-modules:
+      Paths_visual_haskell
+  hs-source-dirs:
+      test/logging
+  build-depends:
+      aeson
+    , async
+    , base >=4.20.2 && <4.21
+    , bytestring
+    , containers
+    , directory
+    , filepath
+    , haskelui-core
+    , text
+    , time
+    , visual-haskell
+    , visual-haskell-analysis-client
+    , visual-haskell-analysis-protocol
+    , visual-haskell-semantic-model
+    , visual-haskell-textmate
+  default-language: Haskell2010
 
 test-suite vh-explorer-native-test
   type: exitcode-stdio-1.0
@@ -79,6 +153,7 @@ test-suite vh-explorer-native-test
       test/explorer-native
   build-depends:
       aeson
+    , async
     , base >=4.20.2 && <4.21
     , bytestring
     , containers
@@ -88,7 +163,11 @@ test-suite vh-explorer-native-test
     , haskelui-core
     , haskelui-runtime
     , text
+    , time
     , visual-haskell
+    , visual-haskell-analysis-client
+    , visual-haskell-analysis-protocol
+    , visual-haskell-semantic-model
     , visual-haskell-textmate
   default-language: Haskell2010
   if !os(darwin)
@@ -105,6 +184,7 @@ test-suite vh-model-test
       test/model
   build-depends:
       aeson
+    , async
     , base >=4.20.2 && <4.21
     , bytestring
     , containers
@@ -112,7 +192,11 @@ test-suite vh-model-test
     , filepath
     , haskelui-core
     , text
+    , time
     , visual-haskell
+    , visual-haskell-analysis-client
+    , visual-haskell-analysis-protocol
+    , visual-haskell-semantic-model
     , visual-haskell-textmate
   default-language: Haskell2010
 
@@ -127,6 +211,7 @@ test-suite vh-native-test
       test/native
   build-depends:
       aeson
+    , async
     , base >=4.20.2 && <4.21
     , bytestring
     , containers
@@ -136,7 +221,11 @@ test-suite vh-native-test
     , haskelui-core
     , haskelui-runtime
     , text
+    , time
     , visual-haskell
+    , visual-haskell-analysis-client
+    , visual-haskell-analysis-protocol
+    , visual-haskell-semantic-model
     , visual-haskell-textmate
   default-language: Haskell2010
   if !os(darwin)
@@ -153,6 +242,7 @@ test-suite vh-workspace-persistence-test
       test/workspace
   build-depends:
       aeson
+    , async
     , base >=4.20.2 && <4.21
     , bytestring
     , containers
@@ -161,6 +251,10 @@ test-suite vh-workspace-persistence-test
     , haskelui-core
     , haskelui-runtime
     , text
+    , time
     , visual-haskell
+    , visual-haskell-analysis-client
+    , visual-haskell-analysis-protocol
+    , visual-haskell-semantic-model
     , visual-haskell-textmate
   default-language: Haskell2010

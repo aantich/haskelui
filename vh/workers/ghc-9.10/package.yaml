@@ -1,0 +1,62 @@
+name: visual-haskell-analysis-ghc910
+version: 0.1.0.0
+synopsis: Direct GHC 9.10 analysis worker for Visual Haskell
+description: Uses hie-bios for component discovery and isolates the GHC 9.10 API behind a worker-private compatibility module.
+category: Development
+github: aantich/haskelui
+license: BSD-3-Clause
+author: Visual Haskell contributors
+maintainer: Visual Haskell contributors
+copyright: 2026 Visual Haskell contributors
+
+dependencies:
+  - base >= 4.20.2 && < 4.21
+  - containers
+  - directory
+  - filepath
+  - ghc == 9.10.3
+  - hie-bios >= 0.18 && < 0.19
+  - mtl
+  - text
+  - time
+  - visual-haskell-analysis-protocol
+  - visual-haskell-semantic-model
+
+ghc-options:
+  - -Wall
+  - -Wcompat
+
+library:
+  source-dirs: src
+  exposed-modules:
+    - VisualHaskell.Analysis.Ghc910
+  other-modules:
+    - VisualHaskell.Analysis.Ghc910.Compat
+    - VisualHaskell.Analysis.Ghc910.Engine
+    - VisualHaskell.Analysis.Ghc910.Project
+    - VisualHaskell.Analysis.Ghc910.Types
+
+executables:
+  visual-haskell-analysis-ghc910:
+    main: Main.hs
+    source-dirs: app
+    dependencies:
+      - visual-haskell-analysis-ghc910
+    ghc-options:
+      - -threaded
+
+tests:
+  visual-haskell-analysis-ghc-910-test:
+    main: Spec.hs
+    source-dirs: test
+    dependencies:
+      - stm
+      - visual-haskell-analysis-client
+      - visual-haskell-analysis-ghc910
+    ghc-options:
+      - -threaded
+
+extra-source-files:
+  - test/fixtures/two-module/hie.yaml
+  - test/fixtures/two-module/A.hs
+  - test/fixtures/two-module/B.hs

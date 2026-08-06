@@ -66,6 +66,7 @@ data WorkspaceState = WorkspaceState
   , workspaceSelectedExplorerEntry :: !(Maybe FilePath)
   , workspaceNavigatorPane :: !PaneState
   , workspaceInspectorPane :: !PaneState
+  , workspaceAnalysisTrusted :: !Bool
   }
   deriving stock (Eq, Show)
 
@@ -73,7 +74,7 @@ instance ToJSON WorkspaceState where
   toJSON state =
     object
       [ "format" .= ("visual-haskell-workspace" :: Text)
-      , "version" .= (1 :: Int)
+      , "version" .= (2 :: Int)
       , "openFiles" .= fmap Text.pack state.workspaceOpenFiles
       , "activeFile" .= fmap Text.pack state.workspaceActiveFile
       , "expandedFolders" .= fmap Text.pack state.workspaceExpandedFolders
@@ -83,6 +84,7 @@ instance ToJSON WorkspaceState where
             [ "navigator" .= paneValue state.workspaceNavigatorPane
             , "inspector" .= paneValue state.workspaceInspectorPane
             ]
+      , "analysisTrusted" .= state.workspaceAnalysisTrusted
       ]
 
 instance FromJSON WorkspaceState where
@@ -92,7 +94,7 @@ instance FromJSON WorkspaceState where
     if (format :: Text) /= "visual-haskell-workspace"
       then fail "unexpected workspace format"
       else pure ()
-    if (version :: Int) /= 1
+    if (version :: Int) `notElem` [1, 2]
       then fail ("unsupported workspace version " <> show version)
       else pure ()
     openFiles <- value .:? "openFiles" .!= []
@@ -102,6 +104,10 @@ instance FromJSON WorkspaceState where
     panes <- value .:? "panes"
     navigator <- maybe (pure defaultNavigatorPaneState) (parseNamedPane "navigator" defaultNavigatorPaneState) panes
     inspector <- maybe (pure defaultInspectorPaneState) (parseNamedPane "inspector" defaultInspectorPaneState) panes
+    analysisTrusted <-
+      if (version :: Int) >= 2
+        then value .:? "analysisTrusted" .!= False
+        else pure False
     parsedOpenFiles <- traverse (validateForParser "openFiles") openFiles
     parsedActiveFile <- traverse (validateForParser "activeFile") activeFile
     parsedExpandedFolders <- traverse (validateForParser "expandedFolders") expandedFolders
@@ -116,6 +122,7 @@ instance FromJSON WorkspaceState where
         , workspaceSelectedExplorerEntry = parsedSelectedEntry
         , workspaceNavigatorPane = navigator
         , workspaceInspectorPane = inspector
+        , workspaceAnalysisTrusted = analysisTrusted
         }
 
 paneValue :: PaneState -> Value

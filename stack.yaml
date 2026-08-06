@@ -9,10 +9,18 @@ packages:
   - examples/control-gallery
   - examples/drawing-primitives
   - vh
+  - vh/packages/semantic-model
+  - vh/packages/analysis-protocol
+  - vh/packages/analysis-client
   - vh/packages/textmate
+  - vh/workers/fake
+  - vh/workers/ghc-9.10
   - spikes/property-api
   - spikes/public-api
 
 system-ghc: true
 install-ghc: false
 compiler-check: match-exact
+
+extra-deps:
+  - hie-bios-0.18.0@sha256:aee2aed918a5864367efef2aeae632885a0e08bbc1849ee3d2e803adcf5de478,14161

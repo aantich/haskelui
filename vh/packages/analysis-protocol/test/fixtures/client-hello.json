@@ -1,0 +1,19 @@
+{
+  "protocol": { "major": 1, "minor": 0 },
+  "requestId": null,
+  "workspace": null,
+  "workspaceGeneration": 0,
+  "session": null,
+  "document": null,
+  "revision": null,
+  "contentHash": null,
+  "payload": {
+    "type": "client-hello",
+    "hello": {
+      "clientVersion": "0.1.0",
+      "workspaceRoot": null,
+      "trustMode": "untrusted",
+      "requestedCapabilities": ["workspace-loading", "diagnostics"]
+    }
+  }
+}

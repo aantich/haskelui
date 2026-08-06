@@ -1,0 +1,27 @@
+name: visual-haskell-analysis-fake-worker
+version: 0.1.0.0
+synopsis: Deterministic protocol worker for Visual Haskell integration tests
+description: Exercises the real Visual Haskell process protocol without linking GHC.
+category: Development
+github: aantich/haskelui
+license: BSD-3-Clause
+author: Visual Haskell contributors
+maintainer: Visual Haskell contributors
+copyright: 2026 Visual Haskell contributors
+
+dependencies:
+  - base >= 4.20.2 && < 4.21
+  - containers
+  - directory
+  - text
+  - visual-haskell-analysis-protocol
+  - visual-haskell-semantic-model
+
+executables:
+  visual-haskell-analysis-fake-worker:
+    main: Main.hs
+    source-dirs: app
+    ghc-options:
+      - -Wall
+      - -Wcompat
+      - -threaded

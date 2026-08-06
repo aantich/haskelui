@@ -11,6 +11,7 @@ module VisualHaskell.TextMate
   ) where
 
 import System.FilePath ((</>))
+import HaskeLUI.Core (noTrace)
 import Paths_visual_haskell_textmate (getDataFileName)
 import VisualHaskell.TextMate.Grammar
 import VisualHaskell.TextMate.Registry
@@ -33,4 +34,5 @@ defaultTextMateConfiguration userRoot = do
       , maximumThemeBytes = 8 * 1024 * 1024
       , maximumRuleCount = 50000
       , maximumMatchesPerLine = 20000
+      , textMateTraceSink = noTrace
       }

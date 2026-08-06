@@ -6,7 +6,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 module HaskeLUI.Core
-  ( module HaskeLUI.Drawing
+  ( module HaskeLUI.Diagnostics
+  , module HaskeLUI.Drawing
   , module HaskeLUI.Graphics.Types
   , module HaskeLUI.Layout
   , Action
@@ -208,6 +209,7 @@ import qualified Data.Text as Text
 import Data.Typeable (Typeable)
 import Data.Word (Word64)
 import HaskeLUI.Drawing
+import HaskeLUI.Diagnostics
 import HaskeLUI.Graphics.Types
 import HaskeLUI.Layout
 
@@ -1722,6 +1724,7 @@ data UIEvent
   | PaneStateChanged !PaneKey !PaneState
   | WindowCloseRequested !WindowKey
   | WindowActivated !WindowKey
+  | SystemColorSchemeChanged !ColorScheme
   | TextFileChosen !FilePath
   | ProjectFolderChosen !FilePath
   | DirectoryRead !FilePath !(Either Text [FileSystemEntry])

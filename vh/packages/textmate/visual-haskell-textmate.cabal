@@ -41,6 +41,7 @@ data-files:
     resources/extensions/visual-haskell-json/syntaxes/json.tmLanguage.json
     resources/extensions/visual-haskell-markdown/syntaxes/markdown.tmLanguage.json
     resources/extensions/visual-haskell-python/syntaxes/python.tmLanguage.json
+    resources/extensions/visual-haskell-theme/themes/visual-haskell-dark.json
     resources/extensions/visual-haskell-theme/themes/visual-haskell-light.json
     resources/PROVENANCE.md
 

@@ -83,6 +83,8 @@ main =
           production
             { appInitialModel = projectReady
             , appInitialEffects = []
+            , appServices = []
+            , appSubscriptions = const []
             }
         testSpec =
           AppKitExplorerTestSpec

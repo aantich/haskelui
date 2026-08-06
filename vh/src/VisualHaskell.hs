@@ -5,6 +5,7 @@
 
 module VisualHaskell
   ( application
+  , applicationWithAnalysisEnvironment
   , applicationWithDocument
   , applicationWithDocuments
   , applicationWithEnvironment
@@ -35,9 +36,25 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Word (Word64)
+import qualified VisualHaskell.Analysis.Acceptance as AnalysisAcceptance
+import qualified VisualHaskell.Analysis.Client as AnalysisClient
+import qualified VisualHaskell.Analysis.Protocol as AnalysisProtocol
+import VisualHaskell.Analysis.Service
+  ( AnalysisCommand (..)
+  , AnalysisConfiguration
+  , AnalysisServiceEvent (..)
+  , analysisService
+  , defaultAnalysisConfiguration
+  )
 import VisualHaskell.Highlighting
   ( codeEditorBaseStyle
   , haskellSyntaxLayer
+  )
+import VisualHaskell.TrustState
+  ( TrustRegistry (..)
+  , decodeTrustRegistry
+  , emptyTrustRegistry
+  , encodeTrustRegistry
   )
 import VisualHaskell.WorkspaceState
   ( WorkspaceState (..)
@@ -52,14 +69,17 @@ import VisualHaskell.WorkspaceState
   )
 import GHC.Generics (Generic)
 import System.FilePath
-  ( normalise
+  ( (</>)
+  , normalise
   , splitDirectories
   , takeExtension
+  , takeDirectory
   , takeFileName
   )
 import HaskeLUI.Binding
 import HaskeLUI.Core hiding (Path)
 import HaskeLUI.Property
+import qualified VisualHaskell.Semantic as Semantic
 import VisualHaskell.TextMate
 
 data Document = Document
@@ -108,8 +128,18 @@ data EditorModel = EditorModel
   , workspaceRestoreActiveFile :: !(Maybe FilePath)
   , workspaceRestoreExplorerSelection :: !(Maybe FilePath)
   , workspaceRegistryPath :: !(Maybe FilePath)
+  , workspaceTrustRegistryPath :: !(Maybe FilePath)
+  , workspaceTrustRegistry :: !TrustRegistry
+  , workspaceRequestedAnalysisTrust :: !Bool
   , textMateRegistryGeneration :: !(Maybe RegistryGeneration)
   , textMateStatus :: !Text
+  , systemColorScheme :: !ColorScheme
+  , analysisWorkspaceGeneration :: !Semantic.WorkspaceGeneration
+  , analysisWorkspaceTrusted :: !Bool
+  , analysisWorkerGeneration :: !(Maybe AnalysisClient.WorkerGeneration)
+  , analysisComponent :: !(Maybe Semantic.ComponentInfo)
+  , analysisSnapshots :: !(Map Semantic.DocumentId (Semantic.AnalysisSnapshot Semantic.RevisionedSourceRange))
+  , analysisStatus :: !Text
   }
   deriving stock (Eq, Generic, Show)
 
@@ -139,10 +169,11 @@ firstDocumentTabKey = TabKey 1000
 firstDocumentEditorKey :: ElementKey
 firstDocumentEditorKey = ElementKey 1001000
 
-openCommand, saveCommand, openFolderCommand :: CommandId
+openCommand, saveCommand, openFolderCommand, trustWorkspaceCommand :: CommandId
 openCommand = CommandId 10
 saveCommand = CommandId 11
 openFolderCommand = CommandId 12
+trustWorkspaceCommand = CommandId 13
 
 projectTreeKey :: ElementKey
 projectTreeKey = ElementKey 100
@@ -165,31 +196,74 @@ application = editorApplication initialModel
 
 applicationWithWorkspaceRegistry :: FilePath -> App EditorModel
 applicationWithWorkspaceRegistry registryPath =
-  (editorApplication (initialModel {workspaceRegistryPath = Just normalizedRegistryPath}))
-    { appInitialEffects = [ReadOptionalTextFile normalizedRegistryPath]
+  ( editorApplication
+      ( initialModel
+          { workspaceRegistryPath = Just normalizedRegistryPath
+          , workspaceTrustRegistryPath = Just trustRegistryPath
+          }
+      )
+  )
+    { appInitialEffects =
+        [ ReadOptionalTextFile normalizedRegistryPath
+        , ReadOptionalTextFile trustRegistryPath
+        ]
     }
   where
     normalizedRegistryPath = normalise registryPath
+    trustRegistryPath = trustRegistryPathFor normalizedRegistryPath
 
--- | Production Visual Haskell application: workspace restoration plus the
--- supervised TextMate provider service and live user-resource discovery.
+-- | Production Visual Haskell application with the standard direct-GHC worker
+-- executable name. Embedders that resolve another worker path can use
+-- 'applicationWithAnalysisEnvironment'.
 applicationWithEnvironment
   :: FilePath
   -> TextMateConfiguration
   -> App EditorModel
 applicationWithEnvironment registryPath configuration =
+  applicationWithAnalysisEnvironment
+    registryPath
+    configuration
+    (defaultAnalysisConfiguration "visual-haskell-analysis-ghc910")
+
+-- | Production Visual Haskell application: workspace restoration, supervised
+-- TextMate resources, and a supervised out-of-process compiler service.
+applicationWithAnalysisEnvironment
+  :: FilePath
+  -> TextMateConfiguration
+  -> AnalysisConfiguration
+  -> App EditorModel
+applicationWithAnalysisEnvironment registryPath textMateConfiguration analysisConfiguration =
   applicationValue
-    { appInitialEffects = [ReadOptionalTextFile normalizedRegistryPath]
-    , appInitialCommands = textMateCommandsForDocuments endpoint Map.empty startingModel
-    , appServices = [textMateWorker]
-    , appSubscriptions = const [textMateResourceSubscription configuration (textMateExternalEvent endpoint)]
+    { appInitialEffects =
+        [ ReadOptionalTextFile normalizedRegistryPath
+        , ReadOptionalTextFile trustRegistryPath
+        ]
+    , appInitialCommands = textMateCommandsForCurrentState textMateEndpoint startingModel
+    , appServices = [textMateWorker, analysisWorker]
+    , appSubscriptions =
+        const
+          [ textMateResourceSubscription
+              textMateConfiguration
+              (textMateExternalEvent textMateEndpoint)
+          ]
     }
   where
     normalizedRegistryPath = normalise registryPath
-    startingModel = initialModel {workspaceRegistryPath = Just normalizedRegistryPath}
-    applicationValue = editorApplicationWithTextMate (Just endpoint) startingModel
-    (textMateWorker, endpoint) =
-      textMateService configuration (textMateExternalEvent endpoint)
+    startingModel =
+      initialModel
+        { workspaceRegistryPath = Just normalizedRegistryPath
+        , workspaceTrustRegistryPath = Just trustRegistryPath
+        }
+    trustRegistryPath = trustRegistryPathFor normalizedRegistryPath
+    applicationValue =
+      editorApplicationWithServices
+        (Just textMateEndpoint)
+        (Just analysisEndpoint)
+        startingModel
+    (textMateWorker, textMateEndpoint) =
+      textMateService textMateConfiguration (textMateExternalEvent textMateEndpoint)
+    (analysisWorker, analysisEndpoint) =
+      analysisService analysisConfiguration (analysisExternalEvent analysisEndpoint)
 
 applicationWithDocument :: FilePath -> Text -> App EditorModel
 applicationWithDocument documentPath initialContents =
@@ -232,18 +306,29 @@ initialModel =
     , workspaceRestoreActiveFile = Nothing
     , workspaceRestoreExplorerSelection = Nothing
     , workspaceRegistryPath = Nothing
+    , workspaceTrustRegistryPath = Nothing
+    , workspaceTrustRegistry = emptyTrustRegistry
+    , workspaceRequestedAnalysisTrust = False
     , textMateRegistryGeneration = Nothing
     , textMateStatus = "Syntax: built-in fallback"
+    , systemColorScheme = LightColorScheme
+    , analysisWorkspaceGeneration = Semantic.WorkspaceGeneration 0
+    , analysisWorkspaceTrusted = False
+    , analysisWorkerGeneration = Nothing
+    , analysisComponent = Nothing
+    , analysisSnapshots = Map.empty
+    , analysisStatus = "GHC: starting"
     }
 
 editorApplication :: EditorModel -> App EditorModel
-editorApplication = editorApplicationWithTextMate Nothing
+editorApplication = editorApplicationWithServices Nothing Nothing
 
-editorApplicationWithTextMate
+editorApplicationWithServices
   :: Maybe (ServiceEndpoint TextMateCommand)
+  -> Maybe (ServiceEndpoint AnalysisCommand)
   -> EditorModel
   -> App EditorModel
-editorApplicationWithTextMate textMateEndpoint startingModel =
+editorApplicationWithServices textMateEndpoint analysisEndpoint startingModel =
   App
     { appInitialModel = startingModel
     , appInitialEffects = []
@@ -251,7 +336,7 @@ editorApplicationWithTextMate textMateEndpoint startingModel =
     , appServices = []
     , appSubscriptions = const []
     , appView = render
-    , appHandleEvent = handleEventWithTextMate textMateEndpoint
+    , appHandleEvent = handleEventWithServices textMateEndpoint analysisEndpoint
     }
 
 render :: EditorModel -> AppView
@@ -262,6 +347,11 @@ render model =
         [ CommandSpec openCommand "Open File…" (Just "o") True
         , CommandSpec openFolderCommand "Open Folder…" Nothing True
         , CommandSpec saveCommand "Save" (Just "s") (maybe False documentDirty activeDocument)
+        , CommandSpec
+            trustWorkspaceCommand
+            "Trust Workspace for Haskell Analysis"
+            Nothing
+            (model.projectRoot /= Nothing && not model.analysisWorkspaceTrusted)
         ]
     }
   where
@@ -361,7 +451,7 @@ documentTab model tabKey = do
                 , textEditorText = readBinding contentsBinding model
                 , textEditorRevision = document.documentRevision
                 , textEditorBaseStyle = codeEditorBaseStyle
-                , textEditorLayers = documentPresentation document
+                , textEditorLayers = documentPresentation model document
                 , textEditorFocused = model.selectedTab == Just tabKey
                 }
           ]
@@ -455,8 +545,8 @@ inspectorControls model =
 
 statusControls :: EditorModel -> [Control]
 statusControls model =
-  [ Label (ElementKey 300) (Rect 12 4 780 20) status
-  , Label (ElementKey 301) (Rect 880 4 270 20) summary
+  [ Label (ElementKey 300) (Rect 12 4 530 20) status
+  , Label (ElementKey 301) (Rect 550 4 600 20) summary
   ]
   where
     status = maybe model.workspaceMessage (.documentStatus) (selectedDocument model)
@@ -465,11 +555,13 @@ statusControls model =
         <> (if Map.size model.documents == 1 then " document" else " documents")
         <> " · "
         <> model.textMateStatus
+        <> " · "
+        <> model.analysisStatus
 
 languageDescription :: Document -> Text
 languageDescription document
   | Just language <- document.documentLanguage = language.unLanguageId <> " · TextMate"
-  | takeExtension document.documentPath `elem` [".hs", ".lhs"] = "Haskell source"
+  | isHaskellPath document.documentPath = "Haskell source"
   | otherwise = "Plain text"
 
 documentDirty :: Document -> Bool
@@ -569,18 +661,64 @@ handleEvent :: UIEvent -> EditorModel -> Transaction EditorModel
 handleEvent event model =
   persistWorkspaceChanges model (handleEventWithoutPersistence event model)
 
-handleEventWithTextMate
+handleEventWithServices
   :: Maybe (ServiceEndpoint TextMateCommand)
+  -> Maybe (ServiceEndpoint AnalysisCommand)
   -> UIEvent
   -> EditorModel
   -> Transaction EditorModel
-handleEventWithTextMate Nothing = handleEvent
-handleEventWithTextMate (Just endpoint) = \event model ->
-  let update = handleEvent event model
-      updatedModel = applyTransaction update model
-   in appendRuntimeCommands
-        (textMateCommandsForDocuments endpoint model.documents updatedModel)
-        update
+handleEventWithServices textMateEndpoint analysisEndpoint event model =
+  appendRuntimeCommands runtimeCommands update
+  where
+    initialUpdate = handleEvent event model
+    initiallyUpdated = applyTransaction initialUpdate model
+    update = prepareAnalysisWorkspaceTransition model initiallyUpdated initialUpdate
+    updatedModel = applyTransaction update model
+    runtimeCommands =
+      maybe
+        []
+        (\endpoint -> textMateCommandsForTransition endpoint event model updatedModel)
+        textMateEndpoint
+        <> maybe
+          []
+          (\endpoint -> analysisCommandsForTransition endpoint model updatedModel)
+          analysisEndpoint
+
+prepareAnalysisWorkspaceTransition
+  :: EditorModel
+  -> EditorModel
+  -> Transaction EditorModel
+  -> Transaction EditorModel
+prepareAnalysisWorkspaceTransition oldModel newModel update
+  | oldModel.projectRoot == newModel.projectRoot
+  , oldModel.analysisWorkspaceTrusted == newModel.analysisWorkspaceTrusted = update
+  | otherwise =
+      update
+        { transactionAction =
+            batchActions
+              "Change analysis workspace generation"
+              [ update.transactionAction
+              , actionWithProperties
+                  "Reset compiler analysis for the new workspace"
+                  [ propertyId editorProperties.analysisWorkspaceGeneration
+                  , propertyId editorProperties.analysisComponent
+                  , propertyId editorProperties.analysisSnapshots
+                  , propertyId editorProperties.analysisStatus
+                  ]
+                  resetAnalysisWorkspace
+              ]
+        }
+  where
+    resetAnalysisWorkspace current =
+      current
+        { analysisWorkspaceGeneration = nextWorkspaceGeneration current.analysisWorkspaceGeneration
+        , analysisComponent = Nothing
+        , analysisSnapshots = Map.empty
+        , analysisStatus =
+            if current.analysisWorkspaceTrusted
+              then "GHC: loading workspace"
+              else "GHC: workspace untrusted"
+        }
 
 textMateCommandsForDocuments
   :: ServiceEndpoint TextMateCommand
@@ -605,6 +743,37 @@ textMateCommandsForDocuments endpoint oldDocuments newModel =
               || previous.documentContents /= document.documentContents
       ]
 
+textMateCommandsForCurrentState
+  :: ServiceEndpoint TextMateCommand
+  -> EditorModel
+  -> [RuntimeCommand EditorModel]
+textMateCommandsForCurrentState endpoint model =
+  sendService endpoint (SelectTextMateTheme (textMateThemeFor model.systemColorScheme))
+    : textMateCommandsForDocuments endpoint Map.empty model
+
+textMateCommandsForTransition
+  :: ServiceEndpoint TextMateCommand
+  -> UIEvent
+  -> EditorModel
+  -> EditorModel
+  -> [RuntimeCommand EditorModel]
+textMateCommandsForTransition endpoint event oldModel newModel =
+  appearanceCommands <> textMateCommandsForDocuments endpoint oldModel.documents newModel
+  where
+    appearanceCommands =
+      case event of
+        SystemColorSchemeChanged scheme
+          | scheme /= oldModel.systemColorScheme ->
+              [sendService endpoint (SelectTextMateTheme (textMateThemeFor scheme))]
+        _ -> []
+
+textMateThemeFor :: ColorScheme -> ThemeId
+textMateThemeFor scheme =
+  ThemeId $
+    case scheme of
+      LightColorScheme -> "visual-haskell-light"
+      DarkColorScheme -> "visual-haskell-dark"
+
 documentSnapshot :: Document -> HighlightSnapshot
 documentSnapshot document =
   highlightSnapshot
@@ -612,6 +781,144 @@ documentSnapshot document =
     document.documentRevision
     document.documentPath
     document.documentContents
+
+analysisCommandsForTransition
+  :: ServiceEndpoint AnalysisCommand
+  -> EditorModel
+  -> EditorModel
+  -> [RuntimeCommand EditorModel]
+analysisCommandsForTransition endpoint oldModel newModel
+  | oldModel.projectRoot /= newModel.projectRoot
+      || oldModel.analysisWorkspaceTrusted /= newModel.analysisWorkspaceTrusted =
+      analysisCommandsForCurrentState endpoint newModel
+  | not newModel.analysisWorkspaceTrusted = []
+  | newModel.projectRoot == Nothing = []
+  | otherwise =
+      fmap (sendService endpoint . closeCommand) closedDocuments
+        <> fmap (sendService endpoint . upsertCommand) changedDocuments
+        <> fmap (sendService endpoint . analyzeCommand) analysisTargets
+  where
+    oldAnalysisDocuments = Map.filter isHaskellDocument oldModel.documents
+    newAnalysisDocuments = Map.filter isHaskellDocument newModel.documents
+    closedDocuments = Map.elems (oldAnalysisDocuments `Map.difference` newAnalysisDocuments)
+    changedDocuments =
+      [ document
+      | document <- Map.elems newAnalysisDocuments
+      , case Map.lookup document.documentKey oldAnalysisDocuments of
+          Nothing -> True
+          Just previous -> analysisDocumentChanged previous document
+      ]
+    -- Full-snapshot Phase 1 deliberately rechecks every open Haskell module
+    -- after one changes: an edit in B can invalidate its dependent A. Phase 3
+    -- will replace this conservative policy with measured invalidation.
+    analysisTargets
+      | null changedDocuments = []
+      | otherwise = Map.elems newAnalysisDocuments
+    closeCommand document =
+      CloseAnalysisDocument
+        newModel.analysisWorkspaceGeneration
+        (analysisWorkspaceId newModel)
+        (analysisSession newModel)
+        (analysisDocumentId document)
+    upsertCommand document =
+      UpsertAnalysisDocument
+        newModel.analysisWorkspaceGeneration
+        (analysisWorkspaceId newModel)
+        (analysisSession newModel)
+        (analysisDocumentSnapshot document)
+    analyzeCommand document =
+      RequestDocumentAnalysis
+        newModel.analysisWorkspaceGeneration
+        (analysisWorkspaceId newModel)
+        (analysisSession newModel)
+        (analysisDocumentSnapshot document)
+
+analysisCommandsForCurrentState
+  :: ServiceEndpoint AnalysisCommand
+  -> EditorModel
+  -> [RuntimeCommand EditorModel]
+analysisCommandsForCurrentState endpoint model =
+  case (model.analysisWorkspaceTrusted, model.projectRoot) of
+    (False, _) -> []
+    (_, Nothing) -> []
+    (True, Just root) ->
+      sendService endpoint
+        ( ConfigureAnalysisWorkspace
+            model.analysisWorkspaceGeneration
+            AnalysisProtocol.WorkspaceRequest
+              { AnalysisProtocol.workspaceRequestId = workspace
+              , AnalysisProtocol.workspaceRequestRoot = root
+              , AnalysisProtocol.workspaceRequestTrust = AnalysisProtocol.TrustedWorkspace
+              }
+        )
+        : fmap (sendService endpoint . upsertCommand) documentsToAnalyze
+          <> fmap (sendService endpoint . analyzeCommand) documentsToAnalyze
+      where
+        workspace = analysisWorkspaceId model
+        session = analysisSession model
+        documentsToAnalyze = filter isHaskellDocument (Map.elems model.documents)
+        upsertCommand document =
+          UpsertAnalysisDocument
+            model.analysisWorkspaceGeneration
+            workspace
+            session
+            (analysisDocumentSnapshot document)
+        analyzeCommand document =
+          RequestDocumentAnalysis
+            model.analysisWorkspaceGeneration
+            workspace
+            session
+            (analysisDocumentSnapshot document)
+
+analysisDocumentChanged :: Document -> Document -> Bool
+analysisDocumentChanged previous current =
+  previous.documentPath /= current.documentPath
+    || previous.documentRevision /= current.documentRevision
+    || previous.documentContents /= current.documentContents
+
+analysisDocumentSnapshot :: Document -> Semantic.DocumentSnapshot
+analysisDocumentSnapshot document =
+  Semantic.DocumentSnapshot
+    { Semantic.snapshotDocumentId = analysisDocumentId document
+    , Semantic.snapshotPath = document.documentPath
+    , Semantic.snapshotRevision = semanticRevision document.documentRevision
+    , Semantic.snapshotContentHash = Semantic.contentHash document.documentContents
+    , Semantic.snapshotText = document.documentContents
+    , Semantic.snapshotLineEnding = lineEndingPolicy document.documentContents
+    }
+
+analysisDocumentId :: Document -> Semantic.DocumentId
+analysisDocumentId = Semantic.DocumentId . Text.pack . normalise . (.documentPath)
+
+analysisWorkspaceId :: EditorModel -> Semantic.WorkspaceId
+analysisWorkspaceId model =
+  Semantic.WorkspaceId (maybe "visual-haskell:no-workspace" (Text.pack . normalise) model.projectRoot)
+
+analysisSession :: EditorModel -> Maybe Semantic.SessionId
+analysisSession model = (.componentSession) <$> model.analysisComponent
+
+semanticRevision :: TextRevision -> Semantic.TextRevision
+semanticRevision revision = Semantic.TextRevision revision.unTextRevision
+
+lineEndingPolicy :: Text -> Semantic.LineEndingPolicy
+lineEndingPolicy source
+  | "\r\n" `Text.isInfixOf` source
+  , hasBareLineFeed source = Semantic.MixedLineEndings
+  | "\r\n" `Text.isInfixOf` source = Semantic.CRLF
+  | "\n" `Text.isInfixOf` source = Semantic.LF
+  | otherwise = Semantic.UnknownLineEndings
+  where
+    hasBareLineFeed = Text.isInfixOf "\n" . Text.replace "\r\n" ""
+
+isHaskellDocument :: Document -> Bool
+isHaskellDocument = isHaskellPath . (.documentPath)
+
+isHaskellPath :: FilePath -> Bool
+isHaskellPath path = takeExtension path `elem` [".hs", ".lhs", ".hs-boot"]
+
+nextWorkspaceGeneration :: Semantic.WorkspaceGeneration -> Semantic.WorkspaceGeneration
+nextWorkspaceGeneration generation =
+  Semantic.WorkspaceGeneration (generation.unWorkspaceGeneration + 1)
 
 textMateExternalEvent
   :: ServiceEndpoint TextMateCommand
@@ -640,7 +947,7 @@ applyTextMateServiceEvent endpoint serviceEvent model =
        in case status of
             ServiceRunning ->
               appendRuntimeCommands
-                (textMateCommandsForDocuments endpoint Map.empty model)
+                (textMateCommandsForCurrentState endpoint model)
                 statusUpdate
             _ -> statusUpdate
     TextMateRegistryChanged generation summary ->
@@ -662,6 +969,228 @@ applyTextMateServiceEvent endpoint serviceEvent model =
         "Report TextMate failure"
         NoUndo
         (editorProperties.textMateStatus .= "Syntax unavailable: " <> failure.highlightFailureMessage)
+
+analysisExternalEvent
+  :: ServiceEndpoint AnalysisCommand
+  -> AnalysisServiceEvent
+  -> ExternalEvent EditorModel
+analysisExternalEvent endpoint serviceEvent =
+  externalEvent
+    "Visual Haskell compiler analysis event"
+    (applyAnalysisServiceEvent endpoint serviceEvent)
+
+applyAnalysisServiceEvent
+  :: ServiceEndpoint AnalysisCommand
+  -> AnalysisServiceEvent
+  -> EditorModel
+  -> Transaction EditorModel
+applyAnalysisServiceEvent endpoint serviceEvent model =
+  case serviceEvent of
+    AnalysisServiceChanged status ->
+      let statusUpdate =
+            analysisStatusTransaction
+              (visibleAnalysisLifecycleStatus model (analysisServiceStatusText status))
+       in case status of
+            ServiceRunning ->
+              appendRuntimeCommands
+                (analysisCommandsForCurrentState endpoint model)
+                statusUpdate
+            _ -> statusUpdate
+    AnalysisClientChanged clientEvent -> applyAnalysisClientEvent clientEvent model
+
+applyAnalysisClientEvent
+  :: AnalysisClient.AnalysisClientEvent
+  -> EditorModel
+  -> Transaction EditorModel
+applyAnalysisClientEvent clientEvent model =
+  case clientEvent of
+    AnalysisClient.AnalysisWorkerStarting generation ->
+      analysisGenerationTransaction
+        generation
+        (visibleAnalysisLifecycleStatus model "GHC: starting analysis worker")
+    AnalysisClient.AnalysisWorkerReady generation hello ->
+      transactionFromAction
+        "Accept compiler worker handshake"
+        NoUndo
+        ( batchActions
+            "Accept compiler worker handshake"
+            [ editorProperties.analysisWorkerGeneration .= Just generation
+            , editorProperties.analysisStatus
+                .= visibleAnalysisLifecycleStatus
+                  model
+                  ( "GHC: worker ready"
+                      <> maybe
+                        ""
+                        (\version -> " (" <> version.unCompilerVersion <> ")")
+                        (AnalysisProtocol.workerCompilerVersion hello)
+                  )
+            ]
+        )
+    AnalysisClient.AnalysisWorkerMessage generation envelope ->
+      applyAnalysisWorkerMessage generation envelope model
+    AnalysisClient.AnalysisWorkerLog _ _ -> noTransaction
+    AnalysisClient.AnalysisWorkerProtocolFailure generation message
+      | model.analysisWorkerGeneration == Just generation ->
+          analysisStatusTransaction
+            (visibleAnalysisLifecycleStatus model ("GHC protocol failure: " <> message))
+      | otherwise -> noTransaction
+    AnalysisClient.AnalysisWorkerExited generation _
+      | model.analysisWorkerGeneration == Just generation ->
+          analysisStatusTransaction
+            (visibleAnalysisLifecycleStatus model "GHC: analysis worker exited")
+      | otherwise -> noTransaction
+    AnalysisClient.AnalysisWorkerRestarting generation attempt ->
+      analysisGenerationTransaction
+        generation
+        ( visibleAnalysisLifecycleStatus
+            model
+            ("GHC: restarting analysis (attempt " <> Text.pack (show attempt) <> ")")
+        )
+    AnalysisClient.AnalysisWorkerStopped ->
+      analysisStatusTransaction
+        (visibleAnalysisLifecycleStatus model "GHC: analysis unavailable")
+
+applyAnalysisWorkerMessage
+  :: AnalysisClient.WorkerGeneration
+  -> AnalysisProtocol.ProtocolEnvelope AnalysisProtocol.WorkerMessage
+  -> EditorModel
+  -> Transaction EditorModel
+applyAnalysisWorkerMessage generation envelope model
+  | model.analysisWorkerGeneration /= Just generation = noTransaction
+  | AnalysisProtocol.envelopeWorkspaceGeneration envelope /= model.analysisWorkspaceGeneration = noTransaction
+  | otherwise =
+      case AnalysisProtocol.envelopePayload envelope of
+        AnalysisProtocol.WorkerHelloMessage _ -> noTransaction
+        AnalysisProtocol.WorkspaceLoading _ -> analysisStatusTransaction "GHC: loading workspace"
+        AnalysisProtocol.WorkspaceReady _ _ -> analysisStatusTransaction "GHC: workspace ready"
+        AnalysisProtocol.WorkspaceFailed _ failure -> analysisFailureTransaction failure
+        AnalysisProtocol.ComponentDiscovered component ->
+          analysisStatusTransaction
+            ("GHC: discovered " <> component.componentId.unComponentId)
+        AnalysisProtocol.ComponentSelected component ->
+          transactionFromAction
+            "Select compiler component"
+            NoUndo
+            ( batchActions
+                "Select compiler component"
+                [ editorProperties.analysisComponent .= Just component
+                , editorProperties.analysisStatus
+                    .= "GHC: " <> component.componentId.unComponentId
+                ]
+            )
+        AnalysisProtocol.AnalysisCompleted snapshot ->
+          acceptAnalysisResult generation snapshot model
+        AnalysisProtocol.WorkerRequestFailed _ failure -> analysisFailureTransaction failure
+        AnalysisProtocol.WorkerHealthChanged AnalysisProtocol.WorkerHealthy ->
+          analysisStatusTransaction "GHC: healthy"
+        AnalysisProtocol.WorkerHealthChanged (AnalysisProtocol.WorkerDegraded message) ->
+          analysisStatusTransaction ("GHC degraded: " <> message)
+
+acceptAnalysisResult
+  :: AnalysisClient.WorkerGeneration
+  -> Semantic.AnalysisSnapshot Semantic.RevisionedSourceRange
+  -> EditorModel
+  -> Transaction EditorModel
+acceptAnalysisResult generation snapshot model =
+  case (model.analysisComponent, findAnalysisDocument snapshot.analysisDocument model) of
+    (Just component, Just document) ->
+      case
+          AnalysisAcceptance.acceptAnalysisSnapshot
+            AnalysisAcceptance.AnalysisExpectation
+              { AnalysisAcceptance.expectedWorkerGeneration = generation
+              , AnalysisAcceptance.expectedWorkspaceGeneration = model.analysisWorkspaceGeneration
+              , AnalysisAcceptance.expectedSession = component.componentSession
+              , AnalysisAcceptance.expectedDocument = analysisDocumentId document
+              , AnalysisAcceptance.expectedRevision = semanticRevision document.documentRevision
+              , AnalysisAcceptance.expectedContentHash = Semantic.contentHash document.documentContents
+              }
+            generation
+            snapshot of
+        Left _ -> noTransaction
+        Right accepted ->
+          transactionFromAction
+            "Accept current compiler analysis"
+            NoUndo
+            ( batchActions
+                "Accept current compiler analysis"
+                [ modify
+                    editorProperties.analysisSnapshots
+                    (Map.insert accepted.analysisDocument accepted)
+                , editorProperties.analysisStatus .= analysisSummary accepted
+                ]
+            )
+    _ -> noTransaction
+
+findAnalysisDocument :: Semantic.DocumentId -> EditorModel -> Maybe Document
+findAnalysisDocument identifier =
+  find ((== identifier) . analysisDocumentId) . Map.elems . documents
+
+analysisSummary :: Semantic.AnalysisSnapshot range -> Text
+analysisSummary snapshot =
+  "GHC: "
+    <> diagnosticSummary
+    <> " · "
+    <> Text.pack (show declarationCount)
+    <> if declarationCount == 1 then " declaration" else " declarations"
+  where
+    diagnostics = snapshot.analysisDiagnostics
+    errorCount = length (filter ((== Semantic.DiagnosticError) . (.diagnosticSeverity)) diagnostics)
+    warningCount = length (filter ((== Semantic.DiagnosticWarning) . (.diagnosticSeverity)) diagnostics)
+    declarationCount = length snapshot.analysisDeclarations
+    diagnosticSummary
+      | errorCount == 0 && warningCount == 0 = "clean"
+      | otherwise =
+          Text.pack (show errorCount)
+            <> if errorCount == 1 then " error" else " errors"
+            <> ", "
+            <> Text.pack (show warningCount)
+            <> if warningCount == 1 then " warning" else " warnings"
+
+analysisFailureTransaction :: AnalysisProtocol.RequestFailure -> Transaction EditorModel
+analysisFailureTransaction failure =
+  analysisStatusTransaction ("GHC: " <> AnalysisProtocol.requestFailureMessage failure)
+
+analysisGenerationTransaction
+  :: AnalysisClient.WorkerGeneration
+  -> Text
+  -> Transaction EditorModel
+analysisGenerationTransaction generation message =
+  transactionFromAction
+    "Change compiler worker generation"
+    NoUndo
+    ( batchActions
+        "Change compiler worker generation"
+        [ editorProperties.analysisWorkerGeneration .= Just generation
+        , editorProperties.analysisComponent .= Nothing
+        , editorProperties.analysisSnapshots .= Map.empty
+        , editorProperties.analysisStatus .= message
+        ]
+    )
+
+analysisStatusTransaction :: Text -> Transaction EditorModel
+analysisStatusTransaction message =
+  transactionFromAction
+    "Update compiler analysis status"
+    NoUndo
+    (editorProperties.analysisStatus .= message)
+
+analysisServiceStatusText :: ServiceStatus -> Text
+analysisServiceStatusText status =
+  case status of
+    ServiceStarting -> "GHC: starting service"
+    ServiceRunning -> "GHC: analysis service running"
+    ServiceHealthChanged ServiceHealthy -> "GHC: service healthy"
+    ServiceHealthChanged (ServiceDegraded message) -> "GHC service degraded: " <> message
+    ServiceRestartScheduled attempt _ ->
+      "GHC: restarting service (attempt " <> Text.pack (show attempt) <> ")"
+    ServiceExited _ -> "GHC: analysis service stopped"
+    ServiceCircuitOpen _ _ -> "GHC: analysis service disabled after repeated failures"
+
+visibleAnalysisLifecycleStatus :: EditorModel -> Text -> Text
+visibleAnalysisLifecycleStatus model message
+  | model.projectRoot /= Nothing
+  , not model.analysisWorkspaceTrusted = "GHC: workspace untrusted"
+  | otherwise = message
 
 serviceStatusText :: ServiceStatus -> Text
 serviceStatusText status =
@@ -754,15 +1283,26 @@ applyHighlightUnavailable documentKey revision sourceHash message model =
 handleEventWithoutPersistence :: UIEvent -> EditorModel -> Transaction EditorModel
 handleEventWithoutPersistence event model =
   case event of
+    SystemColorSchemeChanged scheme
+      | scheme == model.systemColorScheme -> noTransaction
+      | otherwise ->
+          transactionFromAction
+            "Follow system color scheme"
+            NoUndo
+            (editorProperties.systemColorScheme .= scheme)
     CommandInvoked command
       | command == openCommand ->
           requestEffect "Choose text files" RequestOpenTextFiles
       | command == openFolderCommand ->
           requestEffect "Choose project folder" RequestOpenProjectFolder
+      | command == trustWorkspaceCommand ->
+          trustAnalysisWorkspace model
       | command == saveCommand ->
           saveActiveDocument model
     ProjectFolderChosen chosenPath -> openProjectFolder chosenPath model
     OptionalTextFileRead readPath result
+      | Just readPath == model.workspaceTrustRegistryPath ->
+          handleTrustRegistryRead result model
       | Just readPath == model.workspaceRegistryPath ->
           handleWorkspaceRegistryRead result model
       | Just root <- model.projectRoot
@@ -850,6 +1390,9 @@ handleEventWithoutPersistence event model =
 projectPropertyIds :: [PropertyId]
 projectPropertyIds =
   [ propertyId editorProperties.projectRoot
+  , propertyId editorProperties.analysisWorkspaceTrusted
+  , propertyId editorProperties.workspaceTrustRegistry
+  , propertyId editorProperties.workspaceRequestedAnalysisTrust
   , propertyId editorProperties.projectEntries
   , propertyId editorProperties.projectPathsByKey
   , propertyId editorProperties.projectExpandedFolders
@@ -896,17 +1439,29 @@ beginOpenProjectFolder rootPath rememberWorkspace model =
            | rememberWorkspace
            , Just registryPath <- [model.workspaceRegistryPath]
            ]
+        <> [ trustRegistryWriteEffect trustRegistryPath trustedRegistry
+           | rememberWorkspace
+           , Just trustRegistryPath <- [model.workspaceTrustRegistryPath]
+           ]
     )
-    (projectAction "Set project root" projectPropertyIds (setProjectRoot rootPath))
+    (projectAction "Set project root" projectPropertyIds (setProjectRoot rootPath rememberWorkspace))
+  where
+    trustedRegistry = trustRegistryInsert rootPath model.workspaceTrustRegistry
 
-setProjectRoot :: FilePath -> EditorModel -> EditorModel
-setProjectRoot rootPath model =
+setProjectRoot :: FilePath -> Bool -> EditorModel -> EditorModel
+setProjectRoot rootPath trusted model =
   model
     { documents = Map.empty
     , tabOrder = []
     , selectedTab = Nothing
     , nextDocumentIdentity = 1000
     , projectRoot = Just rootPath
+    , analysisWorkspaceTrusted = trusted
+    , workspaceTrustRegistry =
+        if trusted
+          then trustRegistryInsert rootPath model.workspaceTrustRegistry
+          else model.workspaceTrustRegistry
+    , workspaceRequestedAnalysisTrust = trusted
     , projectEntries = Map.singleton rootPath rootEntry
     , projectPathsByKey = Map.singleton (CollectionItemKey 1) rootPath
     , projectExpandedFolders = Set.singleton rootPath
@@ -930,6 +1485,28 @@ setProjectRoot rootPath model =
         , projectEntryChildren = []
         , projectEntryChildrenLoaded = False
         }
+
+trustAnalysisWorkspace :: EditorModel -> Transaction EditorModel
+trustAnalysisWorkspace model =
+  case model.projectRoot of
+    Nothing -> noTransaction
+    Just root ->
+      transactionFromActionWithEffects
+        "Trust workspace for compiler analysis"
+        NoUndo
+        [ trustRegistryWriteEffect path trustedRegistry
+        | Just path <- [model.workspaceTrustRegistryPath]
+        ]
+        ( batchActions
+            "Trust workspace for compiler analysis"
+            [ editorProperties.analysisWorkspaceTrusted .= True
+            , editorProperties.workspaceRequestedAnalysisTrust .= True
+            , editorProperties.workspaceTrustRegistry .= trustedRegistry
+            , editorProperties.analysisStatus .= "GHC: loading trusted workspace"
+            ]
+        )
+      where
+        trustedRegistry = trustRegistryInsert root model.workspaceTrustRegistry
 
 storeDirectoryEntries :: FilePath -> [FileSystemEntry] -> EditorModel -> EditorModel
 storeDirectoryEntries directoryPath unfilteredEntries model =
@@ -996,9 +1573,14 @@ storeDirectoryEntries directoryPath unfilteredEntries model =
         ((/= Text.pack workspaceFileName) . (.fileSystemEntryName))
         unfilteredEntries
 
-workspaceFileEffectKey, workspaceRegistryEffectKey :: EffectKey
+workspaceFileEffectKey, workspaceRegistryEffectKey, trustRegistryEffectKey :: EffectKey
 workspaceFileEffectKey = EffectKey maxBound
 workspaceRegistryEffectKey = EffectKey (maxBound - 1)
+trustRegistryEffectKey = EffectKey (maxBound - 2)
+
+trustRegistryPathFor :: FilePath -> FilePath
+trustRegistryPathFor lastWorkspacePath =
+  takeDirectory lastWorkspacePath </> "trusted-workspaces.json"
 
 workspaceRegistryWriteEffect :: FilePath -> FilePath -> Effect
 workspaceRegistryWriteEffect registryPath rootPath =
@@ -1006,6 +1588,69 @@ workspaceRegistryWriteEffect registryPath rootPath =
     workspaceRegistryEffectKey
     registryPath
     (Text.pack (normalise rootPath) <> "\n")
+
+trustRegistryWriteEffect :: FilePath -> TrustRegistry -> Effect
+trustRegistryWriteEffect path registry =
+  WriteTextFileAtomically
+    trustRegistryEffectKey
+    path
+    (encodeTrustRegistry registry <> "\n")
+
+trustRegistryInsert :: FilePath -> TrustRegistry -> TrustRegistry
+trustRegistryInsert root registry =
+  registry
+    { trustedWorkspaceRoots =
+        Set.insert (normalise root) registry.trustedWorkspaceRoots
+    }
+
+handleTrustRegistryRead
+  :: Either Text (Maybe Text)
+  -> EditorModel
+  -> Transaction EditorModel
+handleTrustRegistryRead result model =
+  case result of
+    Left message ->
+      transactionFromAction
+        "Report trust-registry read failure"
+        NoUndo
+        ( editorProperties.workspaceMessage
+            .= "Could not read the Visual Haskell trust registry: " <> message
+        )
+    Right Nothing -> noTransaction
+    Right (Just contents) ->
+      case decodeTrustRegistry contents of
+        Left message ->
+          transactionFromAction
+            "Report invalid trust registry"
+            NoUndo
+            ( editorProperties.workspaceMessage
+                .= "Could not decode the Visual Haskell trust registry: " <> message
+            )
+        Right registry ->
+          transactionFromAction
+            "Restore user workspace trust"
+            NoUndo
+            ( actionWithProperties
+                "Restore user workspace trust"
+                [ propertyId editorProperties.workspaceTrustRegistry
+                , propertyId editorProperties.analysisWorkspaceTrusted
+                ]
+                (applyTrustRegistry registry)
+            )
+  where
+    applyTrustRegistry registry current =
+      current
+        { workspaceTrustRegistry = registry
+        , analysisWorkspaceTrusted =
+            current.analysisWorkspaceTrusted
+              || maybe
+                False
+                (\root ->
+                  current.workspaceRequestedAnalysisTrust
+                    && Set.member (normalise root) registry.trustedWorkspaceRoots
+                )
+                current.projectRoot
+        }
 
 handleWorkspaceRegistryRead
   :: Either Text (Maybe Text)
@@ -1100,6 +1745,8 @@ restoreWorkspaceState root state =
         , propertyId editorProperties.workspaceRestoreActiveFile
         , propertyId editorProperties.workspaceRestoreExplorerSelection
         , propertyId editorProperties.workspaceMessage
+        , propertyId editorProperties.workspaceRequestedAnalysisTrust
+        , propertyId editorProperties.analysisWorkspaceTrusted
         ]
         applyState
     )
@@ -1118,6 +1765,11 @@ restoreWorkspaceState root state =
     effects = fmap ReadDirectory directoriesToRead <> fmap ReadTextFile openFiles
     pendingFiles = Set.fromList openFiles
     applyState current =
+      let requestedTrust =
+            current.workspaceRequestedAnalysisTrust || state.workspaceAnalysisTrusted
+          approvedByUser =
+            Set.member (normalise root) current.workspaceTrustRegistry.trustedWorkspaceRoots
+       in
       current
         { projectExpandedFolders = expandedFolders
         , projectSelectedEntry = explorerSelection
@@ -1130,6 +1782,9 @@ restoreWorkspaceState root state =
         , workspaceRestorePendingFiles = pendingFiles
         , workspaceRestoreActiveFile = activeFile
         , workspaceRestoreExplorerSelection = explorerSelection
+        , workspaceRequestedAnalysisTrust = requestedTrust
+        , analysisWorkspaceTrusted =
+            current.analysisWorkspaceTrusted || (requestedTrust && approvedByUser)
         , workspaceMessage =
             if Set.null pendingFiles
               then "Restored Visual Haskell workspace"
@@ -1246,6 +1901,7 @@ workspaceStateFromModel model = do
       , workspaceSelectedExplorerEntry = selectedEntry
       , workspaceNavigatorPane = model.navigatorState
       , workspaceInspectorPane = model.inspectorState
+      , workspaceAnalysisTrusted = model.analysisWorkspaceTrusted
       }
 
 selectProjectEntry :: CollectionItemKey -> EditorModel -> Transaction EditorModel
@@ -1528,12 +2184,12 @@ insertDocument documentPath initialContents model =
         , documentLanguage = Nothing
         }
 
-documentPresentation :: Document -> [TextLayer]
-documentPresentation document
+documentPresentation :: EditorModel -> Document -> [TextLayer]
+documentPresentation model document
   | Just layer <- document.documentSyntaxLayer
   , layer.textLayerRevision == document.documentRevision = [layer]
-  | takeExtension document.documentPath `elem` [".hs", ".lhs"] =
-      [haskellSyntaxLayer document.documentRevision document.documentContents]
+  | isHaskellPath document.documentPath =
+      [haskellSyntaxLayer model.systemColorScheme document.documentRevision document.documentContents]
   | otherwise = []
 
 nextTextRevision :: TextRevision -> TextRevision

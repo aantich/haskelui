@@ -1,0 +1,40 @@
+cabal-version: 2.2
+
+-- This file has been generated from package.yaml by hpack version 0.39.6.
+--
+-- see: https://github.com/sol/hpack
+
+name:           visual-haskell-analysis-fake-worker
+version:        0.1.0.0
+synopsis:       Deterministic protocol worker for Visual Haskell integration tests
+description:    Exercises the real Visual Haskell process protocol without linking GHC.
+category:       Development
+homepage:       https://github.com/aantich/haskelui#readme
+bug-reports:    https://github.com/aantich/haskelui/issues
+author:         Visual Haskell contributors
+maintainer:     Visual Haskell contributors
+copyright:      2026 Visual Haskell contributors
+license:        BSD-3-Clause
+build-type:     Simple
+
+source-repository head
+  type: git
+  location: https://github.com/aantich/haskelui
+
+executable visual-haskell-analysis-fake-worker
+  main-is: Main.hs
+  other-modules:
+      Paths_visual_haskell_analysis_fake_worker
+  autogen-modules:
+      Paths_visual_haskell_analysis_fake_worker
+  hs-source-dirs:
+      app
+  ghc-options: -Wall -Wcompat -threaded
+  build-depends:
+      base >=4.20.2 && <4.21
+    , containers
+    , directory
+    , text
+    , visual-haskell-analysis-protocol
+    , visual-haskell-semantic-model
+  default-language: Haskell2010

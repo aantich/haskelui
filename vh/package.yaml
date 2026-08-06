@@ -8,21 +8,29 @@ copyright: 2026 HaskeLUI contributors
 
 dependencies:
   - aeson
+  - async
   - base >= 4.20.2 && < 4.21
   - bytestring
   - containers
   - directory
   - filepath
   - text
+  - time
   - haskelui-core
+  - visual-haskell-analysis-client
+  - visual-haskell-analysis-protocol
+  - visual-haskell-semantic-model
   - visual-haskell-textmate
 
 library:
   source-dirs: src
   exposed-modules:
     - VisualHaskell
+    - VisualHaskell.Analysis.Service
     - VisualHaskell.Highlighting
+    - VisualHaskell.Logging
     - VisualHaskell.Paths
+    - VisualHaskell.TrustState
     - VisualHaskell.WorkspaceState
 
 executables:
@@ -35,6 +43,8 @@ executables:
       - haskelui-backend-appkit
       - visual-haskell
       - haskelui-runtime
+    build-tools:
+      - visual-haskell-analysis-ghc910:visual-haskell-analysis-ghc910
     ghc-options:
       - -Wall
       - -Wcompat
@@ -44,6 +54,11 @@ executables:
         buildable: false
 
 tests:
+  vh-debug-logging-test:
+    main: LoggingSpec.hs
+    source-dirs: test/logging
+    dependencies:
+      - visual-haskell
   vh-model-test:
     main: ModelSpec.hs
     source-dirs: test/model
@@ -80,3 +95,17 @@ tests:
       - directory
       - visual-haskell
       - haskelui-runtime
+  vh-analysis-service-test:
+    main: Spec.hs
+    source-dirs: test/analysis-service
+    dependencies:
+      - directory
+      - filepath
+      - stm
+      - visual-haskell
+      - visual-haskell-textmate
+      - haskelui-runtime
+    build-tools:
+      - visual-haskell-analysis-ghc910:visual-haskell-analysis-ghc910
+    ghc-options:
+      - -threaded

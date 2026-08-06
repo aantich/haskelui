@@ -47,6 +47,7 @@ import HaskeLUI.Core
   , TextLayer
   , TextRange
   , TextRevision
+  , TraceSink
   )
 
 newtype LanguageId = LanguageId {unLanguageId :: Text}
@@ -155,8 +156,42 @@ data TextMateConfiguration = TextMateConfiguration
   , maximumThemeBytes :: !Int
   , maximumRuleCount :: !Int
   , maximumMatchesPerLine :: !Int
+  , textMateTraceSink :: !TraceSink
   }
-  deriving stock (Eq, Show)
+
+instance Eq TextMateConfiguration where
+  left == right =
+    bundledExtensionRoots left == bundledExtensionRoots right
+      && userExtensionRoots left == userExtensionRoots right
+      && userGrammarRoots left == userGrammarRoots right
+      && userThemeRoots left == userThemeRoots right
+      && selectedTheme left == selectedTheme right
+      && maximumGrammarBytes left == maximumGrammarBytes right
+      && maximumThemeBytes left == maximumThemeBytes right
+      && maximumRuleCount left == maximumRuleCount right
+      && maximumMatchesPerLine left == maximumMatchesPerLine right
+
+instance Show TextMateConfiguration where
+  show configuration =
+    "TextMateConfiguration {bundledExtensionRoots = "
+      <> show (bundledExtensionRoots configuration)
+      <> ", userExtensionRoots = "
+      <> show (userExtensionRoots configuration)
+      <> ", userGrammarRoots = "
+      <> show (userGrammarRoots configuration)
+      <> ", userThemeRoots = "
+      <> show (userThemeRoots configuration)
+      <> ", selectedTheme = "
+      <> show (selectedTheme configuration)
+      <> ", maximumGrammarBytes = "
+      <> show (maximumGrammarBytes configuration)
+      <> ", maximumThemeBytes = "
+      <> show (maximumThemeBytes configuration)
+      <> ", maximumRuleCount = "
+      <> show (maximumRuleCount configuration)
+      <> ", maximumMatchesPerLine = "
+      <> show (maximumMatchesPerLine configuration)
+      <> ", textMateTraceSink = <trace-sink>}"
 
 data HighlightSnapshot = HighlightSnapshot
   { highlightDocument :: !DocumentKey

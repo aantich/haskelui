@@ -6,6 +6,7 @@
 module HaskeLUI.Graphics.Types
   ( Rect (..)
   , Color (..)
+  , ColorScheme (..)
   , FontFamily (..)
   , FontWeight (..)
   , FontSlant (..)
@@ -31,6 +32,14 @@ data Color = RGBA
   , colorAlpha :: !Double
   }
   deriving stock (Eq, Show)
+
+-- | The light/dark color scheme selected by the host environment. This is
+-- deliberately independent from an application's named theme: a theme may
+-- provide one palette for each system scheme.
+data ColorScheme
+  = LightColorScheme
+  | DarkColorScheme
+  deriving stock (Eq, Ord, Show)
 
 data FontFamily
   = SystemFont

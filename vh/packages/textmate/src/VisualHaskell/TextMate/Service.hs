@@ -52,8 +52,11 @@ import HaskeLUI.Core
   , SubscriptionFingerprint (..)
   , SubscriptionKey (..)
   , TextLayerKey (..)
+  , TextRevision (..)
+  , TraceSeverity (..)
   , defaultServiceOptions
   , emitExternalEvent
+  , trace
   , serviceWithStatus
   , subscription
   )
@@ -188,8 +191,15 @@ runTextMateService
   -> ServiceContext model TextMateCommand
   -> IO ()
 runTextMateService configuration toExternal context = do
+  textMateTrace configuration TraceInfo "service.start"
+    [ ("bundledRoots", Text.pack (show configuration.bundledExtensionRoots))
+    , ("userExtensionRoots", Text.pack (show configuration.userExtensionRoots))
+    , ("userGrammarRoots", Text.pack (show configuration.userGrammarRoots))
+    , ("userThemeRoots", Text.pack (show configuration.userThemeRoots))
+    ]
   tokenizer <- newTokenizer configuration.maximumMatchesPerLine
   initial <- reloadEngine configuration Nothing emptyEngineState
+  traceRegistry configuration initial
   stateReference <- newIORef initial
   emitRegistry context toExternal initial
   reportRegistryHealth context initial.engineRegistry
@@ -198,19 +208,62 @@ runTextMateService configuration toExternal context = do
     loop tokenizer stateReference = do
       next <- context.receiveCommand
       case next of
-        Nothing -> pure ()
+        Nothing -> textMateTrace configuration TraceInfo "service.stop" []
         Just command -> do
+          textMateTrace configuration TraceDebug "command.start" (textMateCommandFields command)
           outcome <- try (handleCommand configuration tokenizer context toExternal stateReference command)
           case outcome of
-            Right () -> pure ()
+            Right () ->
+              textMateTrace configuration TraceDebug "command.complete" (textMateCommandFields command)
             Left (exception :: SomeException) -> do
               let message = Text.pack (displayException exception)
+              textMateTrace configuration TraceError "command.failed"
+                (textMateCommandFields command <> [("exception", message)])
               context.reportServiceHealth (ServiceDegraded message)
               emitEveryEvent
                 context
                 toExternal
                 (TextMateFailure (HighlightFailure Nothing Nothing message))
           loop tokenizer stateReference
+
+textMateTrace
+  :: TextMateConfiguration
+  -> TraceSeverity
+  -> Text
+  -> [(Text, Text)]
+  -> IO ()
+textMateTrace configuration severity =
+  trace configuration.textMateTraceSink severity "visual-haskell.textmate"
+
+textMateCommandFields :: TextMateCommand -> [(Text, Text)]
+textMateCommandFields command =
+  ("kind", textMateCommandKey command) :
+    case command of
+      ReloadTextMateResources -> []
+      SelectTextMateTheme identifier -> [("theme", identifier.unThemeId)]
+      UpsertTextMateDocument snapshot ->
+        [ ("document", Text.pack (show snapshot.highlightDocument.unDocumentKey))
+        , ("path", Text.pack snapshot.highlightPath)
+        , ("revision", Text.pack (show snapshot.highlightRevision.unTextRevision))
+        , ("contentHash", Text.pack (show snapshot.highlightContentHash.unContentHash))
+        , ("characters", Text.pack (show (Text.length snapshot.highlightText)))
+        ]
+      CloseTextMateDocument document ->
+        [("document", Text.pack (show document.unDocumentKey))]
+      PrioritizeTextMateDocument document ->
+        [("document", Text.pack (show document.unDocumentKey))]
+
+traceRegistry :: TextMateConfiguration -> EngineState -> IO ()
+traceRegistry configuration state =
+  textMateTrace configuration TraceInfo "registry.loaded"
+    [ ("generation", Text.pack (show state.engineRegistryGeneration.unRegistryGeneration))
+    , ("languages", Text.pack (show (length summary.registryLanguageIds)))
+    , ("themes", Text.pack (show (length summary.registryThemeIds)))
+    , ("diagnostics", Text.pack (show summary.registryDiagnosticCount))
+    , ("selectedTheme", maybe "<fallback>" (.unThemeId) state.engineSelectedTheme)
+    ]
+  where
+    summary = registrySummary state.engineRegistry
 
 emptyEngineState :: EngineState
 emptyEngineState =
@@ -238,6 +291,7 @@ handleCommand configuration tokenizer context toExternal stateReference command 
   case command of
     ReloadTextMateResources -> do
       reloaded <- reloadEngine configuration current.engineSelectedTheme current
+      traceRegistry configuration reloaded
       writeIORef stateReference reloaded
       emitRegistry context toExternal reloaded
       reportRegistryHealth context reloaded.engineRegistry

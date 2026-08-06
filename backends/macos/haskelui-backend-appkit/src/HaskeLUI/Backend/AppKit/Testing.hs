@@ -18,6 +18,8 @@ module HaskeLUI.Backend.AppKit.Testing
   , queryAppKitLastTestFailure
   ) where
 
+import Control.Exception (finally, mask, onException)
+import Control.Monad (unless)
 import qualified Data.ByteString as ByteString
 import Data.Text (Text)
 import qualified Data.Text.Encoding as Text
@@ -28,7 +30,9 @@ import HaskeLUI.Backend.AppKit (appKitBackend)
 import HaskeLUI.Backend.AppKit.Internal.FFI
   ( CDebugCounters (..)
   , c_debugCounters
+  , c_testAcquireProcessLock
   , c_testLastFailure
+  , c_testReleaseProcessLock
   , c_testScheduleVerticalScript
   , c_testScheduleTextEditorScript
   , c_testScheduleControlGalleryScript
@@ -44,6 +48,7 @@ import HaskeLUI.Core
   )
 import HaskeLUI.Runtime
   ( Backend (..)
+  , BackendSession (..)
   )
 
 data AppKitVerticalTestSpec = AppKitVerticalTestSpec
@@ -107,42 +112,35 @@ data AppKitDebugCounters = AppKitDebugCounters
 
 appKitBackendWithVerticalTest :: AppKitVerticalTestSpec -> Backend
 appKitBackendWithVerticalTest spec =
-  Backend $ \dispatch -> do
-    session <- appKitBackend.openBackend dispatch
+  serializedAppKitTestBackend $ do
     c_testScheduleVerticalScript
       spec.testMainWindow.unWindowKey
       spec.testNameField.unElementKey
       spec.testGreetingLabel.unElementKey
       spec.testSaveCommand.unCommandId
-    pure session
 
 appKitBackendWithTextEditorTest :: AppKitTextEditorTestSpec -> Backend
 appKitBackendWithTextEditorTest spec =
-  Backend $ \dispatch -> do
-    session <- appKitBackend.openBackend dispatch
+  serializedAppKitTestBackend $ do
     c_testScheduleTextEditorScript
       spec.testDocumentWindow.unWindowKey
       spec.testTextEditor.unElementKey
       spec.testDocumentTab.unTabKey
       spec.testEditorSaveCommand.unCommandId
       spec.testEditorOpenFolderCommand.unCommandId
-    pure session
 
 appKitBackendWithExplorerTest :: AppKitExplorerTestSpec -> Backend
 appKitBackendWithExplorerTest spec =
-  Backend $ \dispatch -> do
-    session <- appKitBackend.openBackend dispatch
+  serializedAppKitTestBackend $ do
     c_testScheduleExplorerScript
       spec.testExplorerWindow.unWindowKey
       spec.testProjectTree.unElementKey
       spec.testProjectFile.unCollectionItemKey
       spec.testOpenedFileTab.unTabKey
-    pure session
 
 appKitBackendWithControlGalleryTest :: AppKitControlGalleryTestSpec -> Backend
 appKitBackendWithControlGalleryTest spec =
-  Backend $ \dispatch -> do
-    session <- appKitBackend.openBackend dispatch
+  serializedAppKitTestBackend $ do
     c_testScheduleControlGalleryScript
       spec.testGalleryWindow.unWindowKey
       spec.testGalleryRootTab.unElementKey
@@ -158,16 +156,35 @@ appKitBackendWithControlGalleryTest spec =
       spec.testGalleryPopover.unElementKey
       spec.testGalleryContainer.unElementKey
       spec.testGalleryNestedChild.unElementKey
-    pure session
 
 appKitBackendWithDrawingTest :: AppKitDrawingTestSpec -> Backend
 appKitBackendWithDrawingTest spec =
-  Backend $ \dispatch -> do
-    session <- appKitBackend.openBackend dispatch
+  serializedAppKitTestBackend $ do
     c_testScheduleDrawingScript
       spec.testDrawingWindow.unWindowKey
       spec.testDrawingSurface.unElementKey
-    pure session
+
+-- Native AppKit scripts activate windows and synthesize input. Separate test
+-- executables therefore cannot safely run them concurrently: the OS routes
+-- keyboard focus to one foreground application. A process lock keeps Stack's
+-- parallel package runner while serializing only these native UI sessions.
+serializedAppKitTestBackend :: IO () -> Backend
+serializedAppKitTestBackend schedule =
+  Backend $ \dispatch ->
+    mask $ \restore -> do
+      acquired <- restore c_testAcquireProcessLock
+      unless (acquired /= 0) $
+        error "HaskeLUI AppKit test backend could not acquire its native UI lock"
+      session <-
+        restore (appKitBackend.openBackend dispatch)
+          `onException` c_testReleaseProcessLock
+      restore schedule
+        `onException` (session.backendShutdown `finally` c_testReleaseProcessLock)
+      pure
+        session
+          { backendShutdown =
+              session.backendShutdown `finally` c_testReleaseProcessLock
+          }
 
 queryAppKitDebugCounters :: IO AppKitDebugCounters
 queryAppKitDebugCounters =

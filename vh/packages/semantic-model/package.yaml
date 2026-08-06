@@ -1,0 +1,35 @@
+name: visual-haskell-semantic-model
+version: 0.1.0.0
+synopsis: Stable compiler-independent semantic domain for Visual Haskell
+description: Defines revision-bound source coordinates, diagnostics, declarations, and structured types without depending on GHC or HaskeLUI.
+category: Development
+github: aantich/haskelui
+license: BSD-3-Clause
+author: Visual Haskell contributors
+maintainer: Visual Haskell contributors
+copyright: 2026 Visual Haskell contributors
+
+dependencies:
+  - aeson
+  - base >= 4.20.2 && < 4.21
+  - bytestring
+  - containers
+  - text
+
+ghc-options:
+  - -Wall
+  - -Wcompat
+
+library:
+  source-dirs: src
+  exposed-modules:
+    - VisualHaskell.Semantic
+    - VisualHaskell.Semantic.Coordinates
+    - VisualHaskell.Semantic.Types
+
+tests:
+  visual-haskell-semantic-model-test:
+    main: Spec.hs
+    source-dirs: test
+    dependencies:
+      - visual-haskell-semantic-model

@@ -1,0 +1,43 @@
+name: visual-haskell-analysis-client
+version: 0.1.0.0
+synopsis: Supervised worker-process client for Visual Haskell analysis
+description: Starts versioned analysis workers, validates handshakes, routes framed messages, and replays authoritative workspace snapshots after restart.
+category: Development
+github: aantich/haskelui
+license: BSD-3-Clause
+author: Visual Haskell contributors
+maintainer: Visual Haskell contributors
+copyright: 2026 Visual Haskell contributors
+
+dependencies:
+  - async
+  - base >= 4.20.2 && < 4.21
+  - bytestring
+  - containers
+  - process
+  - stm
+  - text
+  - visual-haskell-analysis-protocol
+  - visual-haskell-semantic-model
+
+ghc-options:
+  - -Wall
+  - -Wcompat
+
+library:
+  source-dirs: src
+  exposed-modules:
+    - VisualHaskell.Analysis.Acceptance
+    - VisualHaskell.Analysis.Client
+
+tests:
+  visual-haskell-analysis-client-test:
+    main: Spec.hs
+    source-dirs: test
+    dependencies:
+      - directory
+      - visual-haskell-analysis-client
+    build-tools:
+      - visual-haskell-analysis-fake-worker:visual-haskell-analysis-fake-worker
+    ghc-options:
+      - -threaded

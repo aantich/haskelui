@@ -1,0 +1,331 @@
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+
+module VisualHaskell.Analysis.Ghc910.Compat
+  ( analyzeWithGhc910
+  ) where
+
+import Control.Exception (SomeException, displayException, try)
+import Control.Monad (forM)
+import Control.Monad.IO.Class (liftIO)
+import Control.Monad.State.Strict (State, execState, get, modify')
+import qualified Data.Map.Strict as Map
+import Data.Map.Strict (Map)
+import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
+import Data.Maybe (catMaybes, mapMaybe)
+import Data.Text (Text)
+import qualified Data.Text as Text
+import Data.Time.Clock (UTCTime, getCurrentTime)
+import qualified GHC
+import GHC.Builtin.Types (listTyCon)
+import GHC.Core.TyCon
+  ( isTupleTyCon
+  , tyConName
+  )
+import GHC.Core.Type
+  ( Type
+  , getTyVar_maybe
+  , splitForAllTyCoVar_maybe
+  , splitFunTy_maybe
+  , splitTyConApp_maybe
+  )
+import GHC.Data.StringBuffer (stringToStringBuffer)
+import GHC.Driver.Monad (pushLogHookM)
+import GHC.Types.Error
+  ( DiagnosticCode
+  , MessageClass (..)
+  , Severity (..)
+  )
+import GHC.Types.Id (idType)
+import GHC.Types.Name
+  ( Name
+  , nameOccName
+  , nameSrcSpan
+  )
+import GHC.Types.Name.Occurrence (occNameString)
+import GHC.Types.SrcLoc
+  ( RealSrcSpan
+  , SrcSpan (..)
+  , srcSpanEndCol
+  , srcSpanEndLine
+  , srcSpanFile
+  , srcSpanStartCol
+  , srcSpanStartLine
+  )
+import GHC.Types.TyThing (TyThing (..))
+import GHC.Utils.Outputable
+  ( SDoc
+  , ppr
+  , renderWithContext
+  , showSDocUnsafe
+  )
+import GHC.Utils.Logger (LogAction, LogFlags (..))
+import GHC.Data.FastString (unpackFS)
+import HIE.Bios.Environment (initSession)
+import HIE.Bios.Types (ComponentOptions (..))
+import System.FilePath (normalise)
+import VisualHaskell.Analysis.Ghc910.Types
+import VisualHaskell.Semantic
+
+analyzeWithGhc910
+  :: CompilerInvocation
+  -> Map DocumentId DocumentSnapshot
+  -> DocumentId
+  -> WorkspaceGeneration
+  -> IO (Either GhcAnalysisFailure (AnalysisSnapshot RevisionedSourceRange))
+analyzeWithGhc910 invocation documents requested generation =
+  case Map.lookup requested documents of
+    Nothing -> pure (Left (failure "document-unavailable" "The requested document is not open" True))
+    Just requestedSnapshot -> do
+      attempted <-
+        try
+          ( GHC.runGhc (Just invocation.invocationCompilerLibDir) $ do
+              let componentOptions =
+                    ComponentOptions
+                      invocation.invocationCompilerOptions
+                      invocation.invocationComponentRoot
+                      invocation.invocationCradleDependencies
+              _ <- initSession componentOptions
+              diagnosticReference <- liftIO (newIORef [])
+              pushLogHookM (const (captureLog diagnosticReference requestedSnapshot))
+              now <- liftIO getCurrentTime
+              targets <- traverse (snapshotTarget now) (Map.elems documents)
+              GHC.setTargets targets
+              loadResult <- GHC.load GHC.LoadAllTargets
+              diagnostics <- liftIO (readIORef diagnosticReference)
+              (declarations, typeTable) <-
+                case loadResult of
+                  GHC.Failed -> pure ([], Map.empty)
+                  GHC.Succeeded -> declarationsFor requestedSnapshot
+              pure
+                AnalysisSnapshot
+                  { analysisWorkspaceGeneration = generation
+                  , analysisSession = invocationSession invocation
+                  , analysisDocument = requested
+                  , analysisRevision = requestedSnapshot.snapshotRevision
+                  , analysisContentHash = requestedSnapshot.snapshotContentHash
+                  , analysisCompleteness =
+                      case loadResult of
+                        GHC.Succeeded -> Typechecked
+                        GHC.Failed -> PartiallyFailed
+                  , analysisFreshness = CurrentAnalysis
+                  , analysisDiagnostics = diagnostics
+                  , analysisDeclarations = declarations
+                  , analysisTypes = typeTable
+                  }
+          )
+      pure $
+        case attempted of
+          Left (exception :: SomeException) ->
+            Left (failure "ghc-exception" (Text.pack (displayException exception)) True)
+          Right snapshot -> Right snapshot
+
+snapshotTarget :: GHC.GhcMonad monad => UTCTime -> DocumentSnapshot -> monad GHC.Target
+snapshotTarget now snapshot = do
+  target <- GHC.guessTarget snapshot.snapshotPath Nothing Nothing
+  pure
+    target
+      { GHC.targetAllowObjCode = False
+      , GHC.targetContents = Just (stringToStringBuffer (Text.unpack snapshot.snapshotText), now)
+      }
+
+captureLog
+  :: IORef [Diagnostic RevisionedSourceRange]
+  -> DocumentSnapshot
+  -> LogAction
+captureLog reference snapshot logFlags messageClass sourceSpan message =
+  case messageClass of
+    MCDiagnostic severity _reason code ->
+      case diagnosticFor snapshot logFlags severity code sourceSpan message of
+        Nothing -> pure ()
+        Just diagnostic -> modifyIORef' reference (<> [diagnostic])
+    MCFatal ->
+      case diagnosticFor snapshot logFlags SevError Nothing sourceSpan message of
+        Nothing -> pure ()
+        Just diagnostic -> modifyIORef' reference (<> [diagnostic])
+    _ -> pure ()
+
+diagnosticFor
+  :: DocumentSnapshot
+  -> LogFlags
+  -> Severity
+  -> Maybe DiagnosticCode
+  -> SrcSpan
+  -> SDoc
+  -> Maybe (Diagnostic RevisionedSourceRange)
+diagnosticFor snapshot logFlags severity code sourceSpan message = do
+  range <- sourceRangeFor snapshot sourceSpan
+  let rendered = Text.strip (Text.pack (renderWithContext logFlags.log_default_user_context message))
+      renderedCode = Text.pack . show <$> code
+      identity =
+        DiagnosticId
+          ( "ghc:"
+              <> maybe "uncoded" id renderedCode
+              <> ":"
+              <> Text.pack (show (contentHash (rendered <> Text.pack (show range))))
+          )
+  pure
+    Diagnostic
+      { diagnosticId = identity
+      , diagnosticSeverity = case severity of
+          SevError -> DiagnosticError
+          SevWarning -> DiagnosticWarning
+          SevIgnore -> DiagnosticInformation
+      , diagnosticSource = "GHC 9.10.3"
+      , diagnosticCode = renderedCode
+      , diagnosticMessage = rendered
+      , diagnosticRange = range
+      , diagnosticRelated = []
+      }
+
+declarationsFor
+  :: GHC.GhcMonad monad
+  => DocumentSnapshot
+  -> monad ([Declaration RevisionedSourceRange], TypeTable)
+declarationsFor snapshot = do
+  graph <- GHC.getModuleGraph
+  let summaries =
+        filter
+          (\summary -> fmap normalise (GHC.ml_hs_file (GHC.ms_location summary)) == Just (normalise snapshot.snapshotPath))
+          (GHC.mgModSummaries graph)
+  case summaries of
+    [] -> pure ([], Map.empty)
+    summary : _ -> do
+      info <- GHC.getModuleInfo summary.ms_mod
+      case info >>= GHC.modInfoTopLevelScope of
+        Nothing -> pure ([], Map.empty)
+        Just names -> do
+          declarationsAndTypes <- forM names $ \name -> do
+            thing <- GHC.lookupName name
+            pure (declarationFor snapshot name =<< thing)
+          let declarations = mapMaybe (fmap fst) declarationsAndTypes
+              typeTable = execState (mapM_ (recordType . snd) (catMaybes declarationsAndTypes)) Map.empty
+              declarationsWithIds = map (attachTypeId typeTable) declarations
+          pure (declarationsWithIds, typeTable)
+
+declarationFor
+  :: DocumentSnapshot
+  -> Name
+  -> TyThing
+  -> Maybe (Declaration RevisionedSourceRange, Type)
+declarationFor snapshot name thing = do
+  range <- sourceRangeFor snapshot (nameSrcSpan name)
+  declarationTypeValue <- typeOfThing thing
+  let declarationNameValue = Text.pack (occNameString (nameOccName name))
+  pure
+    ( Declaration
+        { declarationId = DeclarationId ("ghc:" <> declarationNameValue <> ":" <> Text.pack (show range))
+        , declarationName = declarationNameValue
+        , declarationKind = declarationKindFor thing
+        , declarationRange = range
+        , declarationSelectionRange = range
+        , declarationType = Just (typeIdentity declarationTypeValue)
+        , declarationSignatureText = Just (renderType declarationTypeValue)
+        }
+    , declarationTypeValue
+    )
+
+declarationKindFor :: TyThing -> DeclarationKind
+declarationKindFor = \case
+  AnId _ -> ValueDeclaration
+  ATyCon _ -> TypeDeclaration
+  AConLike _ -> DataConstructorDeclaration
+  ACoAxiom _ -> UnsupportedDeclaration "coercion-axiom"
+
+typeOfThing :: TyThing -> Maybe Type
+typeOfThing = \case
+  AnId identifier -> Just (idType identifier)
+  ATyCon constructor -> Just (GHC.tyConKind constructor)
+  AConLike _ -> Nothing
+  ACoAxiom _ -> Nothing
+
+attachTypeId :: TypeTable -> Declaration range -> Declaration range
+attachTypeId table declaration =
+  declaration
+    { declarationType =
+        declaration.declarationType >>= (\identifier -> identifier <$ Map.lookup identifier table)
+    }
+
+recordType :: Type -> State TypeTable TypeId
+recordType ghcType = do
+  table <- get
+  let identifier = typeIdentity ghcType
+  case Map.lookup identifier table of
+    Just _ -> pure identifier
+    Nothing -> do
+      modify' (Map.insert identifier (UnsupportedType (renderType ghcType)))
+      normalized <- normalizeType ghcType
+      modify' (Map.insert identifier normalized)
+      pure identifier
+
+normalizeType :: Type -> State TypeTable StructuredType
+normalizeType ghcType
+  | Just variable <- getTyVar_maybe ghcType =
+      pure (TypeVariable (Text.pack (occNameString (nameOccName (GHC.getName variable)))))
+  | Just (binder, body) <- splitForAllTyCoVar_maybe ghcType = do
+      bodyIdentifier <- recordType body
+      pure (ForallType [Text.pack (occNameString (nameOccName (GHC.getName binder)))] bodyIdentifier)
+  | Just (_, _, argument, result) <- splitFunTy_maybe ghcType =
+      FunctionType <$> recordType argument <*> recordType result
+  | Just (constructor, arguments) <- splitTyConApp_maybe ghcType = do
+      argumentIdentifiers <- traverse recordType arguments
+      if constructor == listTyCon
+        then case argumentIdentifiers of
+          [element] -> pure (ListType element)
+          _ -> pure (UnsupportedType (renderType ghcType))
+        else if isTupleTyCon constructor
+          then pure (TupleType argumentIdentifiers)
+          else if null argumentIdentifiers
+            then pure (TypeConstructor (qualifiedName (tyConName constructor)))
+            else do
+              constructorIdentifier <- recordTypeConstructor constructor
+              pure (TypeApplication constructorIdentifier argumentIdentifiers)
+  | otherwise = pure (UnsupportedType (renderType ghcType))
+
+recordTypeConstructor :: GHC.TyCon -> State TypeTable TypeId
+recordTypeConstructor constructor = do
+  let name = qualifiedName (tyConName constructor)
+      identifier = TypeId ("ghc:constructor:" <> name)
+  modify' (Map.insert identifier (TypeConstructor name))
+  pure identifier
+
+typeIdentity :: Type -> TypeId
+typeIdentity ghcType = TypeId ("ghc:type:" <> renderType ghcType)
+
+renderType :: Type -> Text
+renderType = Text.pack . showSDocUnsafe . ppr
+
+qualifiedName :: Name -> Text
+qualifiedName = Text.pack . showSDocUnsafe . ppr
+
+sourceRangeFor :: DocumentSnapshot -> SrcSpan -> Maybe RevisionedSourceRange
+sourceRangeFor snapshot (RealSrcSpan realSpan _) =
+  if normalise (unpackFS (srcSpanFile realSpan)) == normalise snapshot.snapshotPath
+    then Just (realSourceRange snapshot.snapshotRevision realSpan)
+    else Nothing
+sourceRangeFor _ (UnhelpfulSpan _) = Nothing
+
+realSourceRange :: TextRevision -> RealSrcSpan -> RevisionedSourceRange
+realSourceRange revision realSpan =
+  RevisionedSourceRange
+    revision
+    (SourcePosition (srcSpanStartLine realSpan - 1) (srcSpanStartCol realSpan - 1) GhcColumn)
+    (SourcePosition (srcSpanEndLine realSpan - 1) (srcSpanEndCol realSpan - 1) GhcColumn)
+
+invocationSession :: CompilerInvocation -> SessionId
+invocationSession invocation =
+  SessionId
+    ( "ghc-9.10.3:"
+        <> Text.pack (show (contentHash (Text.pack (invocation.invocationComponentRoot <> show invocation.invocationCompilerOptions))))
+    )
+
+failure :: Text -> Text -> Bool -> GhcAnalysisFailure
+failure code message recoverable =
+  GhcAnalysisFailure
+    { failureCode = code
+    , failureMessage = message
+    , failureRecoverable = recoverable
+    }

@@ -1,6 +1,6 @@
 # Visual Haskell long-term product and analysis vision
 
-Status: proposed roadmap
+Status: active roadmap; Phase 0, Phase 1A, and Phase 1B are implemented
 
 Date: 2026-08-06
 
@@ -148,6 +148,7 @@ vh/
     project-files/                  Cabal, Stack, and Hpack adapters
 
   workers/
+    fake/                           Deterministic protocol/test worker
     ghc-9.10/                       Direct GHC 9.10 worker
 
   test-fixtures/
@@ -163,12 +164,42 @@ visual-haskell-analysis-protocol
 visual-haskell-semantic-model
 visual-haskell-analysis-client
 visual-haskell-project-files
-visual-haskell-analysis-ghc-910
+visual-haskell-analysis-ghc910
 ```
 
 The protocol and semantic-model packages depend only on stable ordinary
 packages such as `base`, `containers`, `text`, and serialization libraries.
 They must not import `GHC`, `Development.IDE`, `HIE.Bios`, or native UI modules.
+
+### 5.1 Implemented analysis foundation and direct-GHC slice
+
+The first compiler-independent slice now exists:
+
+- `visual-haskell-semantic-model` owns stable identities, revision/hash-bound
+  snapshots, diagnostics, declarations, structured types, and conversions
+  among GHC display columns, UTF-8 bytes, Unicode scalars, and UTF-16 units.
+- `visual-haskell-analysis-protocol` owns explicit V1 JSON encodings and a
+  four-byte big-endian, length-prefixed transport with a 16 MiB default bound.
+- `visual-haskell-analysis-client` owns worker process lifetime, handshake
+  validation, bounded transport, generation-tagged events, restart, and
+  authoritative workspace/document replay.
+- `visual-haskell-analysis-fake-worker` exercises the real process and wire
+  boundary without introducing compiler dependencies.
+- `visual-haskell-analysis-ghc910` owns `hie-bios` project discovery and the
+  isolated GHC-9.10.3 compatibility layer. It analyzes all open buffers through
+  in-memory targets and returns stable diagnostics, declarations, and types.
+- `VisualHaskell.Analysis.Service` adapts the supervised client to HaskeLUI's
+  typed service runtime. The product model stores component/session identity
+  and accepts only exact worker/workspace/session/document/revision/hash
+  matches.
+
+The fake-worker integration test proves that an unexpected worker exit can
+restart automatically, replay the newest snapshot, and produce no stale
+messages after the new worker becomes ready. The GHC integration additionally
+loads this repository's real Stack component, typechecks dependent unsaved
+modules, captures revision-bound diagnostics, and recovers from a forced real
+worker crash. The production Visual Haskell runtime displays accepted compiler
+status without linking GHC into the UI process.
 
 ## 6. Protocol design
 
@@ -239,6 +270,10 @@ Initial capabilities include:
 - Definition locations
 - Cancellation
 
+Unknown capability names are retained as unsupported values rather than
+failing the handshake. This allows a newer worker and older client to negotiate
+within the same protocol major version.
+
 Future capabilities include deltas, completion, HIE references, project edits,
 source transformations, composition checking, and visual graph models.
 
@@ -273,6 +308,12 @@ WorkerHealth
 ```
 
 Logs are not normal protocol events. Structured user-relevant failures are.
+
+The implemented Phase 1B subset is `ClientHello`, `OpenWorkspace`, full
+`OpenDocument`/`UpdateDocumentSnapshot`, `CloseDocument`, `AnalyzeDocument`,
+`SelectComponent`, `CancelRequest`, `ReloadConfiguration`, and `Shutdown`, plus
+component discovery/selection events. Position queries remain Phase 2 because
+their payloads must be validated against real compiler use cases.
 
 ### 6.5 Ordering and stale data
 
@@ -793,8 +834,10 @@ diagnostic logs. Future OS-specific worker sandboxing may further restrict
 filesystem, network, and subprocess access, but it does not replace the trust
 decision.
 
-Trust is stored in a per-user product registry keyed by canonical workspace
-identity, not in the workspace-controlled `.vihs` file.
+Trust authority is stored in a per-user product registry keyed by normalized
+workspace identity. `.vihs` separately stores the user's portable request to
+restore trusted mode. Compiler tooling starts only when both records agree, so
+project-controlled metadata cannot grant authority by itself.
 
 ## 15. Cache and persistence policy
 
@@ -940,19 +983,44 @@ Gate:
   both re-enter the current model on the main queue and release all native
   resources.
 
-### Phase 1: Direct-GHC feasibility worker
+### Phase 1A: Compiler-independent analysis spine — implemented
 
-- Create protocol, semantic-model, client, and GHC 9.10 worker packages.
+- Create protocol, semantic-model, and supervised client packages.
+- Define bounded, versioned framing and capability negotiation.
+- Send full authoritative snapshots through a deterministic fake worker.
+- Implement forced-crash restart and snapshot replay.
+
+Gate achieved:
+
+- The real child process is forced to exit during an analysis request. The
+  client starts the next worker generation, replays the latest workspace and
+  document state, receives a fresh diagnostic/declaration/type result, and
+  rejects pre-restart worker messages after the new generation is ready.
+- Coordinate fixtures cover tabs, emoji, Unicode, UTF-8/UTF-16 boundaries,
+  CRLF offsets, stale revisions, and invalid mid-code-unit positions.
+- Protocol fixtures cover semantic JSON, unknown capabilities, bounded frames,
+  truncation, and oversized-frame rejection before payload allocation.
+
+### Phase 1B: Direct-GHC feasibility worker — implemented
+
+- Create the GHC 9.10 worker package and its compiler compatibility boundary.
 - Load the current repository through `hie-bios`.
 - Send full unsaved snapshots.
 - Return diagnostics, declarations, and structured types.
-- Implement forced-crash restart and snapshot replay.
+- Adapt the analysis client to a typed HaskeLUI service and apply strict
+  workspace/session/revision/hash acceptance in the Visual Haskell model.
 
-Gate:
+Gate achieved:
 
 - A supervised GHC 9.10.3 worker loads a real Stack workspace, analyzes two
   dependent unsaved modules, maps Unicode ranges correctly, discards obsolete
   results, and recovers after a forced crash.
+- A full Visual Haskell runtime fixture launches the worker through the typed
+  HaskeLUI service, establishes component/session identity, and renders a
+  strictly accepted current result.
+- Explicit Open Folder grants compiler-tooling trust and records it in both
+  `.vihs` and the per-user registry. Automatically restored folders regain
+  trusted mode only when the portable request and user authority both remain.
 
 ### Phase 2: Native semantic editor
 
@@ -1114,7 +1182,7 @@ and dependency presentation first. Add narrow edit actions such as adding a
 dependency only after source-of-truth detection and format-preservation
 fixtures pass.
 
-## 23. First concrete experiment
+## 23. Next concrete experiment
 
 The first compiler milestone is deliberately narrow:
 
@@ -1124,9 +1192,10 @@ The first compiler milestone is deliberately narrow:
 > the worker to crash, restart it, replay authoritative snapshots, and prove
 > that no stale pre-crash event reaches the current model.
 
-Success validates the process boundary, protocol, runtime service substrate,
-direct GHC approach, source overlays, Unicode coordinates, revision rules, and
-restart model in one vertical slice.
+The process boundary, protocol, Unicode coordinate layer, and restart/replay
+model have already passed independently with the fake worker. Success now
+validates the remaining direct-GHC approach, project loading, source overlays,
+and runtime-to-editor acceptance rules in one vertical slice.
 
 ## 24. External technical references
 

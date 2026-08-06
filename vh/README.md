@@ -1,10 +1,15 @@
 # Visual Haskell
 
-This example is the first document-oriented HaskeLUI vertical slice. Run it on macOS from the repository root:
+Visual Haskell is the featured document-oriented HaskeLUI application. Run it
+on macOS from the repository root:
 
 ```console
 stack exec vh
 ```
+
+For detailed JSONL diagnostics, run `stack exec vh -- --debug`. The terminal
+prints the generated log path. `--debug=PATH` or `--debug-log PATH` selects an
+explicit destination.
 
 Visual Haskell stores portable workspace metadata in `<project>/.vihs`. It
 remembers tab order and selection, expanded project folders, explorer
@@ -17,6 +22,10 @@ preserved rather than overwritten.
 - Open one or several UTF-8 files through the native AppKit Open panel or Command-O.
 - Choose a project root with **File > Open Folder…**. The sidebar renders a
   native folder hierarchy with open/closed folder icons and file icons.
+- Explicit **Open Folder…** selection trusts that workspace for compiler
+  tooling. `.vihs` records the restoration preference and a separate per-user
+  registry authorizes the normalized path. Automatically restored workspaces
+  regain trust only when both records agree; a repository cannot self-trust.
 - Load directory children lazily when a folder is expanded, instead of
   recursively scanning build outputs and hidden dependency trees up front.
 - Toggle folders by activating their row or the native disclosure control.
@@ -25,6 +34,11 @@ preserved rather than overwritten.
 - Keep files as keyed document tabs inside one native workspace window.
 - Compose a native split view with a project sidebar, central tab group,
   document inspector, and shared status area.
+- Commit native divider drags into the Haskell pane model, preserve them across
+  tab switches, and persist the resulting extents in `.vihs`.
+- Follow the live operating-system light/dark appearance in the editor base
+  palette and select the matching bundled TextMate theme without changing
+  document state, selection, or undo history.
 - Keep pane hosts and movable workspace items as distinct identities so content can later move between pane locations without losing retained state.
 - Route text changes into the pure Haskell document model.
 - Route native tab selection and close requests into the pure Haskell workspace model.
@@ -83,7 +97,7 @@ provides an immediate/failure fallback through the same generic API:
 ```haskell
 highlightHaskell :: Text -> [TextSpan SyntaxClass]
 
-syntaxStyle :: SyntaxClass -> TextStyle
+syntaxStyle :: ColorScheme -> SyntaxClass -> TextStyle
 ```
 
 Both paths resolve into generic, revision-bound `TextLayer` values. HaskeLUI
@@ -113,3 +127,60 @@ back-reference substitution, basic theme selectors, and incremental line
 caching. Cross-grammar includes, injection execution, embedded languages,
 semantic tokens, and the large differential compatibility corpus are still
 future compatibility work.
+
+## Compiler-analysis foundation
+
+Visual Haskell now has a compiler-independent analysis spine under
+`vh/packages` and `vh/workers`:
+
+```text
+semantic-model     stable identities, snapshots, diagnostics, declarations,
+                   structured types, and Unicode coordinate conversion
+analysis-protocol  explicit V1 JSON messages and bounded length framing
+analysis-client    child-process supervision, generations, restart, and replay
+workers/fake       deterministic real-process integration worker
+workers/ghc-9.10   hie-bios project discovery and direct GHC 9.10.3 analysis
+```
+
+The production editor registers the process client through
+`VisualHaskell.Analysis.Service`, a typed HaskeLUI service adapter. Opening a
+workspace configures the component cradle, and every open Haskell buffer is
+sent as a revision/hash-bound full snapshot. The status bar reports worker,
+workspace, component, and diagnostic state. Visual Haskell accepts a semantic
+result only if worker generation, workspace generation, component session,
+document identity, revision, and content hash still match the current pure
+model.
+
+The GHC worker is a sibling executable and the `vh` build target includes it
+automatically. It uses `hie-bios` 0.18 for explicit or implicit project flags,
+requires a trusted workspace, and keeps every direct `ghc` import inside its
+GHC-9.10 compatibility namespace. The UI process never links GHC. This
+repository includes an explicit multi-component `hie.yaml`, which avoids
+ambiguous `stack repl` selection in the self-hosting workspace.
+
+Reviewed trust now survives launches. `.vihs` records the requested editor
+state, while the user-owned canonical-workspace registry is the independent
+security authority. Removing either record restores the workspace as
+untrusted.
+
+Focused verification covers the real Stack component, two dependent unsaved
+modules, revision-bound compiler diagnostics, stable declaration/type DTOs,
+an actual forced GHC-worker crash followed by authoritative replay, and a full
+Visual Haskell runtime result reaching the rendered status surface:
+
+```console
+stack test visual-haskell-semantic-model \
+  visual-haskell-analysis-protocol \
+  visual-haskell-analysis-client \
+  visual-haskell-analysis-ghc910 \
+  visual-haskell:vh-analysis-service-test --fast --jobs 1
+
+tests/visual-haskell/validate-analysis-self-host.sh
+```
+
+The second command performs the self-hosted Stack-cradle check after the test
+binary has been built. It runs outside an enclosing `stack test`, so the
+cradle's own `stack repl` process cannot contend for the outer build lock.
+
+See the [analysis-spine design](../docs/design/visual-haskell-analysis-spine.md)
+and [long-term vision](../docs/design/visual-haskell-vision.md).

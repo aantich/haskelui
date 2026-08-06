@@ -1,0 +1,41 @@
+name: visual-haskell-analysis-protocol
+version: 0.1.0.0
+synopsis: Versioned process protocol for Visual Haskell analysis workers
+description: Defines compiler-independent client and worker messages plus bounded length-prefixed JSON framing.
+category: Development
+github: aantich/haskelui
+license: BSD-3-Clause
+author: Visual Haskell contributors
+maintainer: Visual Haskell contributors
+copyright: 2026 Visual Haskell contributors
+
+dependencies:
+  - aeson
+  - base >= 4.20.2 && < 4.21
+  - bytestring
+  - text
+  - visual-haskell-semantic-model
+
+ghc-options:
+  - -Wall
+  - -Wcompat
+
+library:
+  source-dirs: src
+  exposed-modules:
+    - VisualHaskell.Analysis.Protocol
+    - VisualHaskell.Analysis.Protocol.Framing
+    - VisualHaskell.Analysis.Protocol.Types
+
+extra-source-files:
+  - test/fixtures/client-hello.json
+
+tests:
+  visual-haskell-analysis-protocol-test:
+    main: Spec.hs
+    source-dirs: test
+    dependencies:
+      - directory
+      - filepath
+      - visual-haskell-analysis-protocol
+      - visual-haskell-semantic-model

@@ -2,7 +2,11 @@
 #import "compat/HaskeLUIAppKitCompatibility.h"
 
 #import <dispatch/dispatch.h>
+#import <errno.h>
+#import <fcntl.h>
 #import <math.h>
+#import <sys/file.h>
+#import <unistd.h>
 
 _Static_assert(sizeof(HaskeLUIMacTextStyle) == 120, "HaskeLUIMacTextStyle ABI must match its Haskell Storable instance");
 
@@ -19,6 +23,11 @@ typedef NS_ENUM(NSInteger, HaskeLUIMacControlKind) {
 @class HaskeLUIMacControlHandle;
 @class HaskeLUIMacTabGroupHandle;
 @class HaskeLUIMacTabHandle;
+@class HaskeLUIMacSplitViewDelegate;
+
+static void HaskeLUIEmit(int32_t kind, uint64_t identity, NSString *text);
+static NSString *HaskeLUISystemColorScheme(void);
+static void *HaskeLUIEffectiveAppearanceContext = &HaskeLUIEffectiveAppearanceContext;
 
 @interface HaskeLUIMacApplicationState : NSObject
 @property(nonatomic, assign) HaskeLUIMacEventCallback callback;
@@ -29,9 +38,26 @@ typedef NS_ENUM(NSInteger, HaskeLUIMacControlKind) {
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, HaskeLUIMacWindowHandle *> *windows;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, HaskeLUIMacControlHandle *> *controls;
 @property(nonatomic, strong) NSOpenPanel *openPanel;
+@property(nonatomic, assign) BOOL observingEffectiveAppearance;
 @end
 
 @implementation HaskeLUIMacApplicationState
+- (void)observeValueForKeyPath:(NSString *)keyPath
+                      ofObject:(id)object
+                        change:(NSDictionary<NSKeyValueChangeKey, id> *)change
+                       context:(void *)context {
+  (void)keyPath;
+  (void)object;
+  (void)change;
+  if (context == HaskeLUIEffectiveAppearanceContext) {
+    HaskeLUIEmit(
+        HaskeLUIMacEventSystemColorSchemeChanged,
+        0,
+        HaskeLUISystemColorScheme());
+    return;
+  }
+  [super observeValueForKeyPath:keyPath ofObject:object change:change context:context];
+}
 @end
 
 static HaskeLUIMacApplicationState *HaskeLUIState = nil;
@@ -43,6 +69,8 @@ static int32_t HaskeLUIQueuedCallbacks = 0;
 static int32_t HaskeLUITestFailures = 0;
 static NSString *HaskeLUILastTestFailure = nil;
 static BOOL HaskeLUIControlGalleryTestActive = NO;
+static int HaskeLUITestProcessLockDescriptor = -1;
+static const double HaskeLUIPaneResizeCommitDelaySeconds = 0.05;
 
 static NSColor *HaskeLUIColor(double red, double green, double blue, double alpha);
 static NSFont *HaskeLUIFontForStyle(NSFont *existingFont, const HaskeLUIMacTextStyle *style);
@@ -78,6 +106,16 @@ static void HaskeLUIEmit(int32_t kind, uint64_t identity, NSString *text) {
     }
     __sync_sub_and_fetch(&HaskeLUIQueuedCallbacks, 1);
   });
+}
+
+static NSString *HaskeLUISystemColorScheme(void) {
+  NSAppearanceName match =
+      [NSApplication.sharedApplication.effectiveAppearance
+          bestMatchFromAppearancesWithNames:@[
+            NSAppearanceNameAqua,
+            NSAppearanceNameDarkAqua
+          ]];
+  return [match isEqualToString:NSAppearanceNameDarkAqua] ? @"dark" : @"light";
 }
 
 @interface HaskeLUIContainerHostView : NSView
@@ -737,10 +775,20 @@ static NSImage *HaskeLUIImageSource(NSString *source);
 @property(nonatomic, strong) HaskeLUIMacWindowDelegate *delegate;
 @property(nonatomic, strong) NSView *workspaceRoot;
 @property(nonatomic, strong) NSSplitView *workspaceSplit;
+@property(nonatomic, strong) HaskeLUIMacSplitViewDelegate *workspaceSplitDelegate;
 @property(nonatomic, strong) NSView *workspaceStatus;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSView *> *workspacePanes;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSNumber *> *workspacePaneRoles;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSNumber *> *workspacePaneExtents;
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSNumber *> *workspacePaneMinimumExtents;
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSNumber *> *workspacePaneMaximumExtents;
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSNumber *> *workspacePaneStretchWeights;
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSNumber *> *workspacePaneCollapsedStates;
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSString *> *workspacePendingPaneEvents;
+@property(nonatomic, assign) uint64_t workspacePaneEventGeneration;
+@property(nonatomic, assign) BOOL workspacePaneEventsAwaitMouseRelease;
+@property(nonatomic, assign) BOOL workspaceApplyingLayout;
+@property(nonatomic, assign) BOOL workspaceTestingPaneResize;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSView *> *workspaceItems;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, HaskeLUIMacTabGroupHandle *> *tabGroups;
 @property(nonatomic, strong) NSMutableSet<NSNumber *> *seenPanes;
@@ -760,6 +808,190 @@ static NSImage *HaskeLUIImageSource(NSString *source);
 - (void)dealloc {
   HaskeLUILiveWindows -= 1;
 }
+@end
+
+@interface HaskeLUIMacSplitViewDelegate : NSObject <NSSplitViewDelegate>
+@property(nonatomic, weak) HaskeLUIMacWindowHandle *windowHandle;
+@end
+
+@implementation HaskeLUIMacSplitViewDelegate
+
+- (NSNumber *)paneKeyForView:(NSView *)view {
+  return [self.windowHandle.workspacePanes allKeysForObject:view].firstObject;
+}
+
+- (BOOL)isTrackingDividerInSplitView:(NSSplitView *)splitView {
+  NSEvent *event = NSApp.currentEvent;
+  if (event == nil || event.window != splitView.window ||
+      event.type != NSEventTypeLeftMouseDragged) {
+    return NO;
+  }
+  NSPoint point = [splitView convertPoint:event.locationInWindow fromView:nil];
+  CGFloat dividerThickness = splitView.dividerThickness;
+  for (NSUInteger index = 0; index + 1 < splitView.subviews.count; index += 1) {
+    NSView *before = splitView.subviews[index];
+    NSRect divider = splitView.vertical
+        ? NSMakeRect(NSMaxX(before.frame), NSMinY(splitView.bounds),
+                     dividerThickness, NSHeight(splitView.bounds))
+        : NSMakeRect(NSMinX(splitView.bounds), NSMaxY(before.frame),
+                     NSWidth(splitView.bounds), dividerThickness);
+    /* AppKit permits a small grab area around thin dividers. Match it so the
+       callback remains classified as a divider drag while tracking. */
+    if (NSPointInRect(point, NSInsetRect(divider, -4.0, -4.0))) {
+      return YES;
+    }
+  }
+  return NO;
+}
+
+- (CGFloat)splitView:(NSSplitView *)splitView
+    constrainMinCoordinate:(CGFloat)proposedMinimumPosition
+               ofSubviewAt:(NSInteger)dividerIndex {
+  HaskeLUIMacWindowHandle *handle = self.windowHandle;
+  if (handle == nil || dividerIndex < 0 ||
+      dividerIndex + 1 >= (NSInteger)splitView.subviews.count) {
+    return proposedMinimumPosition;
+  }
+  NSView *before = splitView.subviews[(NSUInteger)dividerIndex];
+  NSView *after = splitView.subviews[(NSUInteger)dividerIndex + 1];
+  NSNumber *beforeKey = [self paneKeyForView:before];
+  NSNumber *afterKey = [self paneKeyForView:after];
+  CGFloat constrained = proposedMinimumPosition;
+  double beforeMinimum = handle.workspacePaneMinimumExtents[beforeKey].doubleValue;
+  double afterMaximum = handle.workspacePaneMaximumExtents[afterKey].doubleValue;
+  if (beforeMinimum >= 0) {
+    constrained = MAX(
+        constrained,
+        (splitView.vertical ? NSMinX(before.frame) : NSMinY(before.frame)) + beforeMinimum);
+  }
+  if (afterMaximum >= 0) {
+    constrained = MAX(
+        constrained,
+        (splitView.vertical ? NSMaxX(after.frame) : NSMaxY(after.frame)) - afterMaximum);
+  }
+  return constrained;
+}
+
+- (CGFloat)splitView:(NSSplitView *)splitView
+    constrainMaxCoordinate:(CGFloat)proposedMaximumPosition
+               ofSubviewAt:(NSInteger)dividerIndex {
+  HaskeLUIMacWindowHandle *handle = self.windowHandle;
+  if (handle == nil || dividerIndex < 0 ||
+      dividerIndex + 1 >= (NSInteger)splitView.subviews.count) {
+    return proposedMaximumPosition;
+  }
+  NSView *before = splitView.subviews[(NSUInteger)dividerIndex];
+  NSView *after = splitView.subviews[(NSUInteger)dividerIndex + 1];
+  NSNumber *beforeKey = [self paneKeyForView:before];
+  NSNumber *afterKey = [self paneKeyForView:after];
+  CGFloat constrained = proposedMaximumPosition;
+  double beforeMaximum = handle.workspacePaneMaximumExtents[beforeKey].doubleValue;
+  double afterMinimum = handle.workspacePaneMinimumExtents[afterKey].doubleValue;
+  if (beforeMaximum >= 0) {
+    constrained = MIN(
+        constrained,
+        (splitView.vertical ? NSMinX(before.frame) : NSMinY(before.frame)) + beforeMaximum);
+  }
+  if (afterMinimum >= 0) {
+    constrained = MIN(
+        constrained,
+        (splitView.vertical ? NSMaxX(after.frame) : NSMaxY(after.frame)) - afterMinimum);
+  }
+  return constrained;
+}
+
+- (BOOL)splitView:(NSSplitView *)splitView shouldAdjustSizeOfSubview:(NSView *)view {
+  (void)splitView;
+  HaskeLUIMacWindowHandle *handle = self.windowHandle;
+  NSNumber *paneKey = [self paneKeyForView:view];
+  if (handle == nil || paneKey == nil) {
+    return YES;
+  }
+  BOOL hasStretchingPane = NO;
+  for (NSNumber *weight in handle.workspacePaneStretchWeights.allValues) {
+    if (weight.doubleValue > 0) {
+      hasStretchingPane = YES;
+      break;
+    }
+  }
+  return !hasStretchingPane || handle.workspacePaneStretchWeights[paneKey].doubleValue > 0;
+}
+
+- (void)schedulePendingPaneEvents {
+  HaskeLUIMacWindowHandle *handle = self.windowHandle;
+  if (handle == nil || handle.workspacePendingPaneEvents.count == 0) {
+    return;
+  }
+  handle.workspacePaneEventGeneration += 1;
+  uint64_t generation = handle.workspacePaneEventGeneration;
+  __weak HaskeLUIMacWindowHandle *weakHandle = handle;
+  /* NSSplitView reports continuously while its divider is tracked. Debounce
+     those native notifications into one model commit after the gesture's last
+     movement; the generation also invalidates stale scheduled commits. */
+  dispatch_after(
+      dispatch_time(
+          DISPATCH_TIME_NOW,
+          (int64_t)(HaskeLUIPaneResizeCommitDelaySeconds * NSEC_PER_SEC)),
+      dispatch_get_main_queue(), ^{
+    HaskeLUIMacWindowHandle *strongHandle = weakHandle;
+    if (strongHandle == nil || strongHandle.workspacePaneEventGeneration != generation) {
+      return;
+    }
+    if (strongHandle.workspacePaneEventsAwaitMouseRelease &&
+        (NSEvent.pressedMouseButtons & 1) != 0) {
+      [strongHandle.workspaceSplitDelegate schedulePendingPaneEvents];
+      return;
+    }
+    NSDictionary<NSNumber *, NSString *> *pending =
+        [strongHandle.workspacePendingPaneEvents copy];
+    [strongHandle.workspacePendingPaneEvents removeAllObjects];
+    strongHandle.workspacePaneEventsAwaitMouseRelease = NO;
+    NSArray<NSNumber *> *paneKeys =
+        [pending.allKeys sortedArrayUsingSelector:@selector(compare:)];
+    for (NSNumber *paneKey in paneKeys) {
+      HaskeLUIEmit(
+          HaskeLUIMacEventPaneStateChanged,
+          paneKey.unsignedLongLongValue,
+          pending[paneKey]);
+    }
+  });
+}
+
+- (void)splitViewDidResizeSubviews:(NSNotification *)notification {
+  HaskeLUIMacWindowHandle *handle = self.windowHandle;
+  NSSplitView *splitView = notification.object;
+  if (handle == nil || splitView != handle.workspaceSplit || handle.workspaceApplyingLayout) {
+    return;
+  }
+  BOOL testingResize = handle.workspaceTestingPaneResize;
+  if (!testingResize && ![self isTrackingDividerInSplitView:splitView]) {
+    return;
+  }
+  handle.workspacePaneEventsAwaitMouseRelease |= !testingResize;
+  for (NSNumber *paneKey in handle.workspacePanes) {
+    NSView *pane = handle.workspacePanes[paneKey];
+    BOOL collapsed = pane.hidden || [splitView isSubviewCollapsed:pane];
+    BOOL wasCollapsed = handle.workspacePaneCollapsedStates[paneKey].boolValue;
+    CGFloat extent = collapsed
+        ? handle.workspacePaneExtents[paneKey].doubleValue
+        : (splitView.vertical ? NSWidth(pane.frame) : NSHeight(pane.frame));
+    CGFloat previousExtent = handle.workspacePaneExtents[paneKey].doubleValue;
+    if (!collapsed) {
+      handle.workspacePaneExtents[paneKey] = @(MAX(0.0, extent));
+    }
+    handle.workspacePaneCollapsedStates[paneKey] = @(collapsed);
+    if (collapsed == wasCollapsed && fabs(extent - previousExtent) <= 0.25) {
+      continue;
+    }
+    handle.workspacePendingPaneEvents[paneKey] =
+        [NSString stringWithFormat:
+            @"%@|%.17g",
+            collapsed ? @"collapsed" : @"visible",
+            (double)MAX(0.0, extent)];
+  }
+  [self schedulePendingPaneEvents];
+}
+
 @end
 
 @interface HaskeLUIMacTabHandle : NSObject
@@ -908,8 +1140,24 @@ int32_t haskelui_macos_initialize(HaskeLUIMacEventCallback callback, void *conte
 
 void haskelui_macos_run(void) {
   HaskeLUIAssertMainThread();
-  [NSApplication.sharedApplication activateIgnoringOtherApps:YES];
-  [NSApplication.sharedApplication run];
+  NSApplication *application = NSApplication.sharedApplication;
+  [application activateIgnoringOtherApps:YES];
+  /* Before activation AppKit may report Aqua even when the active system
+     appearance is Dark Aqua. Start observing only after activation, then
+     publish exactly one authoritative initial event. Later changes continue
+     through KVO. */
+  if (!HaskeLUIState.observingEffectiveAppearance) {
+    [application addObserver:HaskeLUIState
+                  forKeyPath:@"effectiveAppearance"
+                     options:NSKeyValueObservingOptionNew
+                     context:HaskeLUIEffectiveAppearanceContext];
+    HaskeLUIState.observingEffectiveAppearance = YES;
+  }
+  HaskeLUIEmit(
+      HaskeLUIMacEventSystemColorSchemeChanged,
+      0,
+      HaskeLUISystemColorScheme());
+  [application run];
 }
 
 void haskelui_macos_stop(void) {
@@ -950,6 +1198,13 @@ void haskelui_macos_shutdown(void) {
   HaskeLUIAssertMainThread();
   if (HaskeLUIState == nil) {
     return;
+  }
+  if (HaskeLUIState.observingEffectiveAppearance) {
+    [NSApplication.sharedApplication
+        removeObserver:HaskeLUIState
+            forKeyPath:@"effectiveAppearance"
+               context:HaskeLUIEffectiveAppearanceContext];
+    HaskeLUIState.observingEffectiveAppearance = NO;
   }
   HaskeLUIState.callback = NULL;
   HaskeLUIState.callbackContext = NULL;
@@ -1003,6 +1258,11 @@ HaskeLUIMacWindowRef haskelui_macos_window_create(
   handle.workspacePanes = [[NSMutableDictionary alloc] init];
   handle.workspacePaneRoles = [[NSMutableDictionary alloc] init];
   handle.workspacePaneExtents = [[NSMutableDictionary alloc] init];
+  handle.workspacePaneMinimumExtents = [[NSMutableDictionary alloc] init];
+  handle.workspacePaneMaximumExtents = [[NSMutableDictionary alloc] init];
+  handle.workspacePaneStretchWeights = [[NSMutableDictionary alloc] init];
+  handle.workspacePaneCollapsedStates = [[NSMutableDictionary alloc] init];
+  handle.workspacePendingPaneEvents = [[NSMutableDictionary alloc] init];
   handle.workspaceItems = [[NSMutableDictionary alloc] init];
   handle.tabGroups = [[NSMutableDictionary alloc] init];
   handle.seenPanes = [[NSMutableSet alloc] init];
@@ -1061,6 +1321,12 @@ void haskelui_macos_window_destroy(HaskeLUIMacWindowRef reference) {
     HaskeLUIReleaseTabGroup(group);
   }
   [handle.tabGroups removeAllObjects];
+  handle.workspaceApplyingLayout = YES;
+  handle.workspaceSplit.delegate = nil;
+  handle.workspaceSplitDelegate.windowHandle = nil;
+  handle.workspaceSplitDelegate = nil;
+  [handle.workspacePendingPaneEvents removeAllObjects];
+  handle.workspacePaneEventsAwaitMouseRelease = NO;
   [handle.workspaceRoot removeFromSuperview];
   handle.window.delegate = nil;
   [handle.window orderOut:nil];
@@ -1098,6 +1364,7 @@ void haskelui_macos_workspace_begin(
     double statusHeight) {
   HaskeLUIAssertMainThread();
   HaskeLUIMacWindowHandle *handle = HaskeLUIWindow(reference);
+  handle.workspaceApplyingLayout = YES;
   NSView *content = handle.window.contentView;
   CGFloat safeStatusHeight = (CGFloat)MAX(0.0, statusHeight);
   if (handle.workspaceRoot == nil) {
@@ -1111,6 +1378,10 @@ void haskelui_macos_workspace_begin(
     NSSplitView *split = [[NSSplitView alloc] initWithFrame:NSZeroRect];
     split.dividerStyle = NSSplitViewDividerStyleThin;
     split.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    HaskeLUIMacSplitViewDelegate *splitDelegate =
+        [[HaskeLUIMacSplitViewDelegate alloc] init];
+    splitDelegate.windowHandle = handle;
+    split.delegate = splitDelegate;
 
     NSVisualEffectView *status = [[NSVisualEffectView alloc] initWithFrame:NSZeroRect];
     status.material = NSVisualEffectMaterialHeaderView;
@@ -1132,6 +1403,7 @@ void haskelui_macos_workspace_begin(
     [content addSubview:root];
     handle.workspaceRoot = root;
     handle.workspaceSplit = split;
+    handle.workspaceSplitDelegate = splitDelegate;
     handle.workspaceStatus = status;
   }
 
@@ -1153,7 +1425,10 @@ void haskelui_macos_workspace_pane_set(
     HaskeLUIMacWindowRef reference,
     uint64_t paneIdentity,
     int32_t paneRole,
+    double minimumExtent,
     double preferredExtent,
+    double maximumExtent,
+    double stretchWeight,
     int32_t collapsed) {
   HaskeLUIAssertMainThread();
   HaskeLUIMacWindowHandle *handle = HaskeLUIWindow(reference);
@@ -1175,6 +1450,10 @@ void haskelui_macos_workspace_pane_set(
   }
   handle.workspacePaneRoles[key] = @(paneRole);
   handle.workspacePaneExtents[key] = @(MAX(0.0, preferredExtent));
+  handle.workspacePaneMinimumExtents[key] = @(minimumExtent >= 0 ? minimumExtent : -1);
+  handle.workspacePaneMaximumExtents[key] = @(maximumExtent >= 0 ? maximumExtent : -1);
+  handle.workspacePaneStretchWeights[key] = @(MAX(0.0, stretchWeight));
+  handle.workspacePaneCollapsedStates[key] = @(collapsed != 0);
   pane.hidden = collapsed != 0;
   if (pane.superview != handle.workspaceSplit) {
     [handle.workspaceSplit addSubview:pane];
@@ -1412,6 +1691,11 @@ void haskelui_macos_workspace_end(HaskeLUIMacWindowRef reference) {
       [handle.workspacePanes removeObjectForKey:paneKey];
       [handle.workspacePaneRoles removeObjectForKey:paneKey];
       [handle.workspacePaneExtents removeObjectForKey:paneKey];
+      [handle.workspacePaneMinimumExtents removeObjectForKey:paneKey];
+      [handle.workspacePaneMaximumExtents removeObjectForKey:paneKey];
+      [handle.workspacePaneStretchWeights removeObjectForKey:paneKey];
+      [handle.workspacePaneCollapsedStates removeObjectForKey:paneKey];
+      [handle.workspacePendingPaneEvents removeObjectForKey:paneKey];
     }
   }
 
@@ -1439,6 +1723,7 @@ void haskelui_macos_workspace_end(HaskeLUIMacWindowRef reference) {
       }
     }
   }
+  handle.workspaceApplyingLayout = NO;
 }
 
 static HaskeLUIMacControlRef HaskeLUIRetainControl(
@@ -4041,11 +4326,63 @@ const char *haskelui_macos_test_last_failure(void) {
   return HaskeLUILastTestFailure == nil ? NULL : HaskeLUILastTestFailure.UTF8String;
 }
 
+int32_t haskelui_macos_test_acquire_process_lock(void) {
+  if (HaskeLUITestProcessLockDescriptor >= 0) {
+    return 1;
+  }
+  NSString *path = [NSTemporaryDirectory()
+      stringByAppendingPathComponent:@"haskelui-appkit-native-tests.lock"];
+  int descriptor = open(path.fileSystemRepresentation, O_CREAT | O_RDWR, 0600);
+  if (descriptor < 0) {
+    return 0;
+  }
+  int result;
+  do {
+    result = flock(descriptor, LOCK_EX);
+  } while (result < 0 && errno == EINTR);
+  if (result < 0) {
+    close(descriptor);
+    return 0;
+  }
+  HaskeLUITestProcessLockDescriptor = descriptor;
+  return 1;
+}
+
+void haskelui_macos_test_release_process_lock(void) {
+  int descriptor = HaskeLUITestProcessLockDescriptor;
+  if (descriptor < 0) {
+    return;
+  }
+  HaskeLUITestProcessLockDescriptor = -1;
+  flock(descriptor, LOCK_UN);
+  close(descriptor);
+}
+
 static void HaskeLUITestAfter(double seconds, dispatch_block_t block) {
   dispatch_after(
       dispatch_time(DISPATCH_TIME_NOW, (int64_t)(seconds * NSEC_PER_SEC)),
       dispatch_get_main_queue(),
       block);
+}
+
+static void HaskeLUITestEventuallyAt(
+    CFAbsoluteTime deadline,
+    BOOL (^condition)(void),
+    dispatch_block_t block) {
+  if (condition() || CFAbsoluteTimeGetCurrent() >= deadline) {
+    block();
+    return;
+  }
+  HaskeLUITestAfter(0.05, ^{
+    HaskeLUITestEventuallyAt(deadline, condition, block);
+  });
+}
+
+static void HaskeLUITestEventually(
+    double timeout,
+    BOOL (^condition)(void),
+    dispatch_block_t block) {
+  HaskeLUITestEventuallyAt(CFAbsoluteTimeGetCurrent() + timeout, condition, block);
 }
 
 void haskelui_macos_test_schedule_vertical_script(
@@ -4711,8 +5048,6 @@ void haskelui_macos_test_schedule_text_editor_script(
         previousMaxX = NSMaxX(tabHeader.frame);
       }
     }
-    [tabHandle.selectButton performClick:nil];
-
     NSTextView *editor = (NSTextView *)editorHandle.focusView;
     NSString *expectedIdentifier =
         [NSString stringWithFormat:@"haskelui-control-%llu", editorIdentity];
@@ -4721,20 +5056,47 @@ void haskelui_macos_test_schedule_text_editor_script(
       HaskeLUITestFail(@"native text editor accessibility identity or role is incorrect");
     }
     if (![editor.string isEqualToString:@"😀 module Initial where\n"]) {
-      HaskeLUITestFail(@"native text editor did not retain the Unicode fixture");
+      HaskeLUITestFail([NSString stringWithFormat:
+          @"native text editor did not retain the Unicode fixture (actual=%@)",
+          editor.string]);
     } else {
+      NSColor *editorBackground =
+          [editor.backgroundColor colorUsingColorSpace:NSColorSpace.sRGBColorSpace];
+      BOOL systemIsDark = [HaskeLUISystemColorScheme() isEqualToString:@"dark"];
+      CGFloat backgroundLuminance = editorBackground == nil
+          ? (systemIsDark ? 1.0 : 0.0)
+          : 0.2126 * editorBackground.redComponent +
+                0.7152 * editorBackground.greenComponent +
+                0.0722 * editorBackground.blueComponent;
+      if ((systemIsDark && backgroundLuminance >= 0.5) ||
+          (!systemIsDark && backgroundLuminance < 0.5)) {
+        HaskeLUITestFail([NSString stringWithFormat:
+            @"native text editor palette did not follow the system appearance "
+             "(system=%@ background=%@ luminance=%.3f)",
+            HaskeLUISystemColorScheme(),
+            editor.backgroundColor,
+            backgroundLuminance]);
+      }
       NSDictionary<NSAttributedStringKey, id> *baseAttributes =
           [editor.layoutManager temporaryAttributesAtCharacterIndex:2 effectiveRange:NULL];
       NSDictionary<NSAttributedStringKey, id> *keywordAttributes =
           [editor.layoutManager temporaryAttributesAtCharacterIndex:3 effectiveRange:NULL];
       NSColor *baseColor = baseAttributes[NSForegroundColorAttributeName];
+      if (baseColor == nil) {
+        baseColor = editor.textColor;
+      }
       NSColor *keywordColor = keywordAttributes[NSForegroundColorAttributeName];
       if (baseColor == nil || keywordColor == nil || [baseColor isEqual:keywordColor]) {
         HaskeLUITestFail(@"Unicode scalar ranges were not translated to the highlighted AppKit range");
       }
     }
+
+    dispatch_block_t continueTextEditorValidation = ^{
+    [tabHandle.selectButton performClick:nil];
     HaskeLUIEmit(HaskeLUIMacEventCommand, openFolderCommandIdentity, @"");
-    HaskeLUITestAfter(0.30, ^{
+    HaskeLUITestEventually(2.0, ^BOOL{
+      return HaskeLUIState.openPanel != nil && HaskeLUIState.openPanel.visible;
+    }, ^{
     if (HaskeLUIState.openPanel == nil || !HaskeLUIState.openPanel.visible ||
         !HaskeLUIState.openPanel.canChooseDirectories || HaskeLUIState.openPanel.canChooseFiles ||
         HaskeLUIState.openPanel.allowsMultipleSelection) {
@@ -4766,7 +5128,26 @@ void haskelui_macos_test_schedule_text_editor_script(
     [editor.delegate textDidChange:
         [NSNotification notificationWithName:NSTextDidChangeNotification object:editor]];
 
-    HaskeLUITestAfter(0.30, ^{
+    HaskeLUITestEventually(2.0, ^BOOL{
+      HaskeLUIMacWindowHandle *candidateWindow =
+          HaskeLUIState.windows[@(documentWindowIdentity)];
+      NSMenuItem *candidateSaveItem =
+          HaskeLUIState.commandItems[@(saveCommandIdentity)];
+      HaskeLUIMacControlHandle *candidateEditorHandle =
+          HaskeLUIState.controls[@(editorIdentity)];
+      if (candidateWindow == nil || candidateSaveItem == nil ||
+          candidateEditorHandle == nil ||
+          ![candidateWindow.window.title containsString:@"Edited"] ||
+          !candidateSaveItem.enabled) {
+        return NO;
+      }
+      NSTextView *candidateEditor = (NSTextView *)candidateEditorHandle.focusView;
+      NSDictionary<NSAttributedStringKey, id> *candidateKeywordAttributes =
+          [candidateEditor.layoutManager
+              temporaryAttributesAtCharacterIndex:0
+                                     effectiveRange:NULL];
+      return candidateKeywordAttributes[NSForegroundColorAttributeName] != nil;
+    }, ^{
       HaskeLUIMacWindowHandle *editedWindow = HaskeLUIState.windows[@(documentWindowIdentity)];
       NSMenuItem *enabledSaveItem = HaskeLUIState.commandItems[@(saveCommandIdentity)];
       if (editedWindow == nil || enabledSaveItem == nil) {
@@ -4784,12 +5165,18 @@ void haskelui_macos_test_schedule_text_editor_script(
       NSDictionary<NSAttributedStringKey, id> *keywordAttributes =
           [editedEditor.layoutManager temporaryAttributesAtCharacterIndex:0 effectiveRange:NULL];
       NSColor *baseColor = baseAttributes[NSForegroundColorAttributeName];
+      if (baseColor == nil) {
+        baseColor = editedEditor.textColor;
+      }
       NSColor *keywordColor = keywordAttributes[NSForegroundColorAttributeName];
       if (baseColor == nil || keywordColor == nil || [baseColor isEqual:keywordColor]) {
         HaskeLUITestFail(@"syntax presentation was not refreshed after a native edit");
       }
       if (!NSEqualRanges(editedEditor.selectedRange, expectedSelection)) {
-        HaskeLUITestFail(@"syntax presentation changed the native selection");
+        HaskeLUITestFail([NSString stringWithFormat:
+            @"syntax presentation changed the native selection (expected=%@ actual=%@)",
+            NSStringFromRange(expectedSelection),
+            NSStringFromRange(editedEditor.selectedRange)]);
       }
       if (editedEditor.undoManager.canUndo) {
         HaskeLUITestFail(@"syntax presentation created a native undo action");
@@ -4810,7 +5197,15 @@ void haskelui_macos_test_schedule_text_editor_script(
         HaskeLUITestFail(@"text editor Save command did not handle Command-S");
       }
 
-      HaskeLUITestAfter(0.30, ^{
+      HaskeLUITestEventually(2.0, ^BOOL{
+        HaskeLUIMacWindowHandle *candidateWindow =
+            HaskeLUIState.windows[@(documentWindowIdentity)];
+        NSMenuItem *candidateSaveItem =
+            HaskeLUIState.commandItems[@(saveCommandIdentity)];
+        return candidateWindow != nil && candidateSaveItem != nil &&
+            ![candidateWindow.window.title containsString:@"Edited"] &&
+            !candidateSaveItem.enabled;
+      }, ^{
         HaskeLUIMacWindowHandle *savedWindow = HaskeLUIState.windows[@(documentWindowIdentity)];
         NSMenuItem *disabledSaveItem = HaskeLUIState.commandItems[@(saveCommandIdentity)];
         if (savedWindow == nil || disabledSaveItem == nil) {
@@ -4835,7 +5230,19 @@ void haskelui_macos_test_schedule_text_editor_script(
         }
         [savedTab.closeButton performClick:nil];
 
-        HaskeLUITestAfter(0.30, ^{
+        HaskeLUITestEventually(2.0, ^BOOL{
+          HaskeLUIMacWindowHandle *candidateWindow =
+              HaskeLUIState.windows[@(documentWindowIdentity)];
+          if (candidateWindow == nil) {
+            return NO;
+          }
+          for (HaskeLUIMacTabGroupHandle *group in candidateWindow.tabGroups.allValues) {
+            if (group.tabs[@(tabIdentity)] != nil) {
+              return NO;
+            }
+          }
+          return YES;
+        }, ^{
           HaskeLUIMacWindowHandle *emptyWorkspace = HaskeLUIState.windows[@(documentWindowIdentity)];
           BOOL tabStillPresent = NO;
           for (HaskeLUIMacTabGroupHandle *group in emptyWorkspace.tabGroups.allValues) {
@@ -4850,7 +5257,10 @@ void haskelui_macos_test_schedule_text_editor_script(
           }
           [emptyWorkspace.window performClose:nil];
 
-          HaskeLUITestAfter(0.30, ^{
+          HaskeLUITestEventually(2.0, ^BOOL{
+            return HaskeLUIState == nil ||
+                HaskeLUIState.windows[@(documentWindowIdentity)] == nil;
+          }, ^{
             if (HaskeLUIState != nil && HaskeLUIState.windows[@(documentWindowIdentity)] != nil) {
               HaskeLUITestFail(@"empty workspace close request did not remove its native window");
               [NSApplication.sharedApplication stop:nil];
@@ -4861,6 +5271,74 @@ void haskelui_macos_test_schedule_text_editor_script(
         });
       });
     });
+    });
+    };
+
+    HaskeLUIMacTabHandle *otherTab = nil;
+    for (NSNumber *candidateKey in documentTabGroup.tabs) {
+      if (candidateKey.unsignedLongLongValue != tabIdentity) {
+        otherTab = documentTabGroup.tabs[candidateKey];
+        break;
+      }
+    }
+    NSSplitView *workspaceSplit = documentWindow.workspaceSplit;
+    NSView *navigatorPane = workspaceSplit.subviews.firstObject;
+    NSView *inspectorPane = workspaceSplit.subviews.lastObject;
+    if (otherTab == nil || navigatorPane == nil || inspectorPane == nil) {
+      HaskeLUITestFail(@"native pane resize test could not locate another tab or sidebar");
+      [NSApplication.sharedApplication stop:nil];
+      return;
+    }
+    documentWindow.workspaceTestingPaneResize = YES;
+    [workspaceSplit setPosition:40 ofDividerAtIndex:0];
+    [workspaceSplit
+        setPosition:NSWidth(workspaceSplit.bounds) - 40
+        ofDividerAtIndex:workspaceSplit.subviews.count - 2];
+    if (NSWidth(navigatorPane.frame) < 159 || NSWidth(inspectorPane.frame) < 179) {
+      HaskeLUITestFail([NSString stringWithFormat:
+          @"native pane minimum extents were not enforced "
+           "(navigator=%.1f inspector=%.1f)",
+          NSWidth(navigatorPane.frame),
+          NSWidth(inspectorPane.frame)]);
+    }
+    [workspaceSplit setPosition:300 ofDividerAtIndex:0];
+    [workspaceSplit
+        setPosition:NSWidth(workspaceSplit.bounds) - 340
+        ofDividerAtIndex:workspaceSplit.subviews.count - 2];
+    documentWindow.workspaceTestingPaneResize = NO;
+    CGFloat expectedNavigatorExtent = NSWidth(navigatorPane.frame);
+    CGFloat expectedInspectorExtent = NSWidth(inspectorPane.frame);
+
+    HaskeLUITestAfter(0.15, ^{
+      [otherTab.selectButton performClick:nil];
+      HaskeLUITestEventually(2.0, ^BOOL{
+        return !otherTab.contentView.hidden &&
+            fabs(NSWidth(navigatorPane.frame) - expectedNavigatorExtent) <= 1 &&
+            fabs(NSWidth(inspectorPane.frame) - expectedInspectorExtent) <= 1;
+      }, ^{
+        if (fabs(NSWidth(navigatorPane.frame) - expectedNavigatorExtent) > 1 ||
+            fabs(NSWidth(inspectorPane.frame) - expectedInspectorExtent) > 1) {
+          HaskeLUITestFail([NSString stringWithFormat:
+              @"native pane resize did not survive a document-tab switch "
+               "(navigator expected=%.1f actual=%.1f, inspector expected=%.1f actual=%.1f)",
+              expectedNavigatorExtent,
+              NSWidth(navigatorPane.frame),
+              expectedInspectorExtent,
+              NSWidth(inspectorPane.frame)]);
+        }
+        [tabHandle.selectButton performClick:nil];
+        HaskeLUITestEventually(2.0, ^BOOL{
+          return !tabHandle.contentView.hidden &&
+              fabs(NSWidth(navigatorPane.frame) - expectedNavigatorExtent) <= 1 &&
+              fabs(NSWidth(inspectorPane.frame) - expectedInspectorExtent) <= 1;
+        }, ^{
+          if (fabs(NSWidth(navigatorPane.frame) - expectedNavigatorExtent) > 1 ||
+              fabs(NSWidth(inspectorPane.frame) - expectedInspectorExtent) > 1) {
+            HaskeLUITestFail(@"native pane resize was lost when returning to the original tab");
+          }
+          continueTextEditorValidation();
+        });
+      });
     });
   });
 }
@@ -4967,6 +5445,11 @@ void haskelui_macos_test_schedule_drawing_script(
         HaskeLUITestFail(@"drawing surface paint pass produced no bitmap data");
       }
     }
-    [NSApplication.sharedApplication stop:nil];
+    /* Bringing the window forward can publish an effective-appearance event.
+       Let the backend deliver that queued event before ending the native test
+       loop so the resource assertion observes the normal shutdown path. */
+    HaskeLUITestAfter(0.05, ^{
+      [NSApplication.sharedApplication stop:nil];
+    });
   });
 }

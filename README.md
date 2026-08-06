@@ -49,6 +49,9 @@ Visual Haskell opens multiple UTF-8 files as document tabs in one native split-v
 stack exec vh
 ```
 
+Use `stack exec vh -- --debug` for detailed structured runtime, TextMate, and
+compiler-worker JSONL diagnostics; the command prints the generated log path.
+
 See [the editor V1/V2 contract](vh/README.md).
 
 The Core control gallery declares every portable control in one model-driven
@@ -82,6 +85,7 @@ tests/macos/validate-deployment-target.sh 13.0
 - [Architecture proposal](docs/design/architecture.md)
 - [HaskeLUI services, tasks, and external events](docs/design/services-tasks-external-events.md)
 - [Visual Haskell long-term vision](docs/design/visual-haskell-vision.md)
+- [Visual Haskell analysis spine](docs/design/visual-haskell-analysis-spine.md)
 - [Portable Core control catalog](docs/design/core-control-catalog.md)
 - [Document/workspace window surface API](docs/design/window-workspace-surface-api.md)
 - [Portable layout system](docs/design/layout-system.md)

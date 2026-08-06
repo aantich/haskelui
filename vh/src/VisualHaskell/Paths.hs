@@ -28,6 +28,7 @@ data VisualHaskellPaths = VisualHaskellPaths
   , visualHaskellSettingsPath :: !FilePath
   , visualHaskellStateDirectory :: !FilePath
   , visualHaskellCacheDirectory :: !FilePath
+  , visualHaskellLogDirectory :: !FilePath
   , visualHaskellLastWorkspacePath :: !FilePath
   }
   deriving stock (Eq, Show)
@@ -50,6 +51,7 @@ resolveVisualHaskellPaths = do
       , visualHaskellSettingsPath = resourceHome </> "settings.json"
       , visualHaskellStateDirectory = stateDirectory
       , visualHaskellCacheDirectory = cacheDirectory
+      , visualHaskellLogDirectory = stateDirectory </> "logs"
       , visualHaskellLastWorkspacePath = stateDirectory </> "last-workspace"
       }
 
@@ -65,5 +67,6 @@ ensureVisualHaskellPaths paths =
     , paths.visualHaskellThemeDirectory
     , paths.visualHaskellStateDirectory
     , paths.visualHaskellCacheDirectory
+    , paths.visualHaskellLogDirectory
     ]
     (createDirectoryIfMissing True)

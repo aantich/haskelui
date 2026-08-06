@@ -46,6 +46,7 @@ import HaskeLUI.Runtime
 main :: IO ()
 main = do
   testRenderDispatch
+  testRuntimeTracing
   bracket createFixture removeFile testFileRead
   bracket createDirectoryFixture removeDirectoryRecursive $ \path -> do
     testDirectoryRead path
@@ -97,6 +98,52 @@ testRenderDispatch = do
   if actual == 2 then pure () else error ("haskelui-runtime: expected two renders, got " <> show actual)
   where
     testWindow = WindowSpec (WindowKey 1) "Test" (Rect 0 0 100 100) []
+
+testRuntimeTracing :: IO ()
+testRuntimeTracing = do
+  captured <- newIORef []
+  let closeCommand = CommandId 90
+      sink event = modifyIORef' captured (<> [event])
+      options = defaultRuntimeOptions {runtimeTraceSink = sink}
+      backend =
+        Backend $ \dispatch ->
+          pure
+            BackendSession
+              { backendRender = const (pure ())
+              , backendScheduleOnUI = id
+              , backendRequestOpenTextFiles = pure ()
+              , backendRequestOpenProjectFolder = pure ()
+              , backendRun = dispatch (CommandInvoked closeCommand)
+              , backendStop = pure ()
+              , backendShutdown = pure ()
+              }
+      application =
+        App
+          { appInitialModel = True
+          , appInitialEffects = []
+          , appInitialCommands = []
+          , appServices = []
+          , appSubscriptions = const []
+          , appView = \open -> AppView [WindowSpec (WindowKey 90) "Trace" (Rect 0 0 100 100) [] | open] []
+          , appHandleEvent = \event _ ->
+              case event of
+                CommandInvoked command
+                  | command == closeCommand -> transaction "Close traced app" NoUndo (const False)
+                _ -> noTransaction
+          }
+  runAppWith options backend application
+  operations <- fmap (.traceOperation) <$> readIORef captured
+  unless
+    ( all
+        (`elem` operations)
+        [ "runtime.start"
+        , "event.backend"
+        , "transaction.commit"
+        , "render.commit"
+        , "shutdown.complete"
+        ]
+    )
+    (error ("haskelui-runtime: missing structured trace operations in " <> show operations))
 
 testFileRead :: FilePath -> IO ()
 testFileRead path = do

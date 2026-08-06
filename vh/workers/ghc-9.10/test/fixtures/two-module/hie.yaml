@@ -1,0 +1,6 @@
+cradle:
+  direct:
+    arguments:
+      - -i.
+      - A.hs
+      - B.hs
