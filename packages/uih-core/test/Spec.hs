@@ -108,10 +108,7 @@ main = do
   putStrLn "uih-core: transactions, text layers, and workspace identity tests passed"
 
 controlIdentity :: Control -> ElementKey
-controlIdentity (Label key _ _) = key
-controlIdentity (Button key _ _ _ _) = key
-controlIdentity (TextField key _ _ _ _) = key
-controlIdentity (TextEditor editor) = editor.textEditorKey
+controlIdentity = controlKey
 
 assert :: String -> Bool -> IO ()
 assert label condition =

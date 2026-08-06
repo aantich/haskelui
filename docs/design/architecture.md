@@ -1,6 +1,6 @@
 # UIH Architecture Proposal
 
-Status: Draft for discussion, architecture revision 13
+Status: Draft for discussion, architecture revision 15
 Audience: UIH users, contributors, and backend implementers  
 Scope: Public API, runtime architecture, backend boundaries, and initial delivery plan
 
@@ -1961,6 +1961,26 @@ The following are accepted unless later superseded by an ADR:
 70. Tab transfers use window/group identity and key-relative insertion. Missing neighbor keys reject a stale request rather than guessing with an obsolete index.
 71. Collapsed panes and inactive declared tabs retain logical keyed state while leaving layout, focus traversal, or accessibility exposure as appropriate; omission removes and disposes them.
 72. `PaneKey` identifies a layout host while application-global `WorkspaceItemKey` identifies movable arbitrary view content. Swapping items between panes reparents logical content; pane role, size, and collapse state remain with the host unless whole pane nodes move.
+73. The required portable semantic control catalog is defined by the [Core control catalog](core-control-catalog.md), using the semantic intersection of AppKit and WinUI rather than their literal class-name intersection.
+74. A portable control may lower to one native object or a small native composition. One-to-one platform widget correspondence is not required when value, interaction, focus, keyboard, accessibility, and lifecycle semantics are preserved.
+75. Checkbox, switch, toggle button, radio group, and related Boolean controls remain distinct semantic types even when they carry the same value type.
+76. Compact native control labels use a portable text/icon content model. Arbitrary child views are accepted only by controls and containers whose cross-backend layout and accessibility contracts support them.
+77. Lists, collections, trees, tables, repeaters, tabs, and breadcrumbs use stable item identity and explicit selection ownership. Selection, activation, expansion, editing, reordering, and drag/drop are distinct events.
+78. `TableView` is a required desktop Core abstraction even though WinUI has no built-in `DataGrid`; the Windows adapter may compose it from virtualized native collection and layout primitives.
+79. Menus, toolbar items, context-menu items, buttons, and shortcuts reuse `CommandId` rather than defining surface-specific action identities.
+80. Dialogs and popovers are keyed desired-state presentations. Native peers are created and dismissed by reconciliation; imperative presentation from arbitrary callbacks is not the public ownership model.
+81. Appearance technologies such as glass, vibrancy, and Mica are backend policy. Media, web, map, ink, platform status items, and other specialized integrations live in focused packages or service layers.
+82. A single backend-independent `uih-control-gallery` application declares every required Core control and acts as the catalog conformance fixture for headless, AppKit, and future Windows backends.
+83. The concrete Core catalog IR uses distinct specification types for actions, Boolean values, choices, text input, numeric input, calendar/time values, color, collections, menus, presentations, messages, tabs, and arbitrary-child containers rather than a universal property bag.
+84. Catalog events use normalized typed payloads at the Haskell boundary; platform enum values, selected indexes, native dates, and native colors do not escape the adapter.
+85. `Container` and ordinary `TabView` are recursively keyed controls. Their arbitrary child controls are flattened for reconciliation and explicitly reparented to retained native container/page slots.
+86. AppKit catalog realization uses one narrow generic create/configure ABI internally while preserving distinct public Core constructors. Sharing backend plumbing does not collapse public semantic types.
+87. The current catalog conformance fixture contains 89 controls, covers every one of the 50 catalog tags plus the original label/button/text-field/text-editor nodes, and is required to pass both pure/headless and deterministic native lifecycle tests.
+88. The implemented catalog is the concrete vertical-slice IR, not the final opaque `View model` surface. Data-source virtualization, richer accessibility descriptions and relationships, drag/drop, and the Windows realization remain later contracts layered onto the accepted identities and typed event model.
+89. A descendant value change must not reconstruct a retained `TabView` page slot or semantic `Container`. Parent shell reconciliation compares shell identity/configuration separately from child content so first responder, selection, scroll, and presentation anchors survive ordinary updates.
+90. Common keyed collection data does not imply a common native peer. AppKit maps lists/tables to `NSTableView`, card collections/repeaters to `NSCollectionView`, trees to `NSOutlineView`, and navigation sidebars to source-list behavior.
+91. Static attributed text is stored in the native attributed string; editor decoration layers use temporary layout attributes. Conformance checks font weight, slant, point size, and foreground color independently.
+92. Native gallery conformance includes interaction continuity, not construction alone: text and collection updates retain the exact first responder, popovers remain anchored until dismissal, dismissal reconciles desired state, and all resources are then released.
 
 ## 32. Research influences
 
@@ -2027,5 +2047,6 @@ The next artifacts should be created in this order:
 9. Completed for the initial native boundary: [ADR 0002](../adr/0002-backend-layout-and-appkit-c-bridge.md) and the automated AppKit vertical slice establish the first native adapter boundary; SDL3 and cross-backend conformance work remain
 10. A backend adapter contract generalized from headless, AppKit, and later SDL3 evidence
 11. A text and accessibility contract
+12. Completed for the concrete catalog IR: the [portable Core control catalog](core-control-catalog.md), AppKit realization, and exhaustive backend-independent control gallery; the opaque surface combinators, scalable collection data sources, and Windows conformance implementation remain
 
 Implementation should begin only far enough to test these contracts. The purpose of the early code is to falsify the architecture cheaply, not to establish premature compatibility.

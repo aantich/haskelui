@@ -12,6 +12,19 @@ module UIH.Backend.AppKit.Internal.FFI
   , MacWindowHandle
   , c_commandRemove
   , c_commandSet
+  , c_catalogAddItem
+  , c_catalogBeginItems
+  , c_catalogCreate
+  , c_catalogEndItems
+  , c_catalogSetColor
+  , c_catalogSetCommand
+  , c_catalogSetDateTime
+  , c_catalogSetNumeric
+  , c_catalogSetPresentation
+  , c_catalogSetPrimaryText
+  , c_catalogSetSecondaryText
+  , c_catalogSetState
+  , c_catalogSetTooltip
   , c_controlDestroy
   , c_controlFocus
   , c_controlSetNextKey
@@ -21,6 +34,7 @@ module UIH.Backend.AppKit.Internal.FFI
   , c_controlSetParentItem
   , c_controlSetParentStatus
   , c_controlSetParentTab
+  , c_controlSetParentControl
   , c_textEditorApplyStyle
   , c_textEditorBeginPresentation
   , c_textEditorEndPresentation
@@ -39,6 +53,7 @@ module UIH.Backend.AppKit.Internal.FFI
   , c_testLastFailure
   , c_testScheduleVerticalScript
   , c_testScheduleTextEditorScript
+  , c_testScheduleControlGalleryScript
   , c_versionMajor
   , c_versionMinor
   , c_versionPatch
@@ -363,6 +378,45 @@ foreign import ccall unsafe "uih_macos_text_field_create"
 foreign import ccall unsafe "uih_macos_text_editor_create"
   c_createTextEditor :: Ptr MacWindowHandle -> Word64 -> CString -> Ptr CMacRect -> IO (Ptr MacControlHandle)
 
+foreign import ccall unsafe "uih_macos_catalog_control_create"
+  c_catalogCreate :: Ptr MacWindowHandle -> Word64 -> CInt -> Ptr CMacRect -> IO (Ptr MacControlHandle)
+
+foreign import ccall unsafe "uih_macos_catalog_control_set_primary_text"
+  c_catalogSetPrimaryText :: Ptr MacControlHandle -> CString -> IO ()
+
+foreign import ccall unsafe "uih_macos_catalog_control_set_secondary_text"
+  c_catalogSetSecondaryText :: Ptr MacControlHandle -> CString -> IO ()
+
+foreign import ccall unsafe "uih_macos_catalog_control_set_state"
+  c_catalogSetState :: Ptr MacControlHandle -> CInt -> IO ()
+
+foreign import ccall unsafe "uih_macos_catalog_control_set_numeric"
+  c_catalogSetNumeric :: Ptr MacControlHandle -> CDouble -> CDouble -> CDouble -> CDouble -> IO ()
+
+foreign import ccall unsafe "uih_macos_catalog_control_set_color"
+  c_catalogSetColor :: Ptr MacControlHandle -> CDouble -> CDouble -> CDouble -> CDouble -> IO ()
+
+foreign import ccall unsafe "uih_macos_catalog_control_set_date_time"
+  c_catalogSetDateTime :: Ptr MacControlHandle -> CInt -> CInt -> CInt -> CInt -> CInt -> CInt -> IO ()
+
+foreign import ccall unsafe "uih_macos_catalog_control_set_command"
+  c_catalogSetCommand :: Ptr MacControlHandle -> Word64 -> IO ()
+
+foreign import ccall unsafe "uih_macos_catalog_control_begin_items"
+  c_catalogBeginItems :: Ptr MacControlHandle -> IO ()
+
+foreign import ccall unsafe "uih_macos_catalog_control_add_item"
+  c_catalogAddItem :: Ptr MacControlHandle -> Word64 -> CString -> CString -> CInt -> CInt -> Word64 -> IO ()
+
+foreign import ccall unsafe "uih_macos_catalog_control_end_items"
+  c_catalogEndItems :: Ptr MacControlHandle -> IO ()
+
+foreign import ccall unsafe "uih_macos_catalog_control_set_tooltip"
+  c_catalogSetTooltip :: Ptr MacControlHandle -> CString -> IO ()
+
+foreign import ccall unsafe "uih_macos_catalog_control_set_presentation"
+  c_catalogSetPresentation :: Ptr MacControlHandle -> CInt -> Word64 -> IO ()
+
 foreign import ccall unsafe "uih_macos_control_set_text"
   c_controlSetText :: Ptr MacControlHandle -> CString -> IO ()
 
@@ -399,6 +453,9 @@ foreign import ccall unsafe "uih_macos_control_set_parent_tab"
 foreign import ccall unsafe "uih_macos_control_set_parent_status"
   c_controlSetParentStatus :: Ptr MacWindowHandle -> Ptr MacControlHandle -> CInt -> IO ()
 
+foreign import ccall unsafe "uih_macos_control_set_parent_control"
+  c_controlSetParentControl :: Ptr MacControlHandle -> Ptr MacControlHandle -> Word64 -> CInt -> IO ()
+
 foreign import ccall unsafe "uih_macos_control_destroy"
   c_controlDestroy :: Ptr MacControlHandle -> IO ()
 
@@ -422,3 +479,9 @@ foreign import ccall unsafe "uih_macos_test_schedule_vertical_script"
 
 foreign import ccall unsafe "uih_macos_test_schedule_text_editor_script"
   c_testScheduleTextEditorScript :: Word64 -> Word64 -> Word64 -> Word64 -> IO ()
+
+foreign import ccall unsafe "uih_macos_test_schedule_control_gallery_script"
+  c_testScheduleControlGalleryScript
+    :: Word64 -> Word64 -> Word64 -> Word64 -> Word64 -> Word64
+    -> Word64 -> Word64 -> Word64 -> Word64 -> Word64 -> Word64
+    -> Word64 -> Word64 -> IO ()

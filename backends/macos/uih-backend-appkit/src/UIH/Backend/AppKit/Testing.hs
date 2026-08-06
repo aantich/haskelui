@@ -3,9 +3,11 @@
 
 module UIH.Backend.AppKit.Testing
   ( AppKitDebugCounters (..)
+  , AppKitControlGalleryTestSpec (..)
   , AppKitTextEditorTestSpec (..)
   , AppKitVerticalTestSpec (..)
   , appKitBackendWithTextEditorTest
+  , appKitBackendWithControlGalleryTest
   , appKitBackendWithVerticalTest
   , appKitResourcesReleased
   , queryAppKitDebugCounters
@@ -25,6 +27,7 @@ import UIH.Backend.AppKit.Internal.FFI
   , c_testLastFailure
   , c_testScheduleVerticalScript
   , c_testScheduleTextEditorScript
+  , c_testScheduleControlGalleryScript
   )
 import UIH.Core
   ( CommandId (..)
@@ -49,6 +52,24 @@ data AppKitTextEditorTestSpec = AppKitTextEditorTestSpec
   , testTextEditor :: !ElementKey
   , testDocumentTab :: !TabKey
   , testEditorSaveCommand :: !CommandId
+  }
+  deriving stock (Eq, Show)
+
+data AppKitControlGalleryTestSpec = AppKitControlGalleryTestSpec
+  { testGalleryWindow :: !WindowKey
+  , testGalleryRootTab :: !ElementKey
+  , testGalleryTextInput :: !ElementKey
+  , testGalleryTextMirror :: !ElementKey
+  , testGalleryToggle :: !ElementKey
+  , testGalleryChoice :: !ElementKey
+  , testGalleryNumeric :: !ElementKey
+  , testGalleryCollection :: !ElementKey
+  , testGalleryDialogButton :: !ElementKey
+  , testGalleryDialog :: !ElementKey
+  , testGalleryPopoverButton :: !ElementKey
+  , testGalleryPopover :: !ElementKey
+  , testGalleryContainer :: !ElementKey
+  , testGalleryNestedChild :: !ElementKey
   }
   deriving stock (Eq, Show)
 
@@ -82,6 +103,27 @@ appKitBackendWithTextEditorTest spec =
       spec.testTextEditor.unElementKey
       spec.testDocumentTab.unTabKey
       spec.testEditorSaveCommand.unCommandId
+    pure session
+
+appKitBackendWithControlGalleryTest :: AppKitControlGalleryTestSpec -> Backend
+appKitBackendWithControlGalleryTest spec =
+  Backend $ \dispatch -> do
+    session <- appKitBackend.openBackend dispatch
+    c_testScheduleControlGalleryScript
+      spec.testGalleryWindow.unWindowKey
+      spec.testGalleryRootTab.unElementKey
+      spec.testGalleryTextInput.unElementKey
+      spec.testGalleryTextMirror.unElementKey
+      spec.testGalleryToggle.unElementKey
+      spec.testGalleryChoice.unElementKey
+      spec.testGalleryNumeric.unElementKey
+      spec.testGalleryCollection.unElementKey
+      spec.testGalleryDialogButton.unElementKey
+      spec.testGalleryDialog.unElementKey
+      spec.testGalleryPopoverButton.unElementKey
+      spec.testGalleryPopover.unElementKey
+      spec.testGalleryContainer.unElementKey
+      spec.testGalleryNestedChild.unElementKey
     pure session
 
 queryAppKitDebugCounters :: IO AppKitDebugCounters

@@ -50,6 +50,19 @@ import UIH.Runtime
   ( Backend (..)
   , BackendSession (..)
   )
+import Text.Read (readMaybe)
+
+data CatalogItem = CatalogItem
+  { catalogItemIdentity :: !Word64
+  , catalogItemLabel :: !Text
+  , catalogItemDetail :: !Text
+  , catalogItemDepth :: !Int
+  , catalogItemEnabled :: !Bool
+  , catalogItemSelected :: !Bool
+  , catalogItemExpanded :: !Bool
+  , catalogItemSeparator :: !Bool
+  , catalogItemCommand :: !(Maybe CommandId)
+  }
 
 data NativeControl = NativeControl
   { nativeControlHandle :: !(Ptr MacControlHandle)
@@ -108,7 +121,99 @@ receiveEvent dispatch _ eventKind identity textPointer =
       dispatch (TextFileChosen (Text.unpack path))
     6 -> dispatch (TabSelected (TabKey identity))
     7 -> dispatch (TabCloseRequested (TabKey identity))
+    8 -> dispatch (ControlInvoked (ElementKey identity))
+    9 -> do
+      payload <- decodeText textPointer
+      dispatch (ToggleChanged (ElementKey identity) (decodeToggle payload))
+    10 -> do
+      payload <- decodeText textPointer
+      dispatch
+        ( ChoiceChanged
+            (ElementKey identity)
+            (ChoiceKey <$> readText payload)
+        )
+    11 -> do
+      payload <- decodeText textPointer
+      forM_ (readText payload) $ \value ->
+        dispatch (NumberChanged (ElementKey identity) value)
+    12 -> do
+      payload <- decodeText textPointer
+      forM_ (decodeDateTime payload) $ \(date, _) ->
+        dispatch (DateChanged (ElementKey identity) date)
+    13 -> do
+      payload <- decodeText textPointer
+      forM_ (decodeDateTime payload) $ \(_, time) ->
+        dispatch (TimeChanged (ElementKey identity) time)
+    14 -> do
+      payload <- decodeText textPointer
+      forM_ (decodeColor payload) $ \color ->
+        dispatch (ColorChanged (ElementKey identity) color)
+    15 -> do
+      payload <- decodeText textPointer
+      dispatch
+        ( CollectionSelectionChanged
+            (ElementKey identity)
+            (CollectionItemKey <$> decodeWords payload)
+        )
+    16 -> do
+      payload <- decodeText textPointer
+      dispatch (DisclosureChanged (ElementKey identity) (payload /= "0"))
+    17 -> do
+      payload <- decodeText textPointer
+      dispatch (PresentationClosed (ElementKey identity) (decodePresentationResult payload))
+    18 -> do
+      payload <- decodeText textPointer
+      forM_ (decodeExpansion payload) $ \(item, expanded) ->
+        dispatch
+          (CollectionExpansionChanged (ElementKey identity) (CollectionItemKey item) expanded)
     _ -> pure ()
+
+readText :: Read value => Text -> Maybe value
+readText = readMaybe . Text.unpack
+
+decodeToggle :: Text -> ToggleValue
+decodeToggle "0" = ToggleOff
+decodeToggle "-1" = ToggleMixed
+decodeToggle _ = ToggleOn
+
+decodeWords :: Text -> [Word64]
+decodeWords value =
+  [ parsed
+  | component <- Text.splitOn "," value
+  , not (Text.null component)
+  , Just parsed <- [readText component]
+  ]
+
+decodeDateTime :: Text -> Maybe (DateComponents, TimeComponents)
+decodeDateTime value =
+  case Text.splitOn "T" value of
+    [dateText, timeText] -> do
+      [year, month, day] <- traverse readText (Text.splitOn "-" dateText)
+      [hour, minute, second] <- traverse readText (Text.splitOn ":" timeText)
+      pure
+        ( DateComponents year month day
+        , TimeComponents hour minute second
+        )
+    _ -> Nothing
+
+decodeColor :: Text -> Maybe Color
+decodeColor value =
+  case traverse readText (Text.splitOn "," value) of
+    Just [red, green, blue, alpha] -> Just (RGBA red green blue alpha)
+    _ -> Nothing
+
+decodePresentationResult :: Text -> PresentationResult
+decodePresentationResult "accepted" = PresentationAccepted
+decodePresentationResult "cancelled" = PresentationCancelled
+decodePresentationResult _ = PresentationDismissed
+
+decodeExpansion :: Text -> Maybe (Word64, Bool)
+decodeExpansion value =
+  case Text.splitOn "," value of
+    [item, expanded] -> do
+      parsed <- readText item
+      pure (parsed, expanded /= "0")
+    _ -> Nothing
 
 reconcile :: IORef AppKitState -> AppView -> IO ()
 reconcile stateReference desired = do
@@ -180,6 +285,7 @@ createWindow spec =
       let desiredControls = windowLeafControls spec
       controls <- foldM (createAndInsertControl handle) Map.empty desiredControls
       forM_ (windowWorkspace spec) (configureWorkspaceParents handle controls)
+      configureNestedControlParents controls (windowRootControls spec)
       c_windowShow handle
       configureControlNavigation handle controls desiredControls
       pure
@@ -201,6 +307,7 @@ updateWindow native desired = do
       native.nativeWindowControls
       desiredControls
   forM_ (windowWorkspace desired) (configureWorkspaceParents native.nativeWindowHandle controls)
+  configureNestedControlParents controls (windowRootControls desired)
   configureControlNavigation native.nativeWindowHandle controls desiredControls
   pure
     native
@@ -212,6 +319,23 @@ data ControlParent
   = ParentItem !WorkspaceItemKey !Bool
   | ParentTab !TabGroupKey !TabKey !Bool
   | ParentStatus !Bool
+  | ParentControl !ElementKey !Word64 !Bool
+
+windowRootControls :: WindowSpec -> [Control]
+windowRootControls WindowSpec {windowControls = controls} = controls
+windowRootControls WorkspaceWindowSpec {windowWorkspaceSpec = spec} = workspaceControlsForParents spec
+
+workspaceControlsForParents :: WorkspaceSpec -> [Control]
+workspaceControlsForParents spec =
+  paneTreeRootControls spec.workspaceRoot <> spec.workspaceStatusControls
+
+paneTreeRootControls :: PaneTree -> [Control]
+paneTreeRootControls (WorkspacePane pane) =
+  case pane.workspacePaneItem.workspaceItemContent of
+    WorkspaceItemControls controls -> controls
+    WorkspaceItemTabGroup group -> foldMap workspaceTabControls group.workspaceTabs
+paneTreeRootControls (WorkspaceSplit _ _ first second rest) =
+  foldMap paneTreeRootControls (first : second : rest)
 
 configureWorkspaceStructure :: Ptr MacWindowHandle -> WorkspaceSpec -> IO ()
 configureWorkspaceStructure window spec = do
@@ -303,6 +427,45 @@ configureWorkspaceParents window controls spec =
             (booleanInt fill)
         ParentStatus fill ->
           c_controlSetParentStatus window native.nativeControlHandle (booleanInt fill)
+        ParentControl {} -> pure ()
+
+configureNestedControlParents
+  :: Map ElementKey NativeControl
+  -> [Control]
+  -> IO ()
+configureNestedControlParents controls roots =
+  forM_ (nestedControlParents roots) $ \(childKey, parentKey, slot, fill) ->
+    case (Map.lookup parentKey controls, Map.lookup childKey controls) of
+      (Just parent, Just child) ->
+        c_controlSetParentControl
+          parent.nativeControlHandle
+          child.nativeControlHandle
+          slot
+          (booleanInt fill)
+      _ -> pure ()
+
+nestedControlParents :: [Control] -> [(ElementKey, ElementKey, Word64, Bool)]
+nestedControlParents = foldMap descendants
+  where
+    descendants control =
+      case control of
+        Container spec ->
+          childRelations spec.containerKey 0 spec.containerChildren
+            <> foldMap descendants spec.containerChildren
+        TabView spec ->
+          foldMap
+            (\page ->
+              childRelations
+                spec.tabViewKey
+                page.tabPageKey.unChoiceKey
+                page.tabPageControls
+                <> foldMap descendants page.tabPageControls
+            )
+            spec.tabViewPages
+        _ -> []
+    childRelations parent slot children =
+      let fill = singleFillControl children
+       in [(controlKey child, parent, slot, fill) | child <- children]
 
 workspaceControlParents :: WorkspaceSpec -> Map ElementKey ControlParent
 workspaceControlParents spec =
@@ -338,6 +501,9 @@ paneTreeControlParents (WorkspaceSplit _ _ first second rest) =
 
 singleFillControl :: [Control] -> Bool
 singleFillControl [TextEditor {}] = True
+singleFillControl [RichTextEditor {}] = True
+singleFillControl [Container {}] = True
+singleFillControl [TabView {}] = True
 singleFillControl _ = False
 
 destroyWindow :: NativeWindow -> IO ()
@@ -406,10 +572,22 @@ createControl window spec = do
               c_createTextEditor window editor.textEditorKey.unElementKey text
         when editor.textEditorFocused (c_controlFocus window created)
         pure created
+      _ ->
+        case controlCatalogKind spec of
+          Nothing -> error "UIH AppKit encountered an unclassified Core control"
+          Just kind ->
+            withMacRect (controlFrame spec) $
+              c_catalogCreate
+                window
+                (controlKey spec).unElementKey
+                (fromIntegral (fromEnum kind + 1))
   when (handle == nullPtr) (error "UIH AppKit failed to create native control")
   case spec of
     TextEditor editor -> applyTextEditorPresentation handle editor
-    _ -> pure ()
+    RichTextEditor editor -> do
+      configureCatalogControl handle spec
+      applyTextEditorPresentation handle editor
+    _ -> when (isJust (controlCatalogKind spec)) (configureCatalogControl handle spec)
   pure (NativeControl handle spec)
 
 updateControl
@@ -419,10 +597,18 @@ updateControl
   -> IO NativeControl
 updateControl window native desired = do
   withMacRect (controlFrame desired) (c_controlSetFrame native.nativeControlHandle)
-  withText (controlText desired) (c_controlSetText native.nativeControlHandle)
+  case desired of
+    Label _ _ value -> withText value (c_controlSetText native.nativeControlHandle)
+    Button _ _ value _ _ -> withText value (c_controlSetText native.nativeControlHandle)
+    TextField _ _ value _ _ -> withText value (c_controlSetText native.nativeControlHandle)
+    TextEditor editor -> withText editor.textEditorText (c_controlSetText native.nativeControlHandle)
+    _ ->
+      when (catalogConfigurationChanged native.nativeControlSpec desired) $
+        configureCatalogControl native.nativeControlHandle desired
   when (textEditorPresentationChanged native.nativeControlSpec desired) $
     case desired of
       TextEditor editor -> applyTextEditorPresentation native.nativeControlHandle editor
+      RichTextEditor editor -> applyTextEditorPresentation native.nativeControlHandle editor
       _ -> pure ()
   case desired of
     Button _ _ _ _ enabled ->
@@ -431,8 +617,335 @@ updateControl window native desired = do
       when focused (c_controlFocus window native.nativeControlHandle)
     TextEditor editor ->
       when editor.textEditorFocused (c_controlFocus window native.nativeControlHandle)
-    Label {} -> pure ()
+    RichTextEditor editor ->
+      when editor.textEditorFocused (c_controlFocus window native.nativeControlHandle)
+    _ -> pure ()
   pure native {nativeControlSpec = desired}
+
+-- Child content is reconciled independently. Rebuilding a tab's native page
+-- slots or a container merely because one descendant changed detaches the
+-- first responder and also invalidates anchored presentations.
+catalogConfigurationChanged :: Control -> Control -> Bool
+catalogConfigurationChanged (TabView old) (TabView new) =
+  old.tabViewSelected /= new.tabViewSelected
+    || tabShells old /= tabShells new
+  where
+    tabShells = fmap (\page -> (page.tabPageKey, page.tabPageTitle)) . tabViewPages
+catalogConfigurationChanged (Container old) (Container new) =
+  old.containerKind /= new.containerKind
+catalogConfigurationChanged old new = old /= new
+
+configureCatalogControl :: Ptr MacControlHandle -> Control -> IO ()
+configureCatalogControl handle = \case
+  RichText spec -> do
+    setPrimary handle (attributedTextValue spec.richTextValue)
+    applyAttributedTextPresentation handle spec.richTextValue
+  Image spec -> configureImage spec
+  Icon spec -> configureImage spec
+  Separator {} -> pure ()
+  RepeatButton spec -> configureAction spec
+  ToggleButton spec -> configureToggle spec
+  CheckBox spec -> configureToggle spec
+  RadioGroup spec -> configureChoice spec
+  Switch spec -> configureToggle spec
+  SegmentedChoice spec -> configureChoice spec
+  Link spec -> configureAction spec
+  MenuButton spec -> configureChoice spec
+  SplitButton spec -> configureSplit spec
+  ToggleSplitButton spec -> configureSplit spec
+  TextArea spec -> configureTextInput spec
+  RichTextEditor spec -> setPrimary handle spec.textEditorText
+  SecureField spec -> configureTextInput spec
+  SearchField spec -> configureTextInput spec
+  SuggestField spec -> configureTextInput spec
+  ChoicePicker spec -> configureChoice spec
+  EditableComboBox spec -> configureTextInput spec
+  NumberField spec -> configureNumeric spec
+  Stepper spec -> configureNumeric spec
+  Slider spec -> configureNumeric spec
+  DatePicker spec -> configureDate spec
+  TimePicker spec -> configureTime spec
+  CalendarView spec -> configureDate spec
+  ColorPicker spec -> configureColor spec
+  Rating spec -> configureNumeric spec
+  ListView spec -> configureCollection spec
+  CollectionView spec -> configureCollection spec
+  TreeView spec -> configureCollection spec
+  TableView spec -> configureCollection spec
+  ItemRepeater spec -> configureCollection spec
+  TabView spec ->
+    setCatalogItems handle
+      [ catalogItem page.tabPageKey.unChoiceKey page.tabPageTitle "" 0 True
+          (Just page.tabPageKey == spec.tabViewSelected) False False Nothing
+      | page <- spec.tabViewPages
+      ]
+  Breadcrumb spec ->
+    configureChoice
+      ChoiceControlSpec
+        { choiceControlKey = spec.breadcrumbKey
+        , choiceControlFrame = spec.breadcrumbFrame
+        , choiceControlItems = spec.breadcrumbItems
+        , choiceControlSelected = spec.breadcrumbSelected
+        , choiceControlEnabled = True
+        }
+  NavigationSidebar spec -> configureCollection spec
+  MenuBar spec -> configureMenu spec
+  ContextMenu spec -> configureMenu spec
+  Toolbar spec ->
+    setCatalogItems handle
+      [ catalogItem command.unCommandId "" "" 0 True False False False (Just command)
+      | command <- spec.toolbarCommands
+      ]
+  Dialog spec -> configurePresentation spec
+  Alert spec -> configurePresentation spec
+  Popover spec -> configurePresentation spec
+  Tooltip spec -> configureMessage spec
+  ProgressBar spec -> configureProgress spec
+  ActivityIndicator _ _ active -> c_catalogSetState handle (booleanInt active)
+  Meter spec -> configureProgress spec
+  Badge spec -> configureMessage spec
+  InlineNotice spec -> configureMessage spec
+  Container spec -> configureContainer spec
+  control ->
+    error ("UIH AppKit received a non-catalog control in catalog configuration: " <> show control)
+  where
+    configureImage :: ImageControlSpec -> IO ()
+    configureImage spec = do
+      setPrimary handle (encodeImageSource spec.imageControlSource)
+      setSecondary handle spec.imageControlDescription
+      setTooltip handle spec.imageControlDescription
+
+    configureAction :: ActionControlSpec -> IO ()
+    configureAction spec = do
+      configureLabel handle spec.actionControlLabel
+      c_catalogSetCommand handle spec.actionControlCommand.unCommandId
+      c_controlSetEnabled handle (booleanInt spec.actionControlEnabled)
+
+    configureToggle :: ToggleControlSpec -> IO ()
+    configureToggle spec = do
+      configureLabel handle spec.toggleControlLabel
+      c_catalogSetState handle (toggleInt spec.toggleControlValue)
+      c_controlSetEnabled handle (booleanInt spec.toggleControlEnabled)
+
+    configureChoice :: ChoiceControlSpec -> IO ()
+    configureChoice spec = do
+      setCatalogItems handle
+        [ catalogItem item.choiceItemKey.unChoiceKey
+            item.choiceItemLabel.controlLabelText
+            (maybe "" encodeImageSource item.choiceItemLabel.controlLabelIcon)
+            0 item.choiceItemEnabled
+            (Just item.choiceItemKey == spec.choiceControlSelected)
+            False False Nothing
+        | item <- spec.choiceControlItems
+        ]
+      c_controlSetEnabled handle (booleanInt spec.choiceControlEnabled)
+
+    configureSplit :: SplitButtonSpec -> IO ()
+    configureSplit spec = do
+      configureLabel handle spec.splitButtonLabel
+      c_catalogSetCommand handle spec.splitButtonCommand.unCommandId
+      forM_ spec.splitButtonToggleValue $ \selected ->
+        c_catalogSetState handle (booleanInt selected)
+      setCatalogItems handle (menuCatalogItems spec.splitButtonItems)
+      c_controlSetEnabled handle (booleanInt spec.splitButtonEnabled)
+
+    configureTextInput :: TextInputSpec -> IO ()
+    configureTextInput spec = do
+      setPrimary handle spec.textInputText
+      setSecondary handle spec.textInputPlaceholder
+      unless (null spec.textInputSuggestions) $
+        setCatalogItems handle
+          [ catalogItem item.choiceItemKey.unChoiceKey
+              item.choiceItemLabel.controlLabelText
+              "" 0 item.choiceItemEnabled False False False Nothing
+          | item <- spec.textInputSuggestions
+          ]
+      c_controlSetEnabled handle (booleanInt spec.textInputEnabled)
+
+    configureNumeric :: NumericControlSpec -> IO ()
+    configureNumeric spec = do
+      c_catalogSetNumeric handle
+        (realToFrac spec.numericControlValue)
+        (realToFrac spec.numericControlMinimum)
+        (realToFrac spec.numericControlMaximum)
+        (realToFrac spec.numericControlStep)
+      c_controlSetEnabled handle (booleanInt spec.numericControlEnabled)
+
+    configureDate :: DateControlSpec -> IO ()
+    configureDate spec = do
+      let date = spec.dateControlValue
+      c_catalogSetDateTime handle
+        (fromIntegral date.dateYear) (fromIntegral date.dateMonth) (fromIntegral date.dateDay)
+        0 0 0
+      c_controlSetEnabled handle (booleanInt spec.dateControlEnabled)
+
+    configureTime :: TimeControlSpec -> IO ()
+    configureTime spec = do
+      let time = spec.timeControlValue
+      c_catalogSetDateTime handle 2001 1 1
+        (fromIntegral time.timeHour) (fromIntegral time.timeMinute) (fromIntegral time.timeSecond)
+      c_controlSetEnabled handle (booleanInt spec.timeControlEnabled)
+
+    configureColor :: ColorControlSpec -> IO ()
+    configureColor spec = do
+      let color = spec.colorControlValue
+      c_catalogSetColor handle
+        (realToFrac color.colorRed) (realToFrac color.colorGreen)
+        (realToFrac color.colorBlue) (realToFrac color.colorAlpha)
+      c_controlSetEnabled handle (booleanInt spec.colorControlEnabled)
+
+    configureCollection :: CollectionControlSpec -> IO ()
+    configureCollection spec = do
+      c_catalogSetState handle (selectionModeInt spec.collectionControlSelectionMode)
+      setCatalogItems handle
+        [ catalogItem item.collectionItemKey.unCollectionItemKey
+            item.collectionItemLabel item.collectionItemDetail item.collectionItemDepth True
+            (item.collectionItemKey `elem` spec.collectionControlSelection)
+            item.collectionItemExpanded False Nothing
+        | item <- spec.collectionControlItems
+        ]
+      c_controlSetEnabled handle (booleanInt spec.collectionControlEnabled)
+
+    configureMenu :: MenuControlSpec -> IO ()
+    configureMenu spec = do
+      setPrimary handle spec.menuControlTitle
+      setCatalogItems handle (menuCatalogItems spec.menuControlEntries)
+
+    configurePresentation :: PresentationSpec -> IO ()
+    configurePresentation spec = do
+      setPrimary handle spec.presentationTitle
+      setSecondary handle spec.presentationMessage
+      c_catalogSetPresentation handle
+        (booleanInt spec.presentationVisible)
+        (case spec.presentationKind of
+          PopoverPresentation anchor -> anchor.unElementKey
+          _ -> 0)
+
+    configureMessage :: MessageControlSpec -> IO ()
+    configureMessage spec = do
+      setPrimary handle spec.messageControlTitle
+      setSecondary handle spec.messageControlMessage
+
+    configureProgress :: ProgressControlSpec -> IO ()
+    configureProgress spec =
+      c_catalogSetNumeric handle
+        (realToFrac spec.progressControlValue)
+        (realToFrac spec.progressControlMinimum)
+        (realToFrac spec.progressControlMaximum)
+        0
+
+    configureContainer :: ContainerSpec -> IO ()
+    configureContainer spec =
+      case spec.containerKind of
+        StackContainer axis spacing -> do
+          setPrimary handle ""
+          c_catalogSetState handle (containerState axis spacing)
+        GridContainer columns spacing -> do
+          setPrimary handle ""
+          c_catalogSetState handle (1000 + fromIntegral columns * 100 + roundedSpacing spacing)
+        OverlayContainer -> c_catalogSetState handle 2000
+        CanvasContainer -> c_catalogSetState handle 2001
+        GroupContainer title -> do
+          setPrimary handle title
+          c_catalogSetState handle 3000
+        ScrollContainer -> c_catalogSetState handle 4000
+        DisclosureContainer title expanded -> do
+          setPrimary handle title
+          c_catalogSetState handle (if expanded then 5001 else 5000)
+
+configureLabel :: Ptr MacControlHandle -> ControlLabel -> IO ()
+configureLabel handle label = do
+  setPrimary handle label.controlLabelText
+  setSecondary handle (maybe "" encodeImageSource label.controlLabelIcon)
+
+setPrimary :: Ptr MacControlHandle -> Text -> IO ()
+setPrimary handle value = withText value (c_catalogSetPrimaryText handle)
+
+setSecondary :: Ptr MacControlHandle -> Text -> IO ()
+setSecondary handle value = withText value (c_catalogSetSecondaryText handle)
+
+setTooltip :: Ptr MacControlHandle -> Text -> IO ()
+setTooltip handle value = withText value (c_catalogSetTooltip handle)
+
+encodeImageSource :: ImageSource -> Text
+encodeImageSource (SystemSymbol value) = "system:" <> value
+encodeImageSource (NamedImage value) = "named:" <> value
+encodeImageSource (FileImage value) = "file:" <> Text.pack value
+
+toggleInt :: ToggleValue -> CInt
+toggleInt ToggleOff = 0
+toggleInt ToggleOn = 1
+toggleInt ToggleMixed = -1
+
+selectionModeInt :: CollectionSelectionMode -> CInt
+selectionModeInt NoCollectionSelection = 0
+selectionModeInt SingleCollectionSelection = 1
+selectionModeInt MultipleCollectionSelection = 2
+
+containerState :: Axis -> Double -> CInt
+containerState axis spacing =
+  (case axis of Horizontal -> 0; Vertical -> 1) * 100 + roundedSpacing spacing
+
+roundedSpacing :: Double -> CInt
+roundedSpacing value = fromIntegral (max 0 (min 99 (round value :: Int)))
+
+catalogItem
+  :: Word64 -> Text -> Text -> Int -> Bool -> Bool -> Bool -> Bool
+  -> Maybe CommandId -> CatalogItem
+catalogItem = CatalogItem
+
+menuCatalogItems :: [MenuEntry] -> [CatalogItem]
+menuCatalogItems entries = zipWith convert [1 ..] entries
+  where
+    convert index (MenuCommand label command enabled) =
+      catalogItem index label "" 0 enabled False False False (Just command)
+    convert index MenuSeparator =
+      catalogItem index "" "" 0 False False False True Nothing
+
+setCatalogItems :: Ptr MacControlHandle -> [CatalogItem] -> IO ()
+setCatalogItems handle items = do
+  c_catalogBeginItems handle
+  forM_ items $ \item ->
+    withText item.catalogItemLabel $ \label ->
+      withText item.catalogItemDetail $ \detail ->
+        c_catalogAddItem handle
+          item.catalogItemIdentity label detail
+          (fromIntegral item.catalogItemDepth)
+          (catalogItemFlags item)
+          (maybe 0 unCommandId item.catalogItemCommand)
+  c_catalogEndItems handle
+
+catalogItemFlags :: CatalogItem -> CInt
+catalogItemFlags item =
+  flag 1 item.catalogItemEnabled
+    + flag 2 item.catalogItemSelected
+    + flag 4 item.catalogItemExpanded
+    + flag 8 item.catalogItemSeparator
+  where
+    flag value present = if present then value else 0
+
+applyAttributedTextPresentation :: Ptr MacControlHandle -> AttributedText -> IO ()
+applyAttributedTextPresentation handle attributed = do
+  c_textEditorBeginPresentation handle
+  withCTextStyle mempty (c_textEditorSetBaseStyle handle)
+  let value = attributedTextValue attributed
+      offsets = Map.fromDistinctAscList $
+        zip [0 ..] (scanl advanceUtf16 0 (Text.unpack value))
+  forM_ (attributedTextSpans attributed) $ \textSpan -> do
+    let range = textSpan.textSpanRange
+        start = range.textRangeStart
+        end = start + range.textRangeLength
+    case (Map.lookup start offsets, Map.lookup end offsets) of
+      (Just utf16Start, Just utf16End) ->
+        withCTextStyle textSpan.textSpanValue $ \style -> do
+          applied <- c_textEditorApplyStyle handle utf16Start (utf16End - utf16Start) style
+          unless (applied /= 0) $
+            error "UIH AppKit rejected a validated rich-text range"
+      _ -> error "UIH AppKit could not translate a validated rich-text range"
+  c_textEditorEndPresentation handle
+  where
+    advanceUtf16 offset character =
+      offset + if ord character > 0xFFFF then 2 else 1
 
 destroyControl :: NativeControl -> IO ()
 destroyControl = c_controlDestroy . nativeControlHandle
@@ -457,8 +970,22 @@ configureControlNavigation window controls desired = do
       | editor.textEditorFocused ->
           forM_ (Map.lookup editor.textEditorKey controls) $ \native ->
             c_controlFocus window native.nativeControlHandle
+    RichTextEditor editor
+      | editor.textEditorFocused ->
+          forM_ (Map.lookup editor.textEditorKey controls) $ \native ->
+            c_controlFocus window native.nativeControlHandle
+    TextArea input -> focusTextInput input
+    SecureField input -> focusTextInput input
+    SearchField input -> focusTextInput input
+    SuggestField input -> focusTextInput input
+    EditableComboBox input -> focusTextInput input
     _ -> pure ()
   where
+    focusTextInput :: TextInputSpec -> IO ()
+    focusTextInput input =
+      when input.textInputFocused $
+        forM_ (Map.lookup input.textInputKey controls) $ \native ->
+          c_controlFocus window native.nativeControlHandle
     navigationHandles =
       [ native.nativeControlHandle
       | control <- desired
@@ -467,31 +994,21 @@ configureControlNavigation window controls desired = do
       ]
 
 isKeyboardControl :: Control -> Bool
-isKeyboardControl Button {} = True
-isKeyboardControl TextField {} = True
-isKeyboardControl TextEditor {} = True
 isKeyboardControl Label {} = False
-
-controlKey :: Control -> ElementKey
-controlKey = \case
-  Label key _ _ -> key
-  Button key _ _ _ _ -> key
-  TextField key _ _ _ _ -> key
-  TextEditor editor -> editor.textEditorKey
-
-controlFrame :: Control -> Rect
-controlFrame = \case
-  Label _ frame _ -> frame
-  Button _ frame _ _ _ -> frame
-  TextField _ frame _ _ _ -> frame
-  TextEditor editor -> editor.textEditorFrame
-
-controlText :: Control -> Text
-controlText = \case
-  Label _ _ text -> text
-  Button _ _ text _ _ -> text
-  TextField _ _ text _ _ -> text
-  TextEditor editor -> editor.textEditorText
+isKeyboardControl RichText {} = False
+isKeyboardControl Image {} = False
+isKeyboardControl Icon {} = False
+isKeyboardControl Separator {} = False
+isKeyboardControl ProgressBar {} = False
+isKeyboardControl ActivityIndicator {} = False
+isKeyboardControl Meter {} = False
+isKeyboardControl Badge {} = False
+isKeyboardControl InlineNotice {} = False
+isKeyboardControl Dialog {} = False
+isKeyboardControl Alert {} = False
+isKeyboardControl Popover {} = False
+isKeyboardControl Container {} = False
+isKeyboardControl _ = True
 
 controlsCompatible :: Control -> Control -> Bool
 controlsCompatible (Label {}) (Label {}) = True
@@ -500,10 +1017,18 @@ controlsCompatible (Button _ _ _ oldCommand _) (Button _ _ _ newCommand _) =
 controlsCompatible (TextField _ _ _ oldPlaceholder _) (TextField _ _ _ newPlaceholder _) =
   oldPlaceholder == newPlaceholder
 controlsCompatible (TextEditor {}) (TextEditor {}) = True
-controlsCompatible _ _ = False
+controlsCompatible old new =
+  case (controlCatalogKind old, controlCatalogKind new) of
+    (Just oldKind, Just newKind) -> oldKind == newKind
+    _ -> False
 
 textEditorPresentationChanged :: Control -> Control -> Bool
 textEditorPresentationChanged (TextEditor old) (TextEditor new) =
+  old.textEditorText /= new.textEditorText
+    || old.textEditorRevision /= new.textEditorRevision
+    || old.textEditorBaseStyle /= new.textEditorBaseStyle
+    || old.textEditorLayers /= new.textEditorLayers
+textEditorPresentationChanged (RichTextEditor old) (RichTextEditor new) =
   old.textEditorText /= new.textEditorText
     || old.textEditorRevision /= new.textEditorRevision
     || old.textEditorBaseStyle /= new.textEditorBaseStyle

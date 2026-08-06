@@ -1,5 +1,6 @@
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 
@@ -8,10 +9,27 @@ module UIH.Core
   , App (..)
   , AppView (..)
   , AttributedText
+  , ActionControlSpec (..)
+  , Axis (..)
+  , BreadcrumbSpec (..)
+  , CatalogControlKind (..)
+  , ChoiceControlSpec (..)
+  , ChoiceItem (..)
+  , ChoiceKey (..)
   , Color (..)
+  , ColorControlSpec (..)
+  , CollectionControlSpec (..)
+  , CollectionItem (..)
+  , CollectionItemKey (..)
+  , CollectionSelectionMode (..)
   , CommandId (..)
   , CommandSpec (..)
+  , ContainerKind (..)
+  , ContainerSpec (..)
   , Control (..)
+  , ControlLabel (..)
+  , DateComponents (..)
+  , DateControlSpec (..)
   , DocumentKey (..)
   , Effect (..)
   , EffectKey (..)
@@ -19,6 +37,12 @@ module UIH.Core
   , FontFamily (..)
   , FontSlant (..)
   , FontWeight (..)
+  , ImageControlSpec (..)
+  , ImageSource (..)
+  , MenuControlSpec (..)
+  , MenuEntry (..)
+  , MessageControlSpec (..)
+  , NumericControlSpec (..)
   , PaneKey (..)
   , PaneRole (..)
   , PaneSizing (..)
@@ -26,6 +50,12 @@ module UIH.Core
   , PaneTree (..)
   , PaneVisibility (..)
   , Rect (..)
+  , PresentationKind (..)
+  , PresentationResult (..)
+  , PresentationSpec (..)
+  , ProgressControlSpec (..)
+  , RichTextSpec (..)
+  , SplitButtonSpec (..)
   , TextEditorSpec (..)
   , TextLayer (..)
   , TextLayerKey (..)
@@ -34,6 +64,14 @@ module UIH.Core
   , TextRun (..)
   , TextSpan (..)
   , TextStyle (..)
+  , TextInputSpec (..)
+  , TimeComponents (..)
+  , TimeControlSpec (..)
+  , ToggleControlSpec (..)
+  , ToggleValue (..)
+  , ToolbarSpec (..)
+  , TabPageSpec (..)
+  , TabViewSpec (..)
   , TabGroupKey (..)
   , TabKey (..)
   , Transaction (..)
@@ -59,11 +97,17 @@ module UIH.Core
   , attributedTextSpans
   , attributedTextToRuns
   , attributedTextValue
+  , controlChildren
+  , controlCatalogKind
+  , controlFrame
+  , controlKey
+  , flattenControls
   , noTransaction
   , requestEffect
   , resolveTextLayers
   , nextTabAfterRemoval
   , validateWorkspaceSpec
+  , validateControlCatalog
   , windowLeafControls
   , windowWorkspace
   , workspaceTabKeys
@@ -112,6 +156,12 @@ newtype TextRevision = TextRevision {unTextRevision :: Word64}
   deriving stock (Eq, Ord, Show)
 
 newtype TextLayerKey = TextLayerKey {unTextLayerKey :: Word64}
+  deriving stock (Eq, Ord, Show)
+
+newtype ChoiceKey = ChoiceKey {unChoiceKey :: Word64}
+  deriving stock (Eq, Ord, Show)
+
+newtype CollectionItemKey = CollectionItemKey {unCollectionItemKey :: Word64}
   deriving stock (Eq, Ord, Show)
 
 data Rect = Rect
@@ -315,6 +365,334 @@ data TextEditorSpec = TextEditorSpec
   }
   deriving stock (Eq, Show)
 
+data Axis
+  = Horizontal
+  | Vertical
+  deriving stock (Eq, Ord, Show)
+
+data ControlLabel = ControlLabel
+  { controlLabelText :: !Text
+  , controlLabelIcon :: !(Maybe ImageSource)
+  }
+  deriving stock (Eq, Show)
+
+data ImageSource
+  = SystemSymbol !Text
+  | NamedImage !Text
+  | FileImage !FilePath
+  deriving stock (Eq, Show)
+
+data ToggleValue
+  = ToggleOff
+  | ToggleOn
+  | ToggleMixed
+  deriving stock (Eq, Ord, Show)
+
+data CollectionSelectionMode
+  = NoCollectionSelection
+  | SingleCollectionSelection
+  | MultipleCollectionSelection
+  deriving stock (Eq, Ord, Show)
+
+data ChoiceItem = ChoiceItem
+  { choiceItemKey :: !ChoiceKey
+  , choiceItemLabel :: !ControlLabel
+  , choiceItemEnabled :: !Bool
+  }
+  deriving stock (Eq, Show)
+
+data CollectionItem = CollectionItem
+  { collectionItemKey :: !CollectionItemKey
+  , collectionItemLabel :: !Text
+  , collectionItemDetail :: !Text
+  , collectionItemDepth :: !Int
+  , collectionItemExpanded :: !Bool
+  }
+  deriving stock (Eq, Show)
+
+data ActionControlSpec = ActionControlSpec
+  { actionControlKey :: !ElementKey
+  , actionControlFrame :: !Rect
+  , actionControlLabel :: !ControlLabel
+  , actionControlCommand :: !CommandId
+  , actionControlEnabled :: !Bool
+  }
+  deriving stock (Eq, Show)
+
+data ToggleControlSpec = ToggleControlSpec
+  { toggleControlKey :: !ElementKey
+  , toggleControlFrame :: !Rect
+  , toggleControlLabel :: !ControlLabel
+  , toggleControlValue :: !ToggleValue
+  , toggleControlEnabled :: !Bool
+  }
+  deriving stock (Eq, Show)
+
+data ChoiceControlSpec = ChoiceControlSpec
+  { choiceControlKey :: !ElementKey
+  , choiceControlFrame :: !Rect
+  , choiceControlItems :: ![ChoiceItem]
+  , choiceControlSelected :: !(Maybe ChoiceKey)
+  , choiceControlEnabled :: !Bool
+  }
+  deriving stock (Eq, Show)
+
+data SplitButtonSpec = SplitButtonSpec
+  { splitButtonKey :: !ElementKey
+  , splitButtonFrame :: !Rect
+  , splitButtonLabel :: !ControlLabel
+  , splitButtonCommand :: !CommandId
+  , splitButtonItems :: ![MenuEntry]
+  , splitButtonToggleValue :: !(Maybe Bool)
+  , splitButtonEnabled :: !Bool
+  }
+  deriving stock (Eq, Show)
+
+data TextInputSpec = TextInputSpec
+  { textInputKey :: !ElementKey
+  , textInputFrame :: !Rect
+  , textInputText :: !Text
+  , textInputPlaceholder :: !Text
+  , textInputSuggestions :: ![ChoiceItem]
+  , textInputEnabled :: !Bool
+  , textInputFocused :: !Bool
+  }
+  deriving stock (Eq, Show)
+
+data NumericControlSpec = NumericControlSpec
+  { numericControlKey :: !ElementKey
+  , numericControlFrame :: !Rect
+  , numericControlValue :: !Double
+  , numericControlMinimum :: !Double
+  , numericControlMaximum :: !Double
+  , numericControlStep :: !Double
+  , numericControlEnabled :: !Bool
+  }
+  deriving stock (Eq, Show)
+
+data DateComponents = DateComponents
+  { dateYear :: !Int
+  , dateMonth :: !Int
+  , dateDay :: !Int
+  }
+  deriving stock (Eq, Ord, Show)
+
+data TimeComponents = TimeComponents
+  { timeHour :: !Int
+  , timeMinute :: !Int
+  , timeSecond :: !Int
+  }
+  deriving stock (Eq, Ord, Show)
+
+data DateControlSpec = DateControlSpec
+  { dateControlKey :: !ElementKey
+  , dateControlFrame :: !Rect
+  , dateControlValue :: !DateComponents
+  , dateControlEnabled :: !Bool
+  }
+  deriving stock (Eq, Show)
+
+data TimeControlSpec = TimeControlSpec
+  { timeControlKey :: !ElementKey
+  , timeControlFrame :: !Rect
+  , timeControlValue :: !TimeComponents
+  , timeControlEnabled :: !Bool
+  }
+  deriving stock (Eq, Show)
+
+data ColorControlSpec = ColorControlSpec
+  { colorControlKey :: !ElementKey
+  , colorControlFrame :: !Rect
+  , colorControlValue :: !Color
+  , colorControlEnabled :: !Bool
+  }
+  deriving stock (Eq, Show)
+
+data ProgressControlSpec = ProgressControlSpec
+  { progressControlKey :: !ElementKey
+  , progressControlFrame :: !Rect
+  , progressControlValue :: !Double
+  , progressControlMinimum :: !Double
+  , progressControlMaximum :: !Double
+  }
+  deriving stock (Eq, Show)
+
+data RichTextSpec = RichTextSpec
+  { richTextKey :: !ElementKey
+  , richTextFrame :: !Rect
+  , richTextValue :: !AttributedText
+  }
+  deriving stock (Eq, Show)
+
+data ImageControlSpec = ImageControlSpec
+  { imageControlKey :: !ElementKey
+  , imageControlFrame :: !Rect
+  , imageControlSource :: !ImageSource
+  , imageControlDescription :: !Text
+  }
+  deriving stock (Eq, Show)
+
+data CollectionControlSpec = CollectionControlSpec
+  { collectionControlKey :: !ElementKey
+  , collectionControlFrame :: !Rect
+  , collectionControlItems :: ![CollectionItem]
+  , collectionControlSelectionMode :: !CollectionSelectionMode
+  , collectionControlSelection :: ![CollectionItemKey]
+  , collectionControlEnabled :: !Bool
+  }
+  deriving stock (Eq, Show)
+
+data BreadcrumbSpec = BreadcrumbSpec
+  { breadcrumbKey :: !ElementKey
+  , breadcrumbFrame :: !Rect
+  , breadcrumbItems :: ![ChoiceItem]
+  , breadcrumbSelected :: !(Maybe ChoiceKey)
+  }
+  deriving stock (Eq, Show)
+
+data MenuEntry
+  = MenuCommand
+      { menuEntryLabel :: !Text
+      , menuEntryCommand :: !CommandId
+      , menuEntryEnabled :: !Bool
+      }
+  | MenuSeparator
+  deriving stock (Eq, Show)
+
+data MenuControlSpec = MenuControlSpec
+  { menuControlKey :: !ElementKey
+  , menuControlFrame :: !Rect
+  , menuControlTitle :: !Text
+  , menuControlEntries :: ![MenuEntry]
+  }
+  deriving stock (Eq, Show)
+
+data ToolbarSpec = ToolbarSpec
+  { toolbarKey :: !ElementKey
+  , toolbarFrame :: !Rect
+  , toolbarCommands :: ![CommandId]
+  }
+  deriving stock (Eq, Show)
+
+data MessageControlSpec = MessageControlSpec
+  { messageControlKey :: !ElementKey
+  , messageControlFrame :: !Rect
+  , messageControlTitle :: !Text
+  , messageControlMessage :: !Text
+  }
+  deriving stock (Eq, Show)
+
+data PresentationKind
+  = DialogPresentation
+  | AlertPresentation
+  | PopoverPresentation !ElementKey
+  deriving stock (Eq, Show)
+
+data PresentationResult
+  = PresentationAccepted
+  | PresentationCancelled
+  | PresentationDismissed
+  deriving stock (Eq, Ord, Show)
+
+data PresentationSpec = PresentationSpec
+  { presentationKey :: !ElementKey
+  , presentationFrame :: !Rect
+  , presentationKind :: !PresentationKind
+  , presentationTitle :: !Text
+  , presentationMessage :: !Text
+  , presentationVisible :: !Bool
+  }
+  deriving stock (Eq, Show)
+
+data ContainerKind
+  = StackContainer !Axis !Double
+  | GridContainer !Int !Double
+  | OverlayContainer
+  | CanvasContainer
+  | GroupContainer !Text
+  | ScrollContainer
+  | DisclosureContainer !Text !Bool
+  deriving stock (Eq, Show)
+
+data ContainerSpec = ContainerSpec
+  { containerKey :: !ElementKey
+  , containerFrame :: !Rect
+  , containerKind :: !ContainerKind
+  , containerChildren :: ![Control]
+  }
+  deriving stock (Eq, Show)
+
+data TabPageSpec = TabPageSpec
+  { tabPageKey :: !ChoiceKey
+  , tabPageTitle :: !Text
+  , tabPageControls :: ![Control]
+  }
+  deriving stock (Eq, Show)
+
+data TabViewSpec = TabViewSpec
+  { tabViewKey :: !ElementKey
+  , tabViewFrame :: !Rect
+  , tabViewSelected :: !(Maybe ChoiceKey)
+  , tabViewPages :: ![TabPageSpec]
+  }
+  deriving stock (Eq, Show)
+
+-- | The backend-neutral catalog tags are useful for diagnostics and backend
+-- conformance tables. Public construction still uses the distinct 'Control'
+-- constructors below.
+data CatalogControlKind
+  = RichTextKind
+  | ImageKind
+  | IconKind
+  | SeparatorKind
+  | RepeatButtonKind
+  | ToggleButtonKind
+  | CheckBoxKind
+  | RadioGroupKind
+  | SwitchKind
+  | SegmentedChoiceKind
+  | LinkKind
+  | MenuButtonKind
+  | SplitButtonKind
+  | ToggleSplitButtonKind
+  | TextAreaKind
+  | RichTextEditorKind
+  | SecureFieldKind
+  | SearchFieldKind
+  | SuggestFieldKind
+  | ChoicePickerKind
+  | EditableComboBoxKind
+  | NumberFieldKind
+  | StepperKind
+  | SliderKind
+  | DatePickerKind
+  | TimePickerKind
+  | CalendarViewKind
+  | ColorPickerKind
+  | RatingKind
+  | ListViewKind
+  | CollectionViewKind
+  | TreeViewKind
+  | TableViewKind
+  | ItemRepeaterKind
+  | TabViewKind
+  | BreadcrumbKind
+  | NavigationSidebarKind
+  | MenuBarKind
+  | ContextMenuKind
+  | ToolbarKind
+  | DialogKind
+  | AlertKind
+  | PopoverKind
+  | TooltipKind
+  | ProgressBarKind
+  | ActivityIndicatorKind
+  | MeterKind
+  | BadgeKind
+  | InlineNoticeKind
+  | ContainerKind
+  deriving stock (Eq, Ord, Enum, Bounded, Show)
+
 data Control
   = Label
       !ElementKey
@@ -333,7 +711,238 @@ data Control
       !Text
       !Bool
   | TextEditor !TextEditorSpec
+  | RichText !RichTextSpec
+  | Image !ImageControlSpec
+  | Icon !ImageControlSpec
+  | Separator !ElementKey !Rect
+  | RepeatButton !ActionControlSpec
+  | ToggleButton !ToggleControlSpec
+  | CheckBox !ToggleControlSpec
+  | RadioGroup !ChoiceControlSpec
+  | Switch !ToggleControlSpec
+  | SegmentedChoice !ChoiceControlSpec
+  | Link !ActionControlSpec
+  | MenuButton !ChoiceControlSpec
+  | SplitButton !SplitButtonSpec
+  | ToggleSplitButton !SplitButtonSpec
+  | TextArea !TextInputSpec
+  | RichTextEditor !TextEditorSpec
+  | SecureField !TextInputSpec
+  | SearchField !TextInputSpec
+  | SuggestField !TextInputSpec
+  | ChoicePicker !ChoiceControlSpec
+  | EditableComboBox !TextInputSpec
+  | NumberField !NumericControlSpec
+  | Stepper !NumericControlSpec
+  | Slider !NumericControlSpec
+  | DatePicker !DateControlSpec
+  | TimePicker !TimeControlSpec
+  | CalendarView !DateControlSpec
+  | ColorPicker !ColorControlSpec
+  | Rating !NumericControlSpec
+  | ListView !CollectionControlSpec
+  | CollectionView !CollectionControlSpec
+  | TreeView !CollectionControlSpec
+  | TableView !CollectionControlSpec
+  | ItemRepeater !CollectionControlSpec
+  | TabView !TabViewSpec
+  | Breadcrumb !BreadcrumbSpec
+  | NavigationSidebar !CollectionControlSpec
+  | MenuBar !MenuControlSpec
+  | ContextMenu !MenuControlSpec
+  | Toolbar !ToolbarSpec
+  | Dialog !PresentationSpec
+  | Alert !PresentationSpec
+  | Popover !PresentationSpec
+  | Tooltip !MessageControlSpec
+  | ProgressBar !ProgressControlSpec
+  | ActivityIndicator !ElementKey !Rect !Bool
+  | Meter !ProgressControlSpec
+  | Badge !MessageControlSpec
+  | InlineNotice !MessageControlSpec
+  | Container !ContainerSpec
   deriving stock (Eq, Show)
+
+controlKey :: Control -> ElementKey
+controlKey = \case
+  Label key _ _ -> key
+  Button key _ _ _ _ -> key
+  TextField key _ _ _ _ -> key
+  TextEditor spec -> spec.textEditorKey
+  RichText spec -> spec.richTextKey
+  Image spec -> spec.imageControlKey
+  Icon spec -> spec.imageControlKey
+  Separator key _ -> key
+  RepeatButton spec -> spec.actionControlKey
+  ToggleButton spec -> spec.toggleControlKey
+  CheckBox spec -> spec.toggleControlKey
+  RadioGroup spec -> spec.choiceControlKey
+  Switch spec -> spec.toggleControlKey
+  SegmentedChoice spec -> spec.choiceControlKey
+  Link spec -> spec.actionControlKey
+  MenuButton spec -> spec.choiceControlKey
+  SplitButton spec -> spec.splitButtonKey
+  ToggleSplitButton spec -> spec.splitButtonKey
+  TextArea spec -> spec.textInputKey
+  RichTextEditor spec -> spec.textEditorKey
+  SecureField spec -> spec.textInputKey
+  SearchField spec -> spec.textInputKey
+  SuggestField spec -> spec.textInputKey
+  ChoicePicker spec -> spec.choiceControlKey
+  EditableComboBox spec -> spec.textInputKey
+  NumberField spec -> spec.numericControlKey
+  Stepper spec -> spec.numericControlKey
+  Slider spec -> spec.numericControlKey
+  DatePicker spec -> spec.dateControlKey
+  TimePicker spec -> spec.timeControlKey
+  CalendarView spec -> spec.dateControlKey
+  ColorPicker spec -> spec.colorControlKey
+  Rating spec -> spec.numericControlKey
+  ListView spec -> spec.collectionControlKey
+  CollectionView spec -> spec.collectionControlKey
+  TreeView spec -> spec.collectionControlKey
+  TableView spec -> spec.collectionControlKey
+  ItemRepeater spec -> spec.collectionControlKey
+  TabView spec -> spec.tabViewKey
+  Breadcrumb spec -> spec.breadcrumbKey
+  NavigationSidebar spec -> spec.collectionControlKey
+  MenuBar spec -> spec.menuControlKey
+  ContextMenu spec -> spec.menuControlKey
+  Toolbar spec -> spec.toolbarKey
+  Dialog spec -> spec.presentationKey
+  Alert spec -> spec.presentationKey
+  Popover spec -> spec.presentationKey
+  Tooltip spec -> spec.messageControlKey
+  ProgressBar spec -> spec.progressControlKey
+  ActivityIndicator key _ _ -> key
+  Meter spec -> spec.progressControlKey
+  Badge spec -> spec.messageControlKey
+  InlineNotice spec -> spec.messageControlKey
+  Container spec -> spec.containerKey
+
+controlFrame :: Control -> Rect
+controlFrame = \case
+  Label _ frame _ -> frame
+  Button _ frame _ _ _ -> frame
+  TextField _ frame _ _ _ -> frame
+  TextEditor spec -> spec.textEditorFrame
+  RichText spec -> spec.richTextFrame
+  Image spec -> spec.imageControlFrame
+  Icon spec -> spec.imageControlFrame
+  Separator _ frame -> frame
+  RepeatButton spec -> spec.actionControlFrame
+  ToggleButton spec -> spec.toggleControlFrame
+  CheckBox spec -> spec.toggleControlFrame
+  RadioGroup spec -> spec.choiceControlFrame
+  Switch spec -> spec.toggleControlFrame
+  SegmentedChoice spec -> spec.choiceControlFrame
+  Link spec -> spec.actionControlFrame
+  MenuButton spec -> spec.choiceControlFrame
+  SplitButton spec -> spec.splitButtonFrame
+  ToggleSplitButton spec -> spec.splitButtonFrame
+  TextArea spec -> spec.textInputFrame
+  RichTextEditor spec -> spec.textEditorFrame
+  SecureField spec -> spec.textInputFrame
+  SearchField spec -> spec.textInputFrame
+  SuggestField spec -> spec.textInputFrame
+  ChoicePicker spec -> spec.choiceControlFrame
+  EditableComboBox spec -> spec.textInputFrame
+  NumberField spec -> spec.numericControlFrame
+  Stepper spec -> spec.numericControlFrame
+  Slider spec -> spec.numericControlFrame
+  DatePicker spec -> spec.dateControlFrame
+  TimePicker spec -> spec.timeControlFrame
+  CalendarView spec -> spec.dateControlFrame
+  ColorPicker spec -> spec.colorControlFrame
+  Rating spec -> spec.numericControlFrame
+  ListView spec -> spec.collectionControlFrame
+  CollectionView spec -> spec.collectionControlFrame
+  TreeView spec -> spec.collectionControlFrame
+  TableView spec -> spec.collectionControlFrame
+  ItemRepeater spec -> spec.collectionControlFrame
+  TabView spec -> spec.tabViewFrame
+  Breadcrumb spec -> spec.breadcrumbFrame
+  NavigationSidebar spec -> spec.collectionControlFrame
+  MenuBar spec -> spec.menuControlFrame
+  ContextMenu spec -> spec.menuControlFrame
+  Toolbar spec -> spec.toolbarFrame
+  Dialog spec -> spec.presentationFrame
+  Alert spec -> spec.presentationFrame
+  Popover spec -> spec.presentationFrame
+  Tooltip spec -> spec.messageControlFrame
+  ProgressBar spec -> spec.progressControlFrame
+  ActivityIndicator _ frame _ -> frame
+  Meter spec -> spec.progressControlFrame
+  Badge spec -> spec.messageControlFrame
+  InlineNotice spec -> spec.messageControlFrame
+  Container spec -> spec.containerFrame
+
+controlChildren :: Control -> [Control]
+controlChildren (Container spec) = spec.containerChildren
+controlChildren (TabView spec) = foldMap tabPageControls spec.tabViewPages
+controlChildren _ = []
+
+flattenControls :: [Control] -> [Control]
+flattenControls = foldMap flattenOne
+  where
+    flattenOne control = control : flattenControls (controlChildren control)
+
+controlCatalogKind :: Control -> Maybe CatalogControlKind
+controlCatalogKind = \case
+  Label {} -> Nothing
+  Button {} -> Nothing
+  TextField {} -> Nothing
+  TextEditor {} -> Nothing
+  RichText {} -> Just RichTextKind
+  Image {} -> Just ImageKind
+  Icon {} -> Just IconKind
+  Separator {} -> Just SeparatorKind
+  RepeatButton {} -> Just RepeatButtonKind
+  ToggleButton {} -> Just ToggleButtonKind
+  CheckBox {} -> Just CheckBoxKind
+  RadioGroup {} -> Just RadioGroupKind
+  Switch {} -> Just SwitchKind
+  SegmentedChoice {} -> Just SegmentedChoiceKind
+  Link {} -> Just LinkKind
+  MenuButton {} -> Just MenuButtonKind
+  SplitButton {} -> Just SplitButtonKind
+  ToggleSplitButton {} -> Just ToggleSplitButtonKind
+  TextArea {} -> Just TextAreaKind
+  RichTextEditor {} -> Just RichTextEditorKind
+  SecureField {} -> Just SecureFieldKind
+  SearchField {} -> Just SearchFieldKind
+  SuggestField {} -> Just SuggestFieldKind
+  ChoicePicker {} -> Just ChoicePickerKind
+  EditableComboBox {} -> Just EditableComboBoxKind
+  NumberField {} -> Just NumberFieldKind
+  Stepper {} -> Just StepperKind
+  Slider {} -> Just SliderKind
+  DatePicker {} -> Just DatePickerKind
+  TimePicker {} -> Just TimePickerKind
+  CalendarView {} -> Just CalendarViewKind
+  ColorPicker {} -> Just ColorPickerKind
+  Rating {} -> Just RatingKind
+  ListView {} -> Just ListViewKind
+  CollectionView {} -> Just CollectionViewKind
+  TreeView {} -> Just TreeViewKind
+  TableView {} -> Just TableViewKind
+  ItemRepeater {} -> Just ItemRepeaterKind
+  TabView {} -> Just TabViewKind
+  Breadcrumb {} -> Just BreadcrumbKind
+  NavigationSidebar {} -> Just NavigationSidebarKind
+  MenuBar {} -> Just MenuBarKind
+  ContextMenu {} -> Just ContextMenuKind
+  Toolbar {} -> Just ToolbarKind
+  Dialog {} -> Just DialogKind
+  Alert {} -> Just AlertKind
+  Popover {} -> Just PopoverKind
+  Tooltip {} -> Just TooltipKind
+  ProgressBar {} -> Just ProgressBarKind
+  ActivityIndicator {} -> Just ActivityIndicatorKind
+  Meter {} -> Just MeterKind
+  Badge {} -> Just BadgeKind
+  InlineNotice {} -> Just InlineNoticeKind
+  Container {} -> Just ContainerKind
 
 -- | Resolve ordered, potentially overlapping presentation layers into
 -- validated, non-overlapping runs. Stale layers and invalid ranges are ignored.
@@ -500,8 +1109,9 @@ windowWorkspace WindowSpec {} = Nothing
 windowWorkspace WorkspaceWindowSpec {windowWorkspaceSpec = spec} = Just spec
 
 windowLeafControls :: WindowSpec -> [Control]
-windowLeafControls WindowSpec {windowControls = controls} = controls
-windowLeafControls WorkspaceWindowSpec {windowWorkspaceSpec = spec} = workspaceControls spec
+windowLeafControls WindowSpec {windowControls = controls} = flattenControls controls
+windowLeafControls WorkspaceWindowSpec {windowWorkspaceSpec = spec} =
+  flattenControls (workspaceControls spec)
 
 workspaceControls :: WorkspaceSpec -> [Control]
 workspaceControls spec = paneTreeControls spec.workspaceRoot <> spec.workspaceStatusControls
@@ -543,6 +1153,7 @@ validateWorkspaceSpec spec =
     <> duplicateDiagnostics "tab" tabIdentities
     <> concatMap validateGroup groups
     <> validatePaneTree spec.workspaceRoot
+    <> validateControlCatalog (workspaceControls spec)
   where
     panes = paneTreePanes spec.workspaceRoot
     groups = workspaceTabGroups spec
@@ -593,6 +1204,156 @@ duplicateDiagnostics label values =
   , value : _ : _ <- [duplicates]
   ]
 
+validateControlCatalog :: [Control] -> [Text]
+validateControlCatalog roots =
+  duplicateDiagnostics
+    "control"
+    (fmap (show . unElementKey . controlKey) controls)
+    <> foldMap validateControl controls
+  where
+    controls = flattenControls roots
+
+validateControl :: Control -> [Text]
+validateControl control =
+  validateFrame (controlKey control) (controlFrame control)
+    <> case control of
+      RadioGroup spec -> validateChoice spec
+      SegmentedChoice spec -> validateChoice spec
+      MenuButton spec -> validateChoice spec
+      ChoicePicker spec -> validateChoice spec
+      NumberField spec -> validateNumeric spec
+      Stepper spec -> validateNumeric spec
+      Slider spec -> validateNumeric spec
+      Rating spec -> validateNumeric spec
+      DatePicker spec -> validateDate spec.dateControlKey spec.dateControlValue
+      CalendarView spec -> validateDate spec.dateControlKey spec.dateControlValue
+      TimePicker spec -> validateTime spec.timeControlKey spec.timeControlValue
+      ListView spec -> validateCollection spec
+      CollectionView spec -> validateCollection spec
+      TreeView spec -> validateCollection spec
+      TableView spec -> validateCollection spec
+      ItemRepeater spec -> validateCollection spec
+      NavigationSidebar spec -> validateCollection spec
+      TabView spec -> validateTabs spec
+      Breadcrumb spec ->
+        validateChoice
+          ChoiceControlSpec
+            { choiceControlKey = spec.breadcrumbKey
+            , choiceControlFrame = spec.breadcrumbFrame
+            , choiceControlItems = spec.breadcrumbItems
+            , choiceControlSelected = spec.breadcrumbSelected
+            , choiceControlEnabled = True
+            }
+      ProgressBar spec -> validateProgress spec
+      Meter spec -> validateProgress spec
+      Container spec -> validateContainer spec
+      _ -> []
+
+validateFrame :: ElementKey -> Rect -> [Text]
+validateFrame key frame =
+  [ "Control frames must have nonnegative width and height: " <> Text.pack (show key)
+  | frame.rectWidth < 0 || frame.rectHeight < 0
+  ]
+
+validateChoice :: ChoiceControlSpec -> [Text]
+validateChoice spec =
+  duplicateDiagnostics
+    "choice item"
+    (fmap (show . unChoiceKey . choiceItemKey) spec.choiceControlItems)
+    <> [ "Choice control selects an undeclared item: " <> Text.pack (show spec.choiceControlKey)
+       | Just selected <- [spec.choiceControlSelected]
+       , selected `notElem` fmap choiceItemKey spec.choiceControlItems
+       ]
+
+validateNumeric :: NumericControlSpec -> [Text]
+validateNumeric spec =
+  [ "Numeric control has invalid bounds, value, or step: "
+      <> Text.pack (show spec.numericControlKey)
+  | spec.numericControlMinimum > spec.numericControlMaximum
+      || spec.numericControlValue < spec.numericControlMinimum
+      || spec.numericControlValue > spec.numericControlMaximum
+      || spec.numericControlStep <= 0
+  ]
+
+validateDate :: ElementKey -> DateComponents -> [Text]
+validateDate key value =
+  [ "Date control has invalid Gregorian components: " <> Text.pack (show key)
+  | value.dateMonth < 1
+      || value.dateMonth > 12
+      || value.dateDay < 1
+      || value.dateDay > 31
+  ]
+
+validateTime :: ElementKey -> TimeComponents -> [Text]
+validateTime key value =
+  [ "Time control has invalid components: " <> Text.pack (show key)
+  | value.timeHour < 0
+      || value.timeHour > 23
+      || value.timeMinute < 0
+      || value.timeMinute > 59
+      || value.timeSecond < 0
+      || value.timeSecond > 59
+  ]
+
+validateCollection :: CollectionControlSpec -> [Text]
+validateCollection spec =
+  duplicateDiagnostics
+    "collection item"
+    (fmap (show . unCollectionItemKey . collectionItemKey) spec.collectionControlItems)
+    <> [ "Collection item depth must be nonnegative: "
+          <> Text.pack (show item.collectionItemKey)
+       | item <- spec.collectionControlItems
+       , item.collectionItemDepth < 0
+       ]
+    <> [ "Collection selection contains an undeclared item: "
+          <> Text.pack (show selected)
+       | selected <- spec.collectionControlSelection
+       , selected `notElem` fmap collectionItemKey spec.collectionControlItems
+       ]
+    <> [ "A no-selection collection cannot declare selected items: "
+          <> Text.pack (show spec.collectionControlKey)
+       | spec.collectionControlSelectionMode == NoCollectionSelection
+       , not (null spec.collectionControlSelection)
+       ]
+    <> [ "A single-selection collection cannot select multiple items: "
+          <> Text.pack (show spec.collectionControlKey)
+       | spec.collectionControlSelectionMode == SingleCollectionSelection
+       , length spec.collectionControlSelection > 1
+       ]
+
+validateTabs :: TabViewSpec -> [Text]
+validateTabs spec =
+  duplicateDiagnostics
+    "tab page"
+    (fmap (show . unChoiceKey . tabPageKey) spec.tabViewPages)
+    <> [ "Tab view selects an undeclared page: " <> Text.pack (show spec.tabViewKey)
+       | Just selected <- [spec.tabViewSelected]
+       , selected `notElem` fmap tabPageKey spec.tabViewPages
+       ]
+
+validateProgress :: ProgressControlSpec -> [Text]
+validateProgress spec =
+  [ "Progress control has invalid bounds or value: "
+      <> Text.pack (show spec.progressControlKey)
+  | spec.progressControlMinimum > spec.progressControlMaximum
+      || spec.progressControlValue < spec.progressControlMinimum
+      || spec.progressControlValue > spec.progressControlMaximum
+  ]
+
+validateContainer :: ContainerSpec -> [Text]
+validateContainer spec =
+  case spec.containerKind of
+    GridContainer columns spacing ->
+      [ "Grid containers require a positive column count and nonnegative spacing: "
+          <> Text.pack (show spec.containerKey)
+      | columns <= 0 || spacing < 0
+      ]
+    StackContainer _ spacing ->
+      [ "Stack spacing must be nonnegative: " <> Text.pack (show spec.containerKey)
+      | spacing < 0
+      ]
+    _ -> []
+
 data CommandSpec = CommandSpec
   { commandId :: !CommandId
   , commandTitle :: !Text
@@ -610,6 +1371,17 @@ data AppView = AppView
 data UIEvent
   = CommandInvoked !CommandId
   | TextChanged !ElementKey !Text
+  | ControlInvoked !ElementKey
+  | ToggleChanged !ElementKey !ToggleValue
+  | ChoiceChanged !ElementKey !(Maybe ChoiceKey)
+  | NumberChanged !ElementKey !Double
+  | DateChanged !ElementKey !DateComponents
+  | TimeChanged !ElementKey !TimeComponents
+  | ColorChanged !ElementKey !Color
+  | CollectionSelectionChanged !ElementKey ![CollectionItemKey]
+  | CollectionExpansionChanged !ElementKey !CollectionItemKey !Bool
+  | DisclosureChanged !ElementKey !Bool
+  | PresentationClosed !ElementKey !PresentationResult
   | TabSelected !TabKey
   | TabCloseRequested !TabKey
   | PaneStateChanged !PaneKey !PaneState

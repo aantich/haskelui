@@ -41,6 +41,18 @@ stack exec uih-text-editor
 
 See [the editor V1/V2 contract](examples/text-editor/README.md).
 
+The Core control gallery declares every portable control in one model-driven
+native application. Its five tabs cover content, commands, text/value input,
+collections, shell/presentation feedback, and arbitrary-child containers:
+
+```console
+stack exec uih-control-gallery
+```
+
+The gallery's model/headless test proves exhaustive catalog coverage and its
+deterministic AppKit test exercises representative typed events and resource
+release.
+
 The native test deterministically exercises AppKit callbacks, focus, accessibility identity, Command-S routing, close veto, and zero-resource shutdown. The candidate macOS 13 deployment floor has a separate isolated build/test and Mach-O inspection gate:
 
 ```console
@@ -50,6 +62,7 @@ tests/macos/validate-deployment-target.sh 13.0
 ## Design documents
 
 - [Architecture proposal](docs/design/architecture.md)
+- [Portable Core control catalog](docs/design/core-control-catalog.md)
 - [Document/workspace window surface API](docs/design/window-workspace-surface-api.md)
 - [ADR 0001: pure bindings, transactions, and async validation](docs/adr/0001-pure-bindings-transactions-and-async-validation.md)
 - [ADR 0002: backend layout and the AppKit C bridge](docs/adr/0002-backend-layout-and-appkit-c-bridge.md)

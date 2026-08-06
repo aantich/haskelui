@@ -1,0 +1,55 @@
+name: uih-example-control-gallery
+version: 0.1.0.0
+github: aantich/uih
+license: BSD-3-Clause
+author: UIH contributors
+maintainer: UIH contributors
+copyright: 2026 UIH contributors
+
+dependencies:
+  - base >= 4.20.1 && < 4.21
+  - text
+  - uih-core
+
+library:
+  source-dirs: src
+  exposed-modules:
+    - Example.ControlGallery
+  ghc-options:
+    - -Wall
+    - -Wcompat
+
+executables:
+  uih-control-gallery:
+    main: Main.hs
+    source-dirs: app
+    dependencies:
+      - uih-backend-appkit
+      - uih-example-control-gallery
+      - uih-runtime
+    ghc-options:
+      - -Wall
+      - -Wcompat
+      - -threaded
+    when:
+      - condition: '!os(darwin)'
+        buildable: false
+
+tests:
+  control-gallery-model-test:
+    main: ModelSpec.hs
+    source-dirs: test/model
+    dependencies:
+      - uih-backend-headless
+      - uih-example-control-gallery
+      - uih-runtime
+  control-gallery-native-test:
+    main: NativeSpec.hs
+    source-dirs: test/native
+    dependencies:
+      - uih-backend-appkit
+      - uih-example-control-gallery
+      - uih-runtime
+    when:
+      - condition: '!os(darwin)'
+        buildable: false

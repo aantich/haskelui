@@ -11,7 +11,10 @@ cd "$repo_root"
 
 echo "Building and testing UIH with MACOSX_DEPLOYMENT_TARGET=$target in $work_dir"
 MACOSX_DEPLOYMENT_TARGET="$target" \
-  stack --work-dir "$work_dir" test uih-example-appkit-vertical uih-example-text-editor
+  stack --work-dir "$work_dir" test \
+    uih-example-appkit-vertical \
+    uih-example-control-gallery \
+    uih-example-text-editor
 
 install_root="$({
   MACOSX_DEPLOYMENT_TARGET="$target" \
@@ -19,6 +22,7 @@ install_root="$({
 } 2>/dev/null)"
 binary="$install_root/bin/uih-appkit-vertical"
 editor_binary="$install_root/bin/uih-text-editor"
+gallery_binary="$install_root/bin/uih-control-gallery"
 
 first_match() {
   local search_root="$1"
@@ -58,6 +62,7 @@ verify_compatible_minos() {
 
 verify_minos "$binary"
 verify_minos "$editor_binary"
+verify_minos "$gallery_binary"
 verify_minos "$appkit_object"
 verify_minos "$core_object"
 verify_minos "$runtime_object"
@@ -78,3 +83,4 @@ cd "$repo_root"
 
 echo "Linked system libraries and frameworks:"
 otool -L "$binary"
+otool -L "$gallery_binary"
