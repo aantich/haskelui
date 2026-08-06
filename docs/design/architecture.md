@@ -1183,9 +1183,16 @@ Costs:
 - Greater cross-platform layout divergence
 - Difficult hybrid and specialized layout behavior
 
-### 15.3 Initial decision
+### 15.3 Accepted and implemented decision
 
-The default custom backend will use framework-managed layout. Native backend spikes will determine whether ordinary native controls should also use framework-managed frames or whether selected native containers warrant native-managed lowering. The public layout vocabulary must not depend on that internal choice.
+Portable control geometry uses framework-managed layout for native and custom
+backends. Native adapters perform a cached measurement phase, the pure Core
+solver produces stable-keyed top-left frames, and adapters commit those frames
+to retained peers. Native scroll, group, and disclosure hosts preserve their
+platform semantics without becoming an independent source of child geometry.
+Specialized virtualized collections and interactive workspace panes retain
+their dedicated semantic protocols. See the [portable layout system](layout-system.md)
+and [ADR 0005](../adr/0005-pure-portable-layout.md).
 
 ## 16. Backend architecture
 
@@ -1723,7 +1730,10 @@ The workspace follow-up adds distinct document, tab, tab-group, pane-host, movab
 
 ### Phase 3: Common layout and display list
 
-- Implement core measurement and arrangement
+- Completed for the built-in layout vocabulary: pure measurement and
+  arrangement, cached native leaf measurement, stable-keyed frame realization,
+  diagnostics, directionality, geometry/property/scale tests, and the AppKit
+  visual lab
 - Define display-list primitives
 - Add damage and invalidation tracking
 - Implement a deterministic software/reference executor if useful for tests
@@ -1869,11 +1879,10 @@ The lens representation, default dotted path syntax, distinct element-assignment
 
 ### 30.2 Backend and implementation decisions that may follow spikes
 
-11. Whether native leaf controls use common layout frames or selected native containers
-12. The Windows baseline: WinUI 3, Win32 plus modern graphics, or a layered combination
-13. The granularity at which native and custom elements may be mixed
-14. The first production text stack for the SDL3 backend
-15. Whether display-list types live in a separate public package or remain internal
+11. The Windows baseline: WinUI 3, Win32 plus modern graphics, or a layered combination. This controls deployment, packaging, native-control reach, renderer interoperation, and how much ABI surface UIH must own. The current recommendation is a layered backend: Windows App SDK/WinUI where it supplies durable shell and controls, with Win32 and UIH-rendered islands behind explicit capabilities rather than exposed through Core.
+12. The granularity at which native and custom elements may be mixed. Arbitrary per-glyph or per-decoration mixing would make focus, clipping, z-order, accessibility, and composition expensive; allowing only whole retained element islands is simpler but less flexible. The current recommendation is whole semantic elements and explicit custom-surface hosts, with no undocumented native-object escape hatch.
+13. The first production text stack for the SDL3 backend. Candidates include HarfBuzz plus FreeType, platform text APIs, or a higher-level shaping abstraction. It must support fallback, BiDi, grapheme navigation, IME geometry, accessibility ranges, and stable cache keys; a Latin-only rasterizer is not an acceptable intermediate public contract.
+14. Whether display-list types live in a separate public package or remain internal. Public types enable third-party renderers and snapshot tooling but create an early compatibility promise; internal types permit iteration but constrain extensions. The current recommendation is an internal package with a deliberately small custom-element façade until two graphical backends validate the representation.
 16. The application-thread, render-thread, and backend-event-loop ownership contract
 
 Each consequential resolution should be recorded as an Architecture Decision Record.
@@ -1975,12 +1984,13 @@ The following are accepted unless later superseded by an ADR:
 84. Catalog events use normalized typed payloads at the Haskell boundary; platform enum values, selected indexes, native dates, and native colors do not escape the adapter.
 85. `Container` and ordinary `TabView` are recursively keyed controls. Their arbitrary child controls are flattened for reconciliation and explicitly reparented to retained native container/page slots.
 86. AppKit catalog realization uses one narrow generic create/configure ABI internally while preserving distinct public Core constructors. Sharing backend plumbing does not collapse public semantic types.
-87. The current catalog conformance fixture contains 89 controls, covers every one of the 50 catalog tags plus the original label/button/text-field/text-editor nodes, and is required to pass both pure/headless and deterministic native lifecycle tests.
+87. The current catalog conformance fixture contains 174 controls, covers every one of the 50 catalog tags plus the original label/button/text-field/text-editor nodes, every portable layout strategy, and a multirow lined grid-table composition, and is required to pass pure/headless, pure geometry, and deterministic native lifecycle tests. Its collection page explicitly captions each distinct peer, and native conformance requires `TableView` to retain an `NSTableView` header, two columns, and alternating row backgrounds.
 88. The implemented catalog is the concrete vertical-slice IR, not the final opaque `View model` surface. Data-source virtualization, richer accessibility descriptions and relationships, drag/drop, and the Windows realization remain later contracts layered onto the accepted identities and typed event model.
 89. A descendant value change must not reconstruct a retained `TabView` page slot or semantic `Container`. Parent shell reconciliation compares shell identity/configuration separately from child content so first responder, selection, scroll, and presentation anchors survive ordinary updates.
 90. Common keyed collection data does not imply a common native peer. AppKit maps lists/tables to `NSTableView`, card collections/repeaters to `NSCollectionView`, trees to `NSOutlineView`, and navigation sidebars to source-list behavior.
 91. Static attributed text is stored in the native attributed string; editor decoration layers use temporary layout attributes. Conformance checks font weight, slant, point size, and foreground color independently.
 92. Native gallery conformance includes interaction continuity, not construction alone: text and collection updates retain the exact first responder, popovers remain anchored until dismissal, dismissal reconciles desired state, and all resources are then released.
+93. Row sizing is an explicit portable policy, never an AppKit-private point constant. Its default delegates to the platform and user preference; compact, standard, and spacious requests map to semantic native density styles; exact and content-sized rows require explicit application intent. AppKit cell padding uses system-spacing constraints, and native conformance tests default, fixed, automatic, and vertical-centering behavior.
 
 ## 32. Research influences
 
@@ -2048,5 +2058,6 @@ The next artifacts should be created in this order:
 10. A backend adapter contract generalized from headless, AppKit, and later SDL3 evidence
 11. A text and accessibility contract
 12. Completed for the concrete catalog IR: the [portable Core control catalog](core-control-catalog.md), AppKit realization, and exhaustive backend-independent control gallery; the opaque surface combinators, scalable collection data sources, and Windows conformance implementation remain
+13. Completed for the initial layout contract: the [portable layout system](layout-system.md), [ADR 0005](../adr/0005-pure-portable-layout.md), pure geometry/validation/scale tests, AppKit measurement and frame realization, and the native visual layout lab
 
 Implementation should begin only far enough to test these contracts. The purpose of the early code is to falsify the architecture cheaply, not to establish premature compatibility.

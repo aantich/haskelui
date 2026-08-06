@@ -27,12 +27,15 @@ import Data.IORef
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, isJust)
+import Data.Set (Set)
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import Data.Text.Encoding.Error (lenientDecode)
 import Data.Word (Word64)
-import Foreign.C (CInt, CString)
+import Foreign (alloca, peek)
+import Foreign.C (CDouble, CInt, CString)
 import Foreign.Ptr
   ( FunPtr
   , Ptr
@@ -67,6 +70,7 @@ data CatalogItem = CatalogItem
 data NativeControl = NativeControl
   { nativeControlHandle :: !(Ptr MacControlHandle)
   , nativeControlSpec :: !Control
+  , nativeControlMetrics :: !(Maybe IntrinsicMetrics)
   }
 
 data NativeWindow = NativeWindow
@@ -283,15 +287,17 @@ createWindow spec =
       when (handle == nullPtr) (error "UIH AppKit failed to create NSWindow")
       forM_ (windowWorkspace spec) (configureWorkspaceStructure handle)
       let desiredControls = windowLeafControls spec
-      controls <- foldM (createAndInsertControl handle) Map.empty desiredControls
-      forM_ (windowWorkspace spec) (configureWorkspaceParents handle controls)
-      configureNestedControlParents controls (windowRootControls spec)
+      created <- foldM (createAndInsertControl handle) Map.empty desiredControls
+      (resolvedSpec, measured) <- resolveNativeLayouts created spec
+      controls <- commitPortableLayoutFrames handle measured resolvedSpec
+      forM_ (windowWorkspace resolvedSpec) (configureWorkspaceParents handle controls)
+      configureNestedControlParents controls (windowRootControls resolvedSpec)
       c_windowShow handle
-      configureControlNavigation handle controls desiredControls
+      configureControlNavigation handle controls (windowLeafControls resolvedSpec)
       pure
         NativeWindow
           { nativeWindowHandle = handle
-          , nativeWindowSpec = spec
+          , nativeWindowSpec = resolvedSpec
           , nativeWindowControls = controls
           }
 
@@ -301,17 +307,19 @@ updateWindow native desired = do
     withText desired.windowTitle (c_windowSetTitle native.nativeWindowHandle)
   forM_ (windowWorkspace desired) (configureWorkspaceStructure native.nativeWindowHandle)
   let desiredControls = windowLeafControls desired
-  controls <-
+  reconciled <-
     reconcileControls
       native.nativeWindowHandle
       native.nativeWindowControls
       desiredControls
-  forM_ (windowWorkspace desired) (configureWorkspaceParents native.nativeWindowHandle controls)
-  configureNestedControlParents controls (windowRootControls desired)
-  configureControlNavigation native.nativeWindowHandle controls desiredControls
+  (resolvedDesired, measured) <- resolveNativeLayouts reconciled desired
+  controls <- commitPortableLayoutFrames native.nativeWindowHandle measured resolvedDesired
+  forM_ (windowWorkspace resolvedDesired) (configureWorkspaceParents native.nativeWindowHandle controls)
+  configureNestedControlParents controls (windowRootControls resolvedDesired)
+  configureControlNavigation native.nativeWindowHandle controls (windowLeafControls resolvedDesired)
   pure
     native
-      { nativeWindowSpec = desired
+      { nativeWindowSpec = resolvedDesired
       , nativeWindowControls = controls
       }
 
@@ -452,6 +460,11 @@ nestedControlParents = foldMap descendants
         Container spec ->
           childRelations spec.containerKey 0 spec.containerChildren
             <> foldMap descendants spec.containerChildren
+        LayoutContainer spec ->
+          [ (controlKey child, spec.layoutContainerKey, 0, False)
+          | child <- spec.layoutContainerChildren
+          ]
+            <> foldMap descendants spec.layoutContainerChildren
         TabView spec ->
           foldMap
             (\page ->
@@ -503,6 +516,7 @@ singleFillControl :: [Control] -> Bool
 singleFillControl [TextEditor {}] = True
 singleFillControl [RichTextEditor {}] = True
 singleFillControl [Container {}] = True
+singleFillControl [LayoutContainer {}] = True
 singleFillControl [TabView {}] = True
 singleFillControl _ = False
 
@@ -588,7 +602,7 @@ createControl window spec = do
       configureCatalogControl handle spec
       applyTextEditorPresentation handle editor
     _ -> when (isJust (controlCatalogKind spec)) (configureCatalogControl handle spec)
-  pure (NativeControl handle spec)
+  pure (NativeControl handle spec Nothing)
 
 updateControl
   :: Ptr MacWindowHandle
@@ -620,7 +634,101 @@ updateControl window native desired = do
     RichTextEditor editor ->
       when editor.textEditorFocused (c_controlFocus window native.nativeControlHandle)
     _ -> pure ()
-  pure native {nativeControlSpec = desired}
+  let retainedMetrics =
+        if measurementAffectingChanged native.nativeControlSpec desired
+          then Nothing
+          else native.nativeControlMetrics
+  pure native {nativeControlSpec = desired, nativeControlMetrics = retainedMetrics}
+
+measurementAffectingChanged :: Control -> Control -> Bool
+measurementAffectingChanged (LayoutContainer old) (LayoutContainer new) =
+  old.layoutContainerPresentation /= new.layoutContainerPresentation
+measurementAffectingChanged (Container old) (Container new) =
+  old.containerKind /= new.containerKind
+measurementAffectingChanged old new =
+  setControlFrame (Rect 0 0 0 0) old /= setControlFrame (Rect 0 0 0 0) new
+
+resolveNativeLayouts
+  :: Map ElementKey NativeControl
+  -> WindowSpec
+  -> IO (WindowSpec, Map ElementKey NativeControl)
+resolveNativeLayouts controls desired = do
+  (measurements, measuredControls) <-
+    ensureNativeMeasurements (portableMeasurementKeys desired) controls
+  let (resolvedView, diagnostics) =
+        resolveAppViewLayoutsWith measurements (AppView [desired] [])
+      errors =
+        [ diagnosticMessage diagnostic
+        | diagnostic <- diagnostics
+        , diagnosticSeverity diagnostic == DiagnosticError
+        ]
+  unless (null errors) $
+    error ("Invalid UIH portable layout: " <> Text.unpack (Text.intercalate "; " errors))
+  case resolvedView.appWindows of
+    [resolved] -> pure (resolved, measuredControls)
+    _ -> error "UIH AppKit failed to resolve a single-window layout"
+
+ensureNativeMeasurements
+  :: Set ElementKey
+  -> Map ElementKey NativeControl
+  -> IO (Map ElementKey IntrinsicMetrics, Map ElementKey NativeControl)
+ensureNativeMeasurements requested controls =
+  foldM measureOne (Map.empty, Map.empty) (Map.toList controls)
+  where
+    measureOne (metrics, updated) (key, native) = do
+      if key `Set.notMember` requested
+        then pure (metrics, Map.insert key native updated)
+        else do
+          intrinsic <-
+            case native.nativeControlMetrics of
+              Just cached -> pure cached
+              Nothing -> measureNativeControl native
+          pure
+            ( Map.insert key intrinsic metrics
+            , Map.insert key native {nativeControlMetrics = Just intrinsic} updated
+            )
+
+portableMeasurementKeys :: WindowSpec -> Set ElementKey
+portableMeasurementKeys desired =
+  Set.fromList
+    [ key
+    | LayoutContainer spec <- windowLeafControls desired
+    , key <- layoutLeafKeys spec.layoutContainerLayout
+    ]
+
+commitPortableLayoutFrames
+  :: Ptr MacWindowHandle
+  -> Map ElementKey NativeControl
+  -> WindowSpec
+  -> IO (Map ElementKey NativeControl)
+commitPortableLayoutFrames window controls resolved =
+  foldM commitOne controls (Set.toList (portableMeasurementKeys resolved))
+  where
+    desired = Map.fromList [(controlKey control, control) | control <- windowLeafControls resolved]
+    commitOne updated key =
+      case (Map.lookup key updated, Map.lookup key desired) of
+        (Just native, Just control) -> do
+          committed <- updateControl window native control
+          pure (Map.insert key committed updated)
+        _ -> pure updated
+
+measureNativeControl :: NativeControl -> IO IntrinsicMetrics
+measureNativeControl native =
+  alloca $ \result -> do
+    c_controlMeasure native.nativeControlHandle 0 0 result
+    CMacRect _ _ nativeWidth nativeHeight <- peek result
+    let fallback = controlIntrinsicMetrics native.nativeControlSpec
+        fallbackSize = fallback.intrinsicIdeal
+        width = positiveOr fallbackSize.sizeWidth nativeWidth
+        height = positiveOr fallbackSize.sizeHeight nativeHeight
+        ideal = Size width height
+        baseline = Just (height * 0.75)
+    pure (IntrinsicMetrics (Size 0 0) ideal ideal baseline baseline)
+  where
+    positiveOr :: Dp -> CDouble -> Dp
+    positiveOr fallback value
+      | realToFrac value > (0 :: Double) = Dp (realToFrac value)
+      | otherwise = fallback
 
 -- Child content is reconciled independently. Rebuilding a tab's native page
 -- slots or a container merely because one descendant changed detaches the
@@ -633,6 +741,8 @@ catalogConfigurationChanged (TabView old) (TabView new) =
     tabShells = fmap (\page -> (page.tabPageKey, page.tabPageTitle)) . tabViewPages
 catalogConfigurationChanged (Container old) (Container new) =
   old.containerKind /= new.containerKind
+catalogConfigurationChanged (LayoutContainer old) (LayoutContainer new) =
+  old.layoutContainerPresentation /= new.layoutContainerPresentation
 catalogConfigurationChanged old new = old /= new
 
 configureCatalogControl :: Ptr MacControlHandle -> Control -> IO ()
@@ -706,6 +816,7 @@ configureCatalogControl handle = \case
   Badge spec -> configureMessage spec
   InlineNotice spec -> configureMessage spec
   Container spec -> configureContainer spec
+  LayoutContainer spec -> configureLayoutContainer spec
   control ->
     error ("UIH AppKit received a non-catalog control in catalog configuration: " <> show control)
   where
@@ -797,6 +908,8 @@ configureCatalogControl handle = \case
     configureCollection :: CollectionControlSpec -> IO ()
     configureCollection spec = do
       c_catalogSetState handle (selectionModeInt spec.collectionControlSelectionMode)
+      let (sizing, fixedHeight) = collectionRowSizingNative spec.collectionControlRowSizing
+      c_catalogSetRowSizing handle sizing fixedHeight
       setCatalogItems handle
         [ catalogItem item.collectionItemKey.unCollectionItemKey
             item.collectionItemLabel item.collectionItemDetail item.collectionItemDepth True
@@ -853,6 +966,22 @@ configureCatalogControl handle = \case
           setPrimary handle title
           c_catalogSetState handle (if expanded then 5001 else 5000)
 
+    configureLayoutContainer :: LayoutContainerSpec -> IO ()
+    configureLayoutContainer spec =
+      case spec.layoutContainerPresentation of
+        PlainLayoutContainer -> do
+          setPrimary handle ""
+          c_catalogSetState handle 6000
+        ScrollLayoutContainer _ -> do
+          setPrimary handle ""
+          c_catalogSetState handle 6100
+        GroupLayoutContainer title -> do
+          setPrimary handle title
+          c_catalogSetState handle 6300
+        DisclosureLayoutContainer title expanded -> do
+          setPrimary handle title
+          c_catalogSetState handle (if expanded then 6501 else 6500)
+
 configureLabel :: Ptr MacControlHandle -> ControlLabel -> IO ()
 configureLabel handle label = do
   setPrimary handle label.controlLabelText
@@ -881,6 +1010,14 @@ selectionModeInt :: CollectionSelectionMode -> CInt
 selectionModeInt NoCollectionSelection = 0
 selectionModeInt SingleCollectionSelection = 1
 selectionModeInt MultipleCollectionSelection = 2
+
+collectionRowSizingNative :: CollectionRowSizing -> (CInt, CDouble)
+collectionRowSizingNative PlatformDefaultRows = (0, 0)
+collectionRowSizingNative CompactRows = (1, 0)
+collectionRowSizingNative StandardRows = (2, 0)
+collectionRowSizingNative SpaciousRows = (3, 0)
+collectionRowSizingNative (FixedRows height) = (4, realToFrac height)
+collectionRowSizingNative ContentSizedRows = (5, 0)
 
 containerState :: Axis -> Double -> CInt
 containerState axis spacing =
@@ -1008,6 +1145,7 @@ isKeyboardControl Dialog {} = False
 isKeyboardControl Alert {} = False
 isKeyboardControl Popover {} = False
 isKeyboardControl Container {} = False
+isKeyboardControl LayoutContainer {} = False
 isKeyboardControl _ = True
 
 controlsCompatible :: Control -> Control -> Bool

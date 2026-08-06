@@ -8,6 +8,7 @@ copyright: 2026 UIH contributors
 
 dependencies:
   - base >= 4.20.2 && < 4.21
+  - containers
   - text
 
 ghc-options:
@@ -22,4 +23,5 @@ tests:
     main: Spec.hs
     source-dirs: test
     dependencies:
+      - containers
       - uih-core

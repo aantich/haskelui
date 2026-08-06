@@ -224,6 +224,10 @@ void uih_macos_catalog_control_set_secondary_text(
 void uih_macos_catalog_control_set_state(
     UIHMacControlRef control,
     int32_t state);
+void uih_macos_catalog_control_set_row_sizing(
+    UIHMacControlRef control,
+    int32_t sizing,
+    double fixed_height);
 void uih_macos_catalog_control_set_numeric(
     UIHMacControlRef control,
     double value,
@@ -277,6 +281,11 @@ int32_t uih_macos_text_editor_apply_style(
     uint64_t utf16_length,
     const UIHMacTextStyle *style);
 void uih_macos_text_editor_end_presentation(UIHMacControlRef control);
+void uih_macos_control_measure(
+    UIHMacControlRef control,
+    double maximum_width,
+    double maximum_height,
+    UIHMacRect *result);
 void uih_macos_control_set_frame(UIHMacControlRef control, const UIHMacRect *frame);
 void uih_macos_control_set_enabled(UIHMacControlRef control, int32_t enabled);
 void uih_macos_control_focus(UIHMacWindowRef window, UIHMacControlRef control);

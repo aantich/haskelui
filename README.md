@@ -42,11 +42,18 @@ stack exec uih-text-editor
 See [the editor V1/V2 contract](examples/text-editor/README.md).
 
 The Core control gallery declares every portable control in one model-driven
-native application. Its five tabs cover content, commands, text/value input,
-collections, shell/presentation feedback, and arbitrary-child containers:
+native application. Its six tabs cover content, commands, text/value input,
+collections, shell/presentation feedback, arbitrary-child containers, and the
+portable layout system:
 
 ```console
 stack exec uih-control-gallery
+```
+
+Open the visual layout lab directly with:
+
+```console
+stack exec uih-control-gallery -- --layout
 ```
 
 The gallery's model/headless test proves exhaustive catalog coverage and its
@@ -64,10 +71,12 @@ tests/macos/validate-deployment-target.sh 13.0
 - [Architecture proposal](docs/design/architecture.md)
 - [Portable Core control catalog](docs/design/core-control-catalog.md)
 - [Document/workspace window surface API](docs/design/window-workspace-surface-api.md)
+- [Portable layout system](docs/design/layout-system.md)
 - [ADR 0001: pure bindings, transactions, and async validation](docs/adr/0001-pure-bindings-transactions-and-async-validation.md)
 - [ADR 0002: backend layout and the AppKit C bridge](docs/adr/0002-backend-layout-and-appkit-c-bridge.md)
 - [ADR 0003: explicit file effects and the native text-editor slice](docs/adr/0003-file-effects-and-native-text-editor.md)
 - [ADR 0004: generic attributed text and presentation layers](docs/adr/0004-generic-text-styles-and-layers.md)
+- [ADR 0005: pure portable layout with native measurement](docs/adr/0005-pure-portable-layout.md)
 
 ## License
 

@@ -3,10 +3,12 @@
 
 module Main (main) where
 
+import LayoutSpec (runLayoutTests)
 import UIH.Core
 
 main :: IO ()
 main = do
+  runLayoutTests
   let increment = transaction "Increment" (SingleUndo (UndoGroup "counter")) (+ 1)
   assert "transaction application" (applyTransaction increment (1 :: Int) == 2)
 

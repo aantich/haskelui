@@ -5,7 +5,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 module UIH.Core
-  ( Action
+  ( module UIH.Layout
+  , Action
   , App (..)
   , AppView (..)
   , AttributedText
@@ -21,11 +22,14 @@ module UIH.Core
   , CollectionControlSpec (..)
   , CollectionItem (..)
   , CollectionItemKey (..)
+  , CollectionRowSizing (..)
   , CollectionSelectionMode (..)
   , CommandId (..)
   , CommandSpec (..)
   , ContainerKind (..)
   , ContainerSpec (..)
+  , LayoutContainerPresentation (..)
+  , LayoutContainerSpec (..)
   , Control (..)
   , ControlLabel (..)
   , DateComponents (..)
@@ -101,6 +105,11 @@ module UIH.Core
   , controlCatalogKind
   , controlFrame
   , controlKey
+  , controlIntrinsicMetrics
+  , setControlFrame
+  , resolveControlLayouts
+  , resolveAppViewLayouts
+  , resolveAppViewLayoutsWith
   , flattenControls
   , noTransaction
   , requestEffect
@@ -117,10 +126,15 @@ module UIH.Core
 
 import Control.Applicative ((<|>))
 import Data.List (group, sort)
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
 import Data.Maybe (listToMaybe, mapMaybe)
+import Data.Set (Set)
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Word (Word64)
+import UIH.Layout
 
 newtype WindowKey = WindowKey {unWindowKey :: Word64}
   deriving stock (Eq, Ord, Show)
@@ -538,8 +552,24 @@ data CollectionControlSpec = CollectionControlSpec
   , collectionControlItems :: ![CollectionItem]
   , collectionControlSelectionMode :: !CollectionSelectionMode
   , collectionControlSelection :: ![CollectionItemKey]
+  , collectionControlRowSizing :: !CollectionRowSizing
   , collectionControlEnabled :: !Bool
   }
+  deriving stock (Eq, Show)
+
+-- | Portable row-density policy for row-based collections.
+--
+-- 'PlatformDefaultRows' is deliberately the default policy: a native backend
+-- follows the platform and user preference instead of baking a point height
+-- into UIH. The semantic density choices also remain platform-owned; only
+-- 'FixedRows' expresses an exact logical height.
+data CollectionRowSizing
+  = PlatformDefaultRows
+  | CompactRows
+  | StandardRows
+  | SpaciousRows
+  | FixedRows !Double
+  | ContentSizedRows
   deriving stock (Eq, Show)
 
 data BreadcrumbSpec = BreadcrumbSpec
@@ -619,6 +649,29 @@ data ContainerSpec = ContainerSpec
   , containerFrame :: !Rect
   , containerKind :: !ContainerKind
   , containerChildren :: ![Control]
+  }
+  deriving stock (Eq, Show)
+
+-- | Native presentation for a portable layout root.  Geometry beneath this
+-- root is always solved by 'UIH.Layout'; the presentation only chooses the
+-- native host semantics (plain, scrolling, grouping, or disclosure).
+data LayoutContainerPresentation
+  = PlainLayoutContainer
+  | ScrollLayoutContainer !Axis
+  | GroupLayoutContainer !Text
+  | DisclosureLayoutContainer !Text !Bool
+  deriving stock (Eq, Show)
+
+-- | A portable layout tree references direct child controls by their stable
+-- 'ElementKey'.  This keeps layout metadata independent from control data and
+-- lets reconciliation retain each native peer while only its frame changes.
+data LayoutContainerSpec = LayoutContainerSpec
+  { layoutContainerKey :: !ElementKey
+  , layoutContainerFrame :: !Rect
+  , layoutContainerPresentation :: !LayoutContainerPresentation
+  , layoutContainerEnvironment :: !LayoutEnvironment
+  , layoutContainerLayout :: !(Layout ElementKey)
+  , layoutContainerChildren :: ![Control]
   }
   deriving stock (Eq, Show)
 
@@ -761,6 +814,7 @@ data Control
   | Badge !MessageControlSpec
   | InlineNotice !MessageControlSpec
   | Container !ContainerSpec
+  | LayoutContainer !LayoutContainerSpec
   deriving stock (Eq, Show)
 
 controlKey :: Control -> ElementKey
@@ -819,6 +873,7 @@ controlKey = \case
   Badge spec -> spec.messageControlKey
   InlineNotice spec -> spec.messageControlKey
   Container spec -> spec.containerKey
+  LayoutContainer spec -> spec.layoutContainerKey
 
 controlFrame :: Control -> Rect
 controlFrame = \case
@@ -876,9 +931,154 @@ controlFrame = \case
   Badge spec -> spec.messageControlFrame
   InlineNotice spec -> spec.messageControlFrame
   Container spec -> spec.containerFrame
+  LayoutContainer spec -> spec.layoutContainerFrame
+
+-- | Replace only the geometric frame of a control.  All semantic state and
+-- stable identity are preserved, which is essential for retained focus and
+-- native editor state during layout-only reconciliation.
+setControlFrame :: Rect -> Control -> Control
+setControlFrame frame = \case
+  Label key _ value -> Label key frame value
+  Button key _ title command enabled -> Button key frame title command enabled
+  TextField key _ value placeholder focused -> TextField key frame value placeholder focused
+  TextEditor spec -> TextEditor spec {textEditorFrame = frame}
+  RichText spec -> RichText spec {richTextFrame = frame}
+  Image spec -> Image spec {imageControlFrame = frame}
+  Icon spec -> Icon spec {imageControlFrame = frame}
+  Separator key _ -> Separator key frame
+  RepeatButton spec -> RepeatButton spec {actionControlFrame = frame}
+  ToggleButton spec -> ToggleButton spec {toggleControlFrame = frame}
+  CheckBox spec -> CheckBox spec {toggleControlFrame = frame}
+  RadioGroup spec -> RadioGroup spec {choiceControlFrame = frame}
+  Switch spec -> Switch spec {toggleControlFrame = frame}
+  SegmentedChoice spec -> SegmentedChoice spec {choiceControlFrame = frame}
+  Link spec -> Link spec {actionControlFrame = frame}
+  MenuButton spec -> MenuButton spec {choiceControlFrame = frame}
+  SplitButton spec -> SplitButton spec {splitButtonFrame = frame}
+  ToggleSplitButton spec -> ToggleSplitButton spec {splitButtonFrame = frame}
+  TextArea spec -> TextArea spec {textInputFrame = frame}
+  RichTextEditor spec -> RichTextEditor spec {textEditorFrame = frame}
+  SecureField spec -> SecureField spec {textInputFrame = frame}
+  SearchField spec -> SearchField spec {textInputFrame = frame}
+  SuggestField spec -> SuggestField spec {textInputFrame = frame}
+  ChoicePicker spec -> ChoicePicker spec {choiceControlFrame = frame}
+  EditableComboBox spec -> EditableComboBox spec {textInputFrame = frame}
+  NumberField spec -> NumberField spec {numericControlFrame = frame}
+  Stepper spec -> Stepper spec {numericControlFrame = frame}
+  Slider spec -> Slider spec {numericControlFrame = frame}
+  DatePicker spec -> DatePicker spec {dateControlFrame = frame}
+  TimePicker spec -> TimePicker spec {timeControlFrame = frame}
+  CalendarView spec -> CalendarView spec {dateControlFrame = frame}
+  ColorPicker spec -> ColorPicker spec {colorControlFrame = frame}
+  Rating spec -> Rating spec {numericControlFrame = frame}
+  ListView spec -> ListView spec {collectionControlFrame = frame}
+  CollectionView spec -> CollectionView spec {collectionControlFrame = frame}
+  TreeView spec -> TreeView spec {collectionControlFrame = frame}
+  TableView spec -> TableView spec {collectionControlFrame = frame}
+  ItemRepeater spec -> ItemRepeater spec {collectionControlFrame = frame}
+  TabView spec -> TabView spec {tabViewFrame = frame}
+  Breadcrumb spec -> Breadcrumb spec {breadcrumbFrame = frame}
+  NavigationSidebar spec -> NavigationSidebar spec {collectionControlFrame = frame}
+  MenuBar spec -> MenuBar spec {menuControlFrame = frame}
+  ContextMenu spec -> ContextMenu spec {menuControlFrame = frame}
+  Toolbar spec -> Toolbar spec {toolbarFrame = frame}
+  Dialog spec -> Dialog spec {presentationFrame = frame}
+  Alert spec -> Alert spec {presentationFrame = frame}
+  Popover spec -> Popover spec {presentationFrame = frame}
+  Tooltip spec -> Tooltip spec {messageControlFrame = frame}
+  ProgressBar spec -> ProgressBar spec {progressControlFrame = frame}
+  ActivityIndicator key _ active -> ActivityIndicator key frame active
+  Meter spec -> Meter spec {progressControlFrame = frame}
+  Badge spec -> Badge spec {messageControlFrame = frame}
+  InlineNotice spec -> InlineNotice spec {messageControlFrame = frame}
+  Container spec -> Container spec {containerFrame = frame}
+  LayoutContainer spec -> LayoutContainer spec {layoutContainerFrame = frame}
+
+-- | Frame-based fallback metrics keep old controls usable before a backend has
+-- populated its native measurement cache.  Backends should override these
+-- values with fitting sizes whenever possible.
+controlIntrinsicMetrics :: Control -> IntrinsicMetrics
+controlIntrinsicMetrics control =
+  let frame = controlFrame control
+      ideal = Size (Dp (max 0 frame.rectWidth)) (Dp (max 0 frame.rectHeight))
+      baseline = Just (ideal.sizeHeight * 0.75)
+   in IntrinsicMetrics (Size 0 0) ideal ideal baseline baseline
+
+-- | Solve every portable layout root in a control forest.  Frames produced by
+-- the layout engine use a top-left local coordinate system; the AppKit host for
+-- a 'LayoutContainer' is correspondingly flipped.
+resolveControlLayouts
+  :: Map ElementKey IntrinsicMetrics
+  -> [Control]
+  -> ([Control], [LayoutDiagnostic ElementKey])
+resolveControlLayouts supplied controls =
+  let resolved = fmap resolveOne controls
+   in (fmap fst resolved, foldMap snd resolved)
+  where
+    resolveOne :: Control -> (Control, [LayoutDiagnostic ElementKey])
+    resolveOne = \case
+      LayoutContainer spec ->
+        let frame = spec.layoutContainerFrame
+            headerHeight =
+              case spec.layoutContainerPresentation of
+                GroupLayoutContainer _ -> 30
+                DisclosureLayoutContainer _ _ -> 30
+                _ -> 0
+            contentHeight = max 0 (frame.rectHeight - headerHeight)
+            childDefaults =
+              Map.fromList
+                [ (controlKey child, controlIntrinsicMetrics child)
+                | child <- spec.layoutContainerChildren
+                ]
+            measurements = supplied `Map.union` childDefaults
+            plan =
+              solveLayout
+                spec.layoutContainerEnvironment
+                (metricsMeasurer measurements)
+                (LayoutRect 0 0 (Dp (max 0 frame.rectWidth)) (Dp contentHeight))
+                spec.layoutContainerLayout
+            declaredLayoutKeys = Set.fromList (layoutLeafKeys spec.layoutContainerLayout)
+            resolveChild child =
+              let key = controlKey child
+                  visibility = Map.findWithDefault Visible key plan.layoutVisibility
+                  framed =
+                    case Map.lookup key plan.layoutFrames of
+                      Nothing
+                        | key `Set.member` declaredLayoutKeys -> setControlFrame (Rect 0 0 0 0) child
+                        | otherwise -> child
+                      Just layoutFrame ->
+                        setControlFrame
+                          ( if visibility == Collapsed
+                              then Rect (unDp layoutFrame.layoutX) (unDp layoutFrame.layoutY) 0 0
+                              else Rect
+                                (unDp layoutFrame.layoutX)
+                                (unDp layoutFrame.layoutY)
+                                (unDp layoutFrame.layoutWidth)
+                                (unDp layoutFrame.layoutHeight)
+                          )
+                          child
+               in resolveOne framed
+            children = fmap resolveChild spec.layoutContainerChildren
+            updated =
+              LayoutContainer
+                spec
+                  { layoutContainerChildren = fmap fst children
+                  }
+         in (updated, plan.layoutDiagnostics <> foldMap snd children)
+      Container spec ->
+        let children = fmap resolveOne spec.containerChildren
+         in (Container spec {containerChildren = fmap fst children}, foldMap snd children)
+      TabView spec ->
+        let resolvePage page =
+              let children = fmap resolveOne page.tabPageControls
+               in (page {tabPageControls = fmap fst children}, foldMap snd children)
+            pages = fmap resolvePage spec.tabViewPages
+         in (TabView spec {tabViewPages = fmap fst pages}, foldMap snd pages)
+      control -> (control, [])
 
 controlChildren :: Control -> [Control]
 controlChildren (Container spec) = spec.containerChildren
+controlChildren (LayoutContainer spec) = spec.layoutContainerChildren
 controlChildren (TabView spec) = foldMap tabPageControls spec.tabViewPages
 controlChildren _ = []
 
@@ -943,6 +1143,7 @@ controlCatalogKind = \case
   Badge {} -> Just BadgeKind
   InlineNotice {} -> Just InlineNoticeKind
   Container {} -> Just ContainerKind
+  LayoutContainer {} -> Just ContainerKind
 
 -- | Resolve ordered, potentially overlapping presentation layers into
 -- validated, non-overlapping runs. Stale layers and invalid ranges are ignored.
@@ -1229,10 +1430,10 @@ validateControl control =
       CalendarView spec -> validateDate spec.dateControlKey spec.dateControlValue
       TimePicker spec -> validateTime spec.timeControlKey spec.timeControlValue
       ListView spec -> validateCollection spec
-      CollectionView spec -> validateCollection spec
+      CollectionView spec -> validateCollection spec <> validateNonRowCollection "CollectionView" spec
       TreeView spec -> validateCollection spec
       TableView spec -> validateCollection spec
-      ItemRepeater spec -> validateCollection spec
+      ItemRepeater spec -> validateCollection spec <> validateNonRowCollection "ItemRepeater" spec
       NavigationSidebar spec -> validateCollection spec
       TabView spec -> validateTabs spec
       Breadcrumb spec ->
@@ -1247,6 +1448,7 @@ validateControl control =
       ProgressBar spec -> validateProgress spec
       Meter spec -> validateProgress spec
       Container spec -> validateContainer spec
+      LayoutContainer spec -> validateLayoutContainer spec
       _ -> []
 
 validateFrame :: ElementKey -> Rect -> [Text]
@@ -1320,6 +1522,17 @@ validateCollection spec =
        | spec.collectionControlSelectionMode == SingleCollectionSelection
        , length spec.collectionControlSelection > 1
        ]
+    <> [ "A fixed collection row height must be finite and greater than zero: "
+          <> Text.pack (show spec.collectionControlKey)
+       | FixedRows height <- [spec.collectionControlRowSizing]
+       , isNaN height || isInfinite height || height <= 0
+       ]
+
+validateNonRowCollection :: Text -> CollectionControlSpec -> [Text]
+validateNonRowCollection controlName spec =
+  [ controlName <> " does not use row sizing: " <> Text.pack (show spec.collectionControlKey)
+  | spec.collectionControlRowSizing /= PlatformDefaultRows
+  ]
 
 validateTabs :: TabViewSpec -> [Text]
 validateTabs spec =
@@ -1354,6 +1567,21 @@ validateContainer spec =
       ]
     _ -> []
 
+validateLayoutContainer :: LayoutContainerSpec -> [Text]
+validateLayoutContainer spec =
+  fmap diagnosticMessage (validateLayout spec.layoutContainerLayout)
+    <> [ "Layout references a control that is not a direct child: " <> Text.pack (show key)
+       | key <- Set.toList (layoutKeys `Set.difference` childKeys)
+       ]
+    <> [ "Layout child is not referenced by its layout tree: " <> Text.pack (show key)
+       | key <- Set.toList (childKeys `Set.difference` layoutKeys)
+       ]
+  where
+    layoutKeys :: Set ElementKey
+    layoutKeys = Set.fromList (layoutLeafKeys spec.layoutContainerLayout)
+    childKeys :: Set ElementKey
+    childKeys = Set.fromList (fmap controlKey spec.layoutContainerChildren)
+
 data CommandSpec = CommandSpec
   { commandId :: !CommandId
   , commandTitle :: !Text
@@ -1367,6 +1595,65 @@ data AppView = AppView
   , appCommands :: ![CommandSpec]
   }
   deriving stock (Eq, Show)
+
+resolveAppViewLayouts :: AppView -> (AppView, [LayoutDiagnostic ElementKey])
+resolveAppViewLayouts = resolveAppViewLayoutsWith Map.empty
+
+resolveAppViewLayoutsWith
+  :: Map ElementKey IntrinsicMetrics
+  -> AppView
+  -> (AppView, [LayoutDiagnostic ElementKey])
+resolveAppViewLayoutsWith measurements desiredView =
+  let windows = fmap resolveWindow desiredView.appWindows
+   in (desiredView {appWindows = fmap fst windows}, foldMap snd windows)
+  where
+    resolveWindow :: WindowSpec -> (WindowSpec, [LayoutDiagnostic ElementKey])
+    resolveWindow window@WindowSpec {windowControls = controls} =
+      let (resolved, diagnostics) = resolveControlLayouts measurements controls
+       in (window {windowControls = resolved}, diagnostics)
+    resolveWindow window@WorkspaceWindowSpec {windowWorkspaceSpec = workspace} =
+      let (root, rootDiagnostics) = resolvePaneTree workspace.workspaceRoot
+          (status, statusDiagnostics) = resolveControlLayouts measurements workspace.workspaceStatusControls
+       in ( window
+              { windowWorkspaceSpec =
+                  workspace
+                    { workspaceRoot = root
+                    , workspaceStatusControls = status
+                    }
+              }
+          , rootDiagnostics <> statusDiagnostics
+          )
+
+    resolvePaneTree :: PaneTree -> (PaneTree, [LayoutDiagnostic ElementKey])
+    resolvePaneTree (WorkspacePane pane) =
+      let (item, diagnostics) = resolveItem pane.workspacePaneItem
+       in (WorkspacePane pane {workspacePaneItem = item}, diagnostics)
+    resolvePaneTree (WorkspaceSplit key orientation first second rest) =
+      let children = fmap resolvePaneTree (first : second : rest)
+       in case fmap fst children of
+            resolvedFirst : resolvedSecond : resolvedRest ->
+              ( WorkspaceSplit key orientation resolvedFirst resolvedSecond resolvedRest
+              , foldMap snd children
+              )
+            _ -> (WorkspaceSplit key orientation first second rest, [])
+
+    resolveItem :: WorkspaceItemSpec -> (WorkspaceItemSpec, [LayoutDiagnostic ElementKey])
+    resolveItem item =
+      case item.workspaceItemContent of
+        WorkspaceItemControls controls ->
+          let (resolved, diagnostics) = resolveControlLayouts measurements controls
+           in (item {workspaceItemContent = WorkspaceItemControls resolved}, diagnostics)
+        WorkspaceItemTabGroup groupSpec ->
+          let resolveTab tab =
+                let (resolved, diagnostics) = resolveControlLayouts measurements tab.workspaceTabControls
+                 in (tab {workspaceTabControls = resolved}, diagnostics)
+              tabs = fmap resolveTab groupSpec.workspaceTabs
+           in ( item
+                  { workspaceItemContent =
+                      WorkspaceItemTabGroup groupSpec {workspaceTabs = fmap fst tabs}
+                  }
+              , foldMap snd tabs
+              )
 
 data UIEvent
   = CommandInvoked !CommandId

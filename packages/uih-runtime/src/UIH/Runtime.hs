@@ -31,6 +31,7 @@ import UIH.Core
   , Effect (..)
   , UIEvent (..)
   , applyTransaction
+  , resolveAppViewLayouts
   , transactionEffects
   )
 
@@ -52,14 +53,14 @@ runApp backend application = do
   sessionReference <- newIORef Nothing
   session <- openBackend backend (dispatch modelReference sessionReference)
   writeIORef sessionReference (Just session)
-  backendRender session (application.appView application.appInitialModel)
+  backendRender session (fst (resolveAppViewLayouts (application.appView application.appInitialModel)))
   backendRun session `finally` backendShutdown session
   where
     dispatch modelReference sessionReference event = do
       model <- readIORef modelReference
       let update = application.appHandleEvent event model
           updated = applyTransaction update model
-          desired = application.appView updated
+          desired = fst (resolveAppViewLayouts (application.appView updated))
       writeIORef modelReference updated
       maybeSession <- readIORef sessionReference
       case maybeSession of

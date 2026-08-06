@@ -5,10 +5,12 @@
 module Example.ControlGallery
   ( GalleryModel (..)
   , application
+  , collectionApplication
   , galleryCatalogKinds
   , galleryControls
   , galleryWindowKey
   , initialModel
+  , layoutApplication
   , renderGallery
   , rootTabKey
   ) where
@@ -56,12 +58,13 @@ secondaryCommand, destructiveCommand :: CommandId
 secondaryCommand = CommandId 9105
 destructiveCommand = CommandId 9106
 
-contentPage, inputPage, collectionPage, shellPage, containerPage :: ChoiceKey
+contentPage, inputPage, collectionPage, shellPage, containerPage, layoutPage :: ChoiceKey
 contentPage = ChoiceKey 9201
 inputPage = ChoiceKey 9202
 collectionPage = ChoiceKey 9203
 shellPage = ChoiceKey 9204
 containerPage = ChoiceKey 9205
+layoutPage = ChoiceKey 9206
 
 initialModel :: GalleryModel
 initialModel =
@@ -91,6 +94,24 @@ application =
     { appInitialModel = initialModel
     , appView = renderGallery
     , appHandleEvent = handleGalleryEvent
+    }
+
+-- | The same exhaustive gallery with the portable-layout page selected. This
+-- is useful for deterministic visual inspection without automating a tab
+-- click in the native window.
+layoutApplication :: App GalleryModel
+layoutApplication =
+  application
+    { appInitialModel = initialModel {galleryPage = Just layoutPage}
+    }
+
+-- | The exhaustive gallery with the native collection-control page selected.
+-- This makes the otherwise visually similar list, grid, tree, table, repeater,
+-- and navigation peers easy to inspect side by side.
+collectionApplication :: App GalleryModel
+collectionApplication =
+  application
+    { appInitialModel = initialModel {galleryPage = Just collectionPage}
     }
 
 renderGallery :: GalleryModel -> AppView
@@ -135,6 +156,7 @@ galleryTabs model =
           , TabPageSpec collectionPage "Collections & navigation" (collectionControls model)
           , TabPageSpec shellPage "Shell & feedback" (shellControls model)
           , TabPageSpec containerPage "Arbitrary-child containers" (containerControls model)
+          , TabPageSpec layoutPage "Portable layout lab" (layoutControls model)
           ]
       }
 
@@ -207,18 +229,25 @@ inputControls model =
 
 collectionControls :: GalleryModel -> [Control]
 collectionControls model =
-  [ Breadcrumb
+  [ Label (ElementKey 308) (Rect 18 782 260 20) "Breadcrumb"
+  , Breadcrumb
       BreadcrumbSpec
         { breadcrumbKey = ElementKey 300
         , breadcrumbFrame = Rect 18 740 1210 36
         , breadcrumbItems = galleryChoices
         , breadcrumbSelected = model.galleryChoice
         }
+  , Label (ElementKey 309) (Rect 18 716 280 20) "ListView — native list"
   , ListView (collectionSpec 301 (Rect 18 430 280 280) model SingleCollectionSelection)
+  , Label (ElementKey 310) (Rect 316 716 280 20) "CollectionView — native grid"
   , CollectionView (collectionSpec 302 (Rect 316 430 280 280) model MultipleCollectionSelection)
+  , Label (ElementKey 311) (Rect 614 716 280 20) "TreeView — native outline"
   , TreeView (collectionSpec 303 (Rect 614 430 280 280) model SingleCollectionSelection)
+  , Label (ElementKey 312) (Rect 912 716 316 20) "TableView — native data table"
   , TableView (collectionSpec 304 (Rect 912 430 316 280) model MultipleCollectionSelection)
+  , Label (ElementKey 313) (Rect 18 396 390 20) "ItemRepeater — lightweight collection"
   , ItemRepeater (collectionSpec 305 (Rect 18 100 390 290) model NoCollectionSelection)
+  , Label (ElementKey 314) (Rect 428 396 330 20) "NavigationSidebar — native source list"
   , NavigationSidebar (collectionSpec 306 (Rect 428 100 330 290) model SingleCollectionSelection)
   , InlineNotice
       MessageControlSpec
@@ -393,6 +422,367 @@ containerControls model =
         }
   ]
 
+layoutControls :: GalleryModel -> [Control]
+layoutControls model = [layoutLab model]
+
+layoutLab :: GalleryModel -> Control
+layoutLab model =
+  LayoutContainer
+    LayoutContainerSpec
+      { layoutContainerKey = ElementKey 6000
+      , layoutContainerFrame = Rect 18 24 1210 748
+      , layoutContainerPresentation = ScrollLayoutContainer Vertical
+      , layoutContainerEnvironment = defaultLayoutEnvironment
+      , layoutContainerLayout =
+          LayoutCanvas
+            defaultCanvas {canvasContentSize = Just (Size 1170 1220)}
+            [ canvas 16 16 552 150 6010
+            , canvas 584 16 552 150 6020
+            , canvas 16 182 1120 170 6030
+            , canvas 16 368 1120 230 6100
+            , canvas 16 614 552 180 6040
+            , canvas 584 614 552 180 6050
+            , canvas 16 810 1120 150 6060
+            , canvas 16 976 1120 220 6070
+            ]
+      , layoutContainerChildren =
+          [ flowLayoutExample
+          , alignmentLayoutExample
+          , gridLayoutExample model
+          , overlayLayoutExample
+          , wrapLayoutExample
+          , splitLayoutExample
+          , linedTableLayoutExample
+          , adaptiveLayoutExample
+          ]
+      }
+  where
+    canvas x y width height key =
+      CanvasItem x y (Just width) (Just height) 0 (LayoutLeaf (ElementKey key))
+
+flowLayoutExample :: Control
+flowLayoutExample =
+  portableGroup
+    6010
+    "Flow: fixed basis + 1× and 2× growth"
+    ( LayoutBox
+        defaultBoxSpec {boxPadding = uniformInsets 12}
+        ( LayoutFlow
+            defaultRow
+              { flowGap = 8
+              , flowCrossAlignment = CrossCenter
+              }
+            [ FlowItem defaultFlowItem {itemBasis = FixedBasis 130, itemShrink = 0} (LayoutLeaf (ElementKey 6011))
+            , FlowItem defaultFlowItem {itemGrow = 1} (LayoutLeaf (ElementKey 6012))
+            , FlowItem defaultFlowItem {itemGrow = 2} (LayoutLeaf (ElementKey 6013))
+            ]
+        )
+    )
+    [ layoutButton 6011 "Fixed 130"
+    , layoutButton 6012 "Grow 1"
+    , layoutButton 6013 "Grow 2"
+    ]
+
+alignmentLayoutExample :: Control
+alignmentLayoutExample =
+  portableGroup
+    6020
+    "Distribution and cross-axis alignment"
+    ( LayoutBox
+        defaultBoxSpec {boxPadding = uniformInsets 10}
+        ( LayoutFlow
+            defaultColumn {flowGap = 8, flowCrossAlignment = CrossStretch}
+            [ FlowItem defaultFlowItem {itemBasis = FixedBasis 36, itemShrink = 0}
+                ( LayoutFlow
+                    defaultRow {flowMainAlignment = SpaceBetween, flowCrossAlignment = CrossCenter}
+                    (naturalLayoutLeaves [6021, 6022, 6023])
+                )
+            , FlowItem defaultFlowItem {itemBasis = FixedBasis 36, itemShrink = 0}
+                ( LayoutFlow
+                    defaultRow {flowMainAlignment = SpaceEvenly, flowCrossAlignment = CrossStretch}
+                    (naturalLayoutLeaves [6024, 6025, 6026])
+                )
+            ]
+        )
+    )
+    [ layoutButton 6021 "Start"
+    , layoutButton 6022 "Between"
+    , layoutButton 6023 "End"
+    , layoutBadge 6024 "Even 1" "stretch"
+    , layoutBadge 6025 "Even 2" "stretch"
+    , layoutBadge 6026 "Even 3" "stretch"
+    ]
+
+gridLayoutExample :: GalleryModel -> Control
+gridLayoutExample model =
+  portableGroup
+    6030
+    "Grid: fixed, content, minmax/fraction, spans and per-cell alignment"
+    ( LayoutBox
+        defaultBoxSpec {boxPadding = uniformInsets 12}
+        ( LayoutGrid
+            defaultGrid
+              { gridColumns =
+                  [ FixedTrack 170
+                  , MaxContentTrack
+                  , MinMaxTrack (FixedTrack 180) (FractionTrack 1)
+                  ]
+              , gridRows = [AutoTrack, FractionTrack 1]
+              , gridColumnGap = 10
+              , gridRowGap = 10
+              , gridInlineAlignment = BoxStretch
+              , gridBlockAlignment = BoxCenter
+              }
+            [ GridItem 0 0 1 1 Nothing Nothing (LayoutLeaf (ElementKey 6031))
+            , GridItem 1 0 1 1 (Just BoxCenter) Nothing (LayoutLeaf (ElementKey 6032))
+            , GridItem 2 0 1 1 Nothing Nothing (LayoutLeaf (ElementKey 6033))
+            , GridItem 0 1 2 1 Nothing Nothing (LayoutLeaf (ElementKey 6034))
+            , GridItem 2 1 1 1 Nothing (Just BoxStretch) (LayoutLeaf (ElementKey 6035))
+            ]
+        )
+    )
+    [ layoutBadge 6031 "Fixed track" "170 dp"
+    , layoutButton 6032 "Max-content"
+    , layoutBadge 6033 "minmax(180, 1fr)" "takes remaining width"
+    , ProgressBar (progressSpec 6034 (Rect 0 0 320 20) model.galleryNumber 0 10)
+    , CheckBox (toggleSpec 6035 (Rect 0 0 180 32) "Spanning neighbor" model.galleryToggle)
+    ]
+
+overlayLayoutExample :: Control
+overlayLayoutExample =
+  portableGroup
+    6040
+    "Overlay: logical parent anchors"
+    ( LayoutBox
+        defaultBoxSpec {boxPadding = uniformInsets 10}
+        ( LayoutOverlay
+            defaultOverlay {overlayClip = True}
+            [ OverlayItem (Anchor AnchorStretch AnchorStretch) noInsets 0 0 (LayoutLeaf (ElementKey 6041))
+            , OverlayItem (Anchor AnchorStart AnchorStart) (uniformInsets 8) 0 0 (LayoutLeaf (ElementKey 6042))
+            , OverlayItem (Anchor AnchorEnd AnchorStart) (uniformInsets 8) 0 0 (LayoutLeaf (ElementKey 6043))
+            , OverlayItem (Anchor AnchorCenter AnchorCenter) noInsets 0 0 (LayoutLeaf (ElementKey 6044))
+            , OverlayItem (Anchor AnchorEnd AnchorEnd) (uniformInsets 8) 0 0 (LayoutLeaf (ElementKey 6045))
+            ]
+        )
+    )
+    [ layoutBadge 6041 "Stretch base" "Every overlay child may be any native control"
+    , layoutButton 6042 "Top start"
+    , layoutButton 6043 "Top end"
+    , layoutBadge 6044 "Centered" "natural size"
+    , layoutButton 6045 "Bottom end"
+    ]
+
+wrapLayoutExample :: Control
+wrapLayoutExample =
+  portableGroup
+    6050
+    "Wrap: intrinsic items form deterministic lines"
+    ( LayoutBox
+        defaultBoxSpec {boxPadding = uniformInsets 12}
+        ( LayoutWrap
+            defaultWrap
+              { wrapFlow = defaultRow {flowGap = 8, flowCrossAlignment = CrossCenter}
+              , wrapLineGap = 8
+              }
+            (naturalLayoutLeaves [6051 .. 6058])
+        )
+    )
+    [layoutButton key ("Item " <> Text.pack (show (key - 6050))) | key <- [6051 .. 6058]]
+
+splitLayoutExample :: Control
+splitLayoutExample =
+  portableGroup
+    6060
+    "Split allocation: minimum, preferred, maximum and stretch weight"
+    ( LayoutBox
+        defaultBoxSpec {boxPadding = uniformInsets 12}
+        ( LayoutSplit
+            defaultSplit {splitDivider = 8}
+            [ SplitItem 120 180 (Just 260) 0 (LayoutLeaf (ElementKey 6061))
+            , SplitItem 220 320 Nothing 1 (LayoutLeaf (ElementKey 6062))
+            , SplitItem 140 220 (Just 360) 0.6 (LayoutLeaf (ElementKey 6063))
+            ]
+        )
+    )
+    [ layoutBadge 6061 "Sidebar" "min 120 / preferred 180"
+    , layoutBadge 6062 "Editor" "stretch 1"
+    , layoutBadge 6063 "Inspector" "max 360 / stretch 0.6"
+    ]
+
+linedTableLayoutExample :: Control
+linedTableLayoutExample =
+  portableGroup
+    6100
+    "Grid table: explicit header, rows, columns and separator tracks"
+    ( LayoutBox
+        defaultBoxSpec {boxPadding = uniformInsets 12}
+        ( LayoutGrid
+            defaultGrid
+              { gridColumns =
+                  [ FixedTrack 1
+                  , FractionTrack 1.5
+                  , FixedTrack 1
+                  , FractionTrack 1
+                  , FixedTrack 1
+                  , FractionTrack 1
+                  , FixedTrack 1
+                  , FractionTrack 0.7
+                  , FixedTrack 1
+                  ]
+              , gridRows =
+                  [ FixedTrack 1
+                  , FixedTrack 34
+                  , FixedTrack 1
+                  , FixedTrack 32
+                  , FixedTrack 1
+                  , FixedTrack 32
+                  , FixedTrack 1
+                  , FixedTrack 32
+                  , FixedTrack 1
+                  , FixedTrack 32
+                  , FixedTrack 1
+                  ]
+              , gridColumnGap = 0
+              , gridRowGap = 0
+              , gridInlineAlignment = BoxStretch
+              , gridBlockAlignment = BoxStretch
+              }
+            (cellItems <> verticalLines <> horizontalLines)
+        )
+    )
+    (cellControls <> verticalLineControls <> horizontalLineControls)
+  where
+    tableCells =
+      [ (6110, 1, 1, "NAME")
+      , (6111, 3, 1, "TYPE")
+      , (6112, 5, 1, "STATUS")
+      , (6113, 7, 1, "SIZE")
+      , (6114, 1, 3, "Main.hs")
+      , (6115, 3, 3, "Haskell")
+      , (6116, 5, 3, "Modified")
+      , (6117, 7, 3, "12 KB")
+      , (6118, 1, 5, "UIH.Core")
+      , (6119, 3, 5, "Module")
+      , (6120, 5, 5, "Clean")
+      , (6121, 7, 5, "8 KB")
+      , (6122, 1, 7, "README.md")
+      , (6123, 3, 7, "Markdown")
+      , (6124, 5, 7, "Clean")
+      , (6125, 7, 7, "4 KB")
+      , (6126, 1, 9, "package.yaml")
+      , (6127, 3, 9, "YAML")
+      , (6128, 5, 9, "Clean")
+      , (6129, 7, 9, "3 KB")
+      ]
+    verticalSeparators = zip [6140 .. 6144] [0, 2, 4, 6, 8]
+    horizontalSeparators = zip [6150 .. 6155] [0, 2, 4, 6, 8, 10]
+    cellItems =
+      [ GridItem column row 1 1 Nothing Nothing
+          ( LayoutBox
+              defaultBoxSpec
+                { boxPadding = Insets 4 8 4 8
+                , boxInlineAlignment = BoxStart
+                , boxBlockAlignment = BoxCenter
+                }
+              (LayoutLeaf (ElementKey key))
+          )
+      | (key, column, row, _) <- tableCells
+      ]
+    verticalLines =
+      [ GridItem column 0 1 11 Nothing Nothing (LayoutLeaf (ElementKey key))
+      | (key, column) <- verticalSeparators
+      ]
+    horizontalLines =
+      [ GridItem 0 row 9 1 Nothing Nothing (LayoutLeaf (ElementKey key))
+      | (key, row) <- horizontalSeparators
+      ]
+    cellControls =
+      [ Label (ElementKey key) (Rect 0 0 120 22) value
+      | (key, _, _, value) <- tableCells
+      ]
+    verticalLineControls =
+      [ Separator (ElementKey key) (Rect 0 0 1 168)
+      | (key, _) <- verticalSeparators
+      ]
+    horizontalLineControls =
+      [ Separator (ElementKey key) (Rect 0 0 1000 1)
+      | (key, _) <- horizontalSeparators
+      ]
+
+adaptiveLayoutExample :: Control
+adaptiveLayoutExample =
+  portableGroup
+    6070
+    "Adaptive layout: identical retained controls, compact and wide strategies"
+    ( LayoutBox
+        defaultBoxSpec {boxPadding = uniformInsets 12}
+        ( LayoutFlow
+            defaultRow {flowGap = 16, flowCrossAlignment = CrossStretch}
+            [ FlowItem defaultFlowItem {itemBasis = FixedBasis 320, itemShrink = 0} (LayoutLeaf (ElementKey 6071))
+            , FlowItem defaultFlowItem {itemGrow = 1} (LayoutLeaf (ElementKey 6072))
+            ]
+        )
+    )
+    [ adaptiveDemo 6071 6080
+    , adaptiveDemo 6072 6090
+    ]
+
+adaptiveDemo :: Word -> Word -> Control
+adaptiveDemo rootKey firstKey =
+  let keys = [firstKey, firstKey + 1, firstKey + 2]
+      rowLayout =
+        LayoutFlow
+          defaultRow {flowGap = 6, flowCrossAlignment = CrossStretch}
+          [FlowItem defaultFlowItem {itemGrow = 1} (LayoutLeaf (ElementKey (fromIntegral key))) | key <- keys]
+      columnLayout =
+        LayoutFlow
+          defaultColumn {flowGap = 6, flowCrossAlignment = CrossStretch}
+          [FlowItem defaultFlowItem {itemGrow = 1} (LayoutLeaf (ElementKey (fromIntegral key))) | key <- keys]
+   in LayoutContainer
+        LayoutContainerSpec
+          { layoutContainerKey = ElementKey (fromIntegral rootKey)
+          , layoutContainerFrame = Rect 0 0 400 150
+          , layoutContainerPresentation = PlainLayoutContainer
+          , layoutContainerEnvironment = defaultLayoutEnvironment
+          , layoutContainerLayout =
+              LayoutAdaptive
+                [ AdaptiveCase Nothing (Just 399) columnLayout
+                , AdaptiveCase (Just 400) Nothing rowLayout
+                ]
+                rowLayout
+          , layoutContainerChildren =
+              [layoutButton key (if offset == 0 then "Adaptive" else "Pane " <> Text.pack (show offset)) | (key, offset) <- zip keys [0 :: Int ..]]
+          }
+
+portableGroup :: Word -> Text -> Layout ElementKey -> [Control] -> Control
+portableGroup key title layout children =
+  LayoutContainer
+    LayoutContainerSpec
+      { layoutContainerKey = ElementKey (fromIntegral key)
+      , layoutContainerFrame = Rect 0 0 600 150
+      , layoutContainerPresentation = GroupLayoutContainer title
+      , layoutContainerEnvironment = defaultLayoutEnvironment
+      , layoutContainerLayout = layout
+      , layoutContainerChildren = children
+      }
+
+naturalLayoutLeaves :: [Word] -> [FlowItem ElementKey]
+naturalLayoutLeaves = fmap (FlowItem defaultFlowItem . LayoutLeaf . ElementKey . fromIntegral)
+
+layoutButton :: Word -> Text -> Control
+layoutButton key title =
+  Button (ElementKey (fromIntegral key)) (Rect 0 0 104 32) title generalCommand True
+
+layoutBadge :: Word -> Text -> Text -> Control
+layoutBadge key title detail =
+  Badge
+    MessageControlSpec
+      { messageControlKey = ElementKey (fromIntegral key)
+      , messageControlFrame = Rect 0 0 150 46
+      , messageControlTitle = title
+      , messageControlMessage = detail
+      }
+
 galleryCommands :: [CommandSpec]
 galleryCommands =
   [ CommandSpec generalCommand "Run Action" (Just "g") True
@@ -472,7 +862,13 @@ progressSpec key frame value minimumValue maximumValue =
 collectionSpec :: Word -> Rect -> GalleryModel -> CollectionSelectionMode -> CollectionControlSpec
 collectionSpec key frame model mode =
   CollectionControlSpec
-    (ElementKey (fromIntegral key)) frame (galleryCollectionItems model) mode selection True
+    (ElementKey (fromIntegral key))
+    frame
+    (galleryCollectionItems model)
+    mode
+    selection
+    PlatformDefaultRows
+    True
   where
     selection = case mode of
       NoCollectionSelection -> []

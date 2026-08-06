@@ -22,11 +22,13 @@ module UIH.Backend.AppKit.Internal.FFI
   , c_catalogSetNumeric
   , c_catalogSetPresentation
   , c_catalogSetPrimaryText
+  , c_catalogSetRowSizing
   , c_catalogSetSecondaryText
   , c_catalogSetState
   , c_catalogSetTooltip
   , c_controlDestroy
   , c_controlFocus
+  , c_controlMeasure
   , c_controlSetNextKey
   , c_controlSetEnabled
   , c_controlSetFrame
@@ -390,6 +392,9 @@ foreign import ccall unsafe "uih_macos_catalog_control_set_secondary_text"
 foreign import ccall unsafe "uih_macos_catalog_control_set_state"
   c_catalogSetState :: Ptr MacControlHandle -> CInt -> IO ()
 
+foreign import ccall unsafe "uih_macos_catalog_control_set_row_sizing"
+  c_catalogSetRowSizing :: Ptr MacControlHandle -> CInt -> CDouble -> IO ()
+
 foreign import ccall unsafe "uih_macos_catalog_control_set_numeric"
   c_catalogSetNumeric :: Ptr MacControlHandle -> CDouble -> CDouble -> CDouble -> CDouble -> IO ()
 
@@ -434,6 +439,9 @@ foreign import ccall unsafe "uih_macos_text_editor_end_presentation"
 
 foreign import ccall unsafe "uih_macos_control_set_frame"
   c_controlSetFrame :: Ptr MacControlHandle -> Ptr CMacRect -> IO ()
+
+foreign import ccall unsafe "uih_macos_control_measure"
+  c_controlMeasure :: Ptr MacControlHandle -> CDouble -> CDouble -> Ptr CMacRect -> IO ()
 
 foreign import ccall unsafe "uih_macos_control_set_enabled"
   c_controlSetEnabled :: Ptr MacControlHandle -> CInt -> IO ()

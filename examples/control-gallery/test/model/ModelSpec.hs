@@ -19,6 +19,20 @@ main = do
   assert "all control identities are unique" (length keys == length (nub keys))
   assert "the complete gallery validates" (validateControlCatalog controls == [])
   assert "legacy controls remain represented" (legacyKinds flattened == [True, True, True, True])
+  assert "the semantic native-table fixture is declared" (any isNativeTableFixture flattened)
+  assert "row-based gallery controls defer to the platform row-size preference"
+    (all usesPlatformRows (filter isRowCollection flattened))
+  case filter isNativeTableFixture flattened of
+    TableView table : _ -> do
+      assert "an explicit fixed row height is accepted"
+        (validateControlCatalog [TableView table {collectionControlRowSizing = FixedRows 31}] == [])
+      assert "an invalid fixed row height is rejected"
+        (not (null (validateControlCatalog [TableView table {collectionControlRowSizing = FixedRows 0}])))
+    _ -> error "native table fixture disappeared"
+  assert "both semantic and portable-layout containers are declared"
+    (any isContainer flattened && any isLayoutContainer flattened)
+  assert "every semantic container strategy is declared"
+    (containerKinds flattened == [True, True, True, True, True, True, True])
 
   let textModel = update (TextChanged (ElementKey 205) "native edit") initialModel
       toggleModel = update (ToggleChanged (ElementKey 108) ToggleOff) initialModel
@@ -68,6 +82,58 @@ legacyKinds controls =
     isTextField _ = False
     isTextEditor TextEditor {} = True
     isTextEditor _ = False
+
+isNativeTableFixture :: Control -> Bool
+isNativeTableFixture (TableView spec) = spec.collectionControlKey == ElementKey 304
+isNativeTableFixture _ = False
+
+isRowCollection :: Control -> Bool
+isRowCollection ListView {} = True
+isRowCollection TreeView {} = True
+isRowCollection TableView {} = True
+isRowCollection NavigationSidebar {} = True
+isRowCollection _ = False
+
+usesPlatformRows :: Control -> Bool
+usesPlatformRows (ListView spec) = spec.collectionControlRowSizing == PlatformDefaultRows
+usesPlatformRows (TreeView spec) = spec.collectionControlRowSizing == PlatformDefaultRows
+usesPlatformRows (TableView spec) = spec.collectionControlRowSizing == PlatformDefaultRows
+usesPlatformRows (NavigationSidebar spec) = spec.collectionControlRowSizing == PlatformDefaultRows
+usesPlatformRows _ = False
+
+isContainer :: Control -> Bool
+isContainer Container {} = True
+isContainer _ = False
+
+isLayoutContainer :: Control -> Bool
+isLayoutContainer LayoutContainer {} = True
+isLayoutContainer _ = False
+
+containerKinds :: [Control] -> [Bool]
+containerKinds controls =
+  [ any isStack controls
+  , any isGrid controls
+  , any isOverlay controls
+  , any isCanvas controls
+  , any isGroup controls
+  , any isScroll controls
+  , any isDisclosure controls
+  ]
+  where
+    isStack (Container spec) = case spec.containerKind of StackContainer {} -> True; _ -> False
+    isStack _ = False
+    isGrid (Container spec) = case spec.containerKind of GridContainer {} -> True; _ -> False
+    isGrid _ = False
+    isOverlay (Container spec) = spec.containerKind == OverlayContainer
+    isOverlay _ = False
+    isCanvas (Container spec) = spec.containerKind == CanvasContainer
+    isCanvas _ = False
+    isGroup (Container spec) = case spec.containerKind of GroupContainer {} -> True; _ -> False
+    isGroup _ = False
+    isScroll (Container spec) = spec.containerKind == ScrollContainer
+    isScroll _ = False
+    isDisclosure (Container spec) = case spec.containerKind of DisclosureContainer {} -> True; _ -> False
+    isDisclosure _ = False
 
 assert :: String -> Bool -> IO ()
 assert label condition =

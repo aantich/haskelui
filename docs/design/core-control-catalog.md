@@ -138,6 +138,36 @@ mode, typed authoritative or retained selection, and independently retained
 item content. Virtualization is backend-owned and must not change observable
 identity, selection, focus restoration, accessibility, or disposal semantics.
 
+Row-based collections also declare a typed density policy:
+
+```haskell
+data CollectionRowSizing
+  = PlatformDefaultRows
+  | CompactRows
+  | StandardRows
+  | SpaciousRows
+  | FixedRows Double
+  | ContentSizedRows
+```
+
+`PlatformDefaultRows` is the default. It deliberately contains no UIH point
+height. On AppKit it maps to `NSTableViewRowSizeStyleDefault`, so the effective
+small, medium, or large density follows the preference selected by the user in
+System Settings. `CompactRows`, `StandardRows`, and `SpaciousRows` are semantic
+density requests and therefore map to platform styles rather than shared
+numbers. `FixedRows` is the only exact logical-height request and invalid,
+non-finite, or nonpositive heights fail Core validation. `ContentSizedRows`
+uses native automatic row measurement. Grid/card collections and item
+repeaters have a different item-layout contract and reject nondefault row
+sizing rather than silently interpreting a row height as a card size.
+
+Native cell content is vertically centered for fixed and system rows. AppKit
+cell insets use system-spacing constraints; the backend does not embed a
+private padding constant. Content-sized rows constrain their label using
+system spacing and let Auto Layout calculate the result. Platform-default
+intercell spacing is also preserved unless a future explicit portable policy
+overrides it.
+
 Selection, activation, expansion, editing, reordering, drag/drop, and contextual
 command invocation are distinct events. In particular, keyboard focus does not
 implicitly mutate authoritative selection unless the control's declared
@@ -268,10 +298,12 @@ concrete Core IR:
 - Static `RichText` stores its span attributes in `NSTextStorage`; editable
   presentation layers remain temporary layout attributes. Weight, slant,
   point size, and color are therefore visible and queryable on the native peer.
-- `examples/control-gallery` declares 89 controls in one window: all 50
-  `CatalogControlKind` values, all four legacy control constructors, the five
-  ordinary-tab categories, and every container form. All controls share a pure
-  Haskell model and visible event feedback.
+- `examples/control-gallery` declares 174 controls in one window: all 50
+  `CatalogControlKind` values, all four legacy control constructors, six
+  ordinary-tab categories, every container form, and a native visual fixture
+  for box, flow, wrap, grid, a multirow lined grid table, overlay, canvas,
+  split, and adaptive layout. All controls share a pure Haskell model and
+  visible event feedback.
 - The gallery model/headless test verifies coverage, unique identities, pure
   validation, state transitions, and complete semantic-tree retention. Its
   AppKit test creates every control and exercises text, Boolean, keyed choice,
@@ -297,6 +329,12 @@ than replacing the catalog.
   <https://developer.apple.com/documentation/appkit/collection-view>
   <https://developer.apple.com/documentation/appkit/table-view>
   <https://developer.apple.com/documentation/appkit/outline-view>
+- AppKit table row sizing and automatic heights:
+  <https://developer.apple.com/documentation/appkit/nstableview/rowsizestyle-swift.enum>
+  <https://developer.apple.com/documentation/appkit/nstableview/effectiverowsizestyle>
+  <https://developer.apple.com/documentation/appkit/nstableview/usesautomaticrowheights>
+- Apple lists and tables guidance:
+  <https://developer.apple.com/design/human-interface-guidelines/lists-and-tables>
 - AppKit containers and scrolling:
   <https://developer.apple.com/documentation/appkit/grid-view>
   <https://developer.apple.com/documentation/appkit/scroll-view>

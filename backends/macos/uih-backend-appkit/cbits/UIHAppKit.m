@@ -2,6 +2,7 @@
 #import "compat/UIHAppKitCompatibility.h"
 
 #import <dispatch/dispatch.h>
+#import <math.h>
 
 _Static_assert(sizeof(UIHMacTextStyle) == 120, "UIHMacTextStyle ABI must match its Haskell Storable instance");
 
@@ -40,6 +41,7 @@ static int32_t UIHLiveWindowDelegates = 0;
 static int32_t UIHQueuedCallbacks = 0;
 static int32_t UIHTestFailures = 0;
 static NSString *UIHLastTestFailure = nil;
+static BOOL UIHControlGalleryTestActive = NO;
 
 static NSColor *UIHColor(double red, double green, double blue, double alpha);
 
@@ -74,6 +76,16 @@ static void UIHEmit(int32_t kind, uint64_t identity, NSString *text) {
     UIHQueuedCallbacks -= 1;
   });
 }
+
+@interface UIHContainerHostView : NSView
+@property(nonatomic, assign) BOOL usesTopLeftCoordinates;
+@end
+
+@implementation UIHContainerHostView
+- (BOOL)isFlipped {
+  return self.usesTopLeftCoordinates;
+}
+@end
 
 @interface UIHMacActionTarget : NSObject <NSTextFieldDelegate, NSTextViewDelegate>
 @property(nonatomic, assign) uint64_t identity;
@@ -138,6 +150,44 @@ static void UIHEmit(int32_t kind, uint64_t identity, NSString *text) {
 }
 @end
 
+@interface UIHCenteredTableCellView : NSTableCellView
+@property(nonatomic, strong) NSTextField *centeredLabel;
+- (instancetype)initWithText:(NSString *)text contentSized:(BOOL)contentSized;
+@end
+
+@implementation UIHCenteredTableCellView
+- (instancetype)initWithText:(NSString *)text contentSized:(BOOL)contentSized {
+  self = [super initWithFrame:NSZeroRect];
+  if (self != nil) {
+    NSTextField *label = [NSTextField labelWithString:text ?: @""];
+    label.translatesAutoresizingMaskIntoConstraints = NO;
+    label.lineBreakMode = NSLineBreakByTruncatingTail;
+    [self addSubview:label];
+    NSMutableArray<NSLayoutConstraint *> *constraints = [NSMutableArray arrayWithArray:@[
+      [label.leadingAnchor constraintEqualToSystemSpacingAfterAnchor:self.leadingAnchor
+                                                          multiplier:1],
+      [self.trailingAnchor constraintGreaterThanOrEqualToSystemSpacingAfterAnchor:label.trailingAnchor
+                                                                        multiplier:1]
+    ]];
+    if (contentSized) {
+      [constraints addObjectsFromArray:@[
+        [label.topAnchor constraintEqualToSystemSpacingBelowAnchor:self.topAnchor
+                                                        multiplier:0.5],
+        [self.bottomAnchor constraintEqualToSystemSpacingBelowAnchor:label.bottomAnchor
+                                                          multiplier:0.5]
+      ]];
+    } else {
+      [constraints addObject:
+          [label.centerYAnchor constraintEqualToAnchor:self.centerYAnchor]];
+    }
+    [NSLayoutConstraint activateConstraints:constraints];
+    self.textField = label;
+    self.centeredLabel = label;
+  }
+  return self;
+}
+@end
+
 @interface UIHMacCollectionAdapter : NSObject <NSTableViewDataSource, NSTableViewDelegate>
 @property(nonatomic, assign) uint64_t identity;
 @property(nonatomic, strong) NSMutableArray<NSDictionary *> *items;
@@ -145,6 +195,7 @@ static void UIHEmit(int32_t kind, uint64_t identity, NSString *text) {
 @property(nonatomic, assign) BOOL suppressSelectionEvent;
 @property(nonatomic, assign) BOOL showsDepth;
 @property(nonatomic, assign) BOOL navigationStyle;
+@property(nonatomic, assign) BOOL contentSizedRows;
 @end
 
 @implementation UIHMacCollectionAdapter
@@ -168,12 +219,13 @@ static void UIHEmit(int32_t kind, uint64_t identity, NSString *text) {
                                startingAtIndex:0] stringByAppendingString:value];
     }
   }
-  NSTextField *field = [NSTextField labelWithString:value ?: @""];
-  field.lineBreakMode = NSLineBreakByTruncatingTail;
-  field.textColor = [item[@"enabled"] boolValue]
+  UIHCenteredTableCellView *cell =
+      [[UIHCenteredTableCellView alloc] initWithText:value ?: @""
+                                        contentSized:self.contentSizedRows];
+  cell.centeredLabel.textColor = [item[@"enabled"] boolValue]
       ? NSColor.labelColor
       : NSColor.disabledControlTextColor;
-  return field;
+  return cell;
 }
 
 - (BOOL)tableView:(NSTableView *)tableView isGroupRow:(NSInteger)row {
@@ -213,27 +265,52 @@ static void UIHEmit(int32_t kind, uint64_t identity, NSString *text) {
 @end
 
 @implementation UIHMacGridItem
+- (void)layoutTextLabels {
+  NSRect bounds = self.card.contentView.bounds;
+  CGFloat inset = 10;
+  CGFloat titleHeight = 18;
+  CGFloat detailHeight = 16;
+  CGFloat gap = NSHeight(bounds) >= 52 ? 4 : 1;
+  CGFloat stackHeight = titleHeight + gap + detailHeight;
+  CGFloat stackY = MAX(0, floor((NSHeight(bounds) - stackHeight) / 2));
+  CGFloat width = MAX(0, NSWidth(bounds) - inset * 2);
+  if (self.card.contentView.isFlipped) {
+    self.titleLabel.frame = NSMakeRect(inset, stackY, width, titleHeight);
+    self.detailLabel.frame = NSMakeRect(
+        inset, stackY + titleHeight + gap, width, detailHeight);
+  } else {
+    self.detailLabel.frame = NSMakeRect(inset, stackY, width, detailHeight);
+    self.titleLabel.frame = NSMakeRect(
+        inset, stackY + detailHeight + gap, width, titleHeight);
+  }
+}
+
 - (void)loadView {
   NSBox *card = [[NSBox alloc] initWithFrame:NSMakeRect(0, 0, 150, 66)];
   card.boxType = NSBoxCustom;
+  card.titlePosition = NSNoTitle;
   card.borderWidth = 1;
   card.cornerRadius = 7;
   card.fillColor = NSColor.controlBackgroundColor;
   NSTextField *title = [NSTextField labelWithString:@""];
   title.font = [NSFont systemFontOfSize:13 weight:NSFontWeightMedium];
-  title.frame = NSMakeRect(10, 34, 130, 20);
-  title.autoresizingMask = NSViewWidthSizable | NSViewMinYMargin;
+  title.lineBreakMode = NSLineBreakByTruncatingTail;
   NSTextField *detail = [NSTextField labelWithString:@""];
   detail.textColor = NSColor.secondaryLabelColor;
   detail.font = [NSFont systemFontOfSize:11];
-  detail.frame = NSMakeRect(10, 10, 130, 18);
-  detail.autoresizingMask = NSViewWidthSizable | NSViewMaxYMargin;
+  detail.lineBreakMode = NSLineBreakByTruncatingTail;
   [card.contentView addSubview:title];
   [card.contentView addSubview:detail];
   self.card = card;
   self.titleLabel = title;
   self.detailLabel = detail;
   self.view = card;
+  [self layoutTextLabels];
+}
+
+- (void)viewDidLayout {
+  [super viewDidLayout];
+  [self layoutTextLabels];
 }
 
 - (void)setSelected:(BOOL)selected {
@@ -337,6 +414,7 @@ static void UIHEmit(int32_t kind, uint64_t identity, NSString *text) {
 @property(nonatomic, strong) NSMutableArray<UIHMacOutlineNode *> *roots;
 @property(nonatomic, weak) NSOutlineView *outline;
 @property(nonatomic, assign) BOOL suppressEvents;
+@property(nonatomic, assign) BOOL contentSizedRows;
 - (void)reload;
 @end
 
@@ -363,9 +441,9 @@ static void UIHEmit(int32_t kind, uint64_t identity, NSString *text) {
   (void)outlineView;
   (void)tableColumn;
   UIHMacOutlineNode *node = item;
-  NSTextField *field = [NSTextField labelWithString:node.value[@"label"] ?: @""];
-  field.lineBreakMode = NSLineBreakByTruncatingTail;
-  return field;
+  return [[UIHCenteredTableCellView alloc]
+      initWithText:node.value[@"label"] ?: @""
+      contentSized:self.contentSizedRows];
 }
 
 - (BOOL)outlineView:(NSOutlineView *)outlineView shouldSelectItem:(id)item {
@@ -679,6 +757,7 @@ void uih_macos_shutdown(void) {
   UIHState.callbackContext = NULL;
   NSApplication.sharedApplication.mainMenu = nil;
   UIHState = nil;
+  UIHControlGalleryTestActive = NO;
 }
 
 int32_t uih_macos_version_major(void) {
@@ -1317,7 +1396,9 @@ static NSScrollView *UIHCollectionView(
   NSTableView *table = [[NSTableView alloc] initWithFrame:scroll.bounds];
   table.usesAlternatingRowBackgroundColors = YES;
   table.allowsEmptySelection = YES;
-  table.headerView = tableColumns ? [[NSTableHeaderView alloc] initWithFrame:NSZeroRect] : nil;
+  if (!tableColumns) {
+    table.headerView = nil;
+  }
   NSTableColumn *label = [[NSTableColumn alloc] initWithIdentifier:@"label"];
   label.title = tableColumns ? @"Item" : @"";
   label.width = tableColumns ? frame->width * 0.55 : frame->width;
@@ -1658,12 +1739,10 @@ UIHMacControlRef uih_macos_catalog_control_create(
       if (catalogKind == UIHMacCatalogNavigationSidebar) {
         table.style = NSTableViewStyleSourceList;
         table.usesAlternatingRowBackgroundColors = NO;
-        table.rowHeight = 26;
         collectionAdapter.showsDepth = YES;
         collectionAdapter.navigationStyle = YES;
       } else if (catalogKind == UIHMacCatalogListView) {
         table.usesAlternatingRowBackgroundColors = NO;
-        table.rowHeight = 24;
       }
       focusView = table;
       break;
@@ -1780,7 +1859,7 @@ UIHMacControlRef uih_macos_catalog_control_create(
       disclosureLabel.identifier = @"disclosureLabel";
       disclosureLabel.font = [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold];
       disclosureLabel.hidden = YES;
-      NSView *content = [[NSView alloc] initWithFrame:box.contentView.bounds];
+      UIHContainerHostView *content = [[UIHContainerHostView alloc] initWithFrame:box.contentView.bounds];
       content.identifier = @"content";
       content.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
       [box.contentView addSubview:content];
@@ -1919,13 +1998,44 @@ UIHMacControlRef uih_macos_catalog_control_create(
   return reference;
 }
 
-static NSView *UIHSubview(UIHMacControlHandle *handle, NSString *identifier) {
-  for (NSView *subview in handle.view.subviews) {
+static NSView *UIHDescendant(NSView *root, NSString *identifier) {
+  for (NSView *subview in root.subviews) {
     if ([subview.identifier isEqualToString:identifier]) {
       return subview;
     }
+    NSView *nested = UIHDescendant(subview, identifier);
+    if (nested != nil) {
+      return nested;
+    }
   }
   return nil;
+}
+
+static NSView *UIHSubview(UIHMacControlHandle *handle, NSString *identifier) {
+  return UIHDescendant(handle.view, identifier);
+}
+
+static void UIHLayoutMessage(UIHMacControlHandle *handle) {
+  if (handle.kind != UIHMacControlKindCatalog ||
+      (handle.catalogKind != UIHMacCatalogTooltip &&
+       handle.catalogKind != UIHMacCatalogBadge &&
+       handle.catalogKind != UIHMacCatalogInlineNotice) ||
+      ![handle.view isKindOfClass:NSBox.class]) {
+    return;
+  }
+  NSBox *box = (NSBox *)handle.view;
+  [box layoutSubtreeIfNeeded];
+  NSRect bounds = box.contentView.bounds;
+  NSTextField *title = (NSTextField *)UIHSubview(handle, @"messageTitle");
+  NSTextField *detail = (NSTextField *)UIHSubview(handle, @"messageDetail");
+  if (handle.catalogKind == UIHMacCatalogBadge) {
+    title.frame = NSInsetRect(bounds, 8, 5);
+  } else {
+    CGFloat height = NSHeight(bounds);
+    CGFloat width = MAX(0, NSWidth(bounds) - 24);
+    title.frame = NSMakeRect(12, MAX(6, height - 26), width, 18);
+    detail.frame = NSMakeRect(12, 6, width, MAX(0, height - 34));
+  }
 }
 
 static void UIHMoveSubviews(NSView *source, NSView *destination) {
@@ -1958,24 +2068,25 @@ static void UIHLayoutContainer(UIHMacControlHandle *handle) {
   NSInteger state = handle.containerState;
   NSRect bounds = ((NSBox *)handle.view).contentView.bounds;
 
-  if (state == 3000) {
+  if (state == 3000 || state == 6300) {
     CGFloat headerY = MAX(0, NSHeight(bounds) - 28);
     handle.disclosureLabel.frame = NSMakeRect(12, headerY + 2,
         MAX(0, NSWidth(bounds) - 24), 22);
     bounds.size.height = MAX(0, NSHeight(bounds) - 30);
     host.hidden = NO;
-  } else if (state >= 5000 && state < 5100) {
+  } else if ((state >= 5000 && state < 5100) ||
+             (state >= 6500 && state < 6600)) {
     CGFloat headerY = MAX(0, NSHeight(bounds) - 28);
     handle.disclosureButton.frame = NSMakeRect(0, headerY, 22, 24);
     handle.disclosureLabel.frame = NSMakeRect(26, headerY + 2,
         MAX(0, NSWidth(bounds) - 26), 22);
     bounds.size.height = MAX(0, NSHeight(bounds) - 30);
-    host.hidden = state == 5000;
+    host.hidden = state == 5000 || state == 6500;
   } else {
     host.hidden = NO;
   }
 
-  if (state == 4000) {
+  if (state == 4000 || state == 6100) {
     CGFloat maximumY = NSHeight(bounds);
     CGFloat maximumX = NSWidth(bounds);
     for (NSView *child in children) {
@@ -1983,7 +2094,7 @@ static void UIHLayoutContainer(UIHMacControlHandle *handle) {
       maximumX = MAX(maximumX, NSMaxX(child.frame));
     }
     host.frame = NSMakeRect(0, 0, maximumX, maximumY);
-    if (!handle.containerScrollInitialized && handle.containerScrollView != nil &&
+    if (state == 4000 && !handle.containerScrollInitialized && handle.containerScrollView != nil &&
         maximumY > NSHeight(handle.containerScrollView.contentView.bounds) + 0.5) {
       NSClipView *clip = handle.containerScrollView.contentView;
       [clip scrollToPoint:NSMakePoint(0, MAX(0, maximumY - NSHeight(clip.bounds)))];
@@ -2045,14 +2156,17 @@ static void UIHLayoutContainer(UIHMacControlHandle *handle) {
 
 static void UIHConfigureContainer(UIHMacControlHandle *handle, int32_t state) {
   NSBox *box = (NSBox *)handle.view;
-  BOOL wantsScroll = state == 4000;
+  BOOL portable = state >= 6000;
+  BOOL wantsScroll = state == 4000 || state == 6100;
   if (wantsScroll && handle.containerScrollView == nil) {
     NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:handle.normalContentView.frame];
     scroll.hasVerticalScroller = YES;
     scroll.hasHorizontalScroller = YES;
     scroll.autohidesScrollers = YES;
     scroll.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
-    NSView *document = [[NSView alloc] initWithFrame:handle.normalContentView.bounds];
+    UIHContainerHostView *document =
+        [[UIHContainerHostView alloc] initWithFrame:handle.normalContentView.bounds];
+    document.usesTopLeftCoordinates = portable;
     scroll.documentView = document;
     [box.contentView addSubview:scroll positioned:NSWindowBelow relativeTo:handle.disclosureButton];
     UIHMoveSubviews(handle.normalContentView, document);
@@ -2072,11 +2186,19 @@ static void UIHConfigureContainer(UIHMacControlHandle *handle, int32_t state) {
   }
 
   handle.containerState = state;
-  BOOL disclosure = state >= 5000 && state < 5100;
-  BOOL group = state == 3000;
+  if ([handle.normalContentView isKindOfClass:UIHContainerHostView.class]) {
+    ((UIHContainerHostView *)handle.normalContentView).usesTopLeftCoordinates = portable;
+  }
+  if ([handle.contentView isKindOfClass:UIHContainerHostView.class]) {
+    ((UIHContainerHostView *)handle.contentView).usesTopLeftCoordinates = portable;
+  }
+  BOOL disclosure = (state >= 5000 && state < 5100) ||
+      (state >= 6500 && state < 6600);
+  BOOL group = state == 3000 || state == 6300;
   handle.disclosureButton.hidden = !disclosure;
   handle.disclosureLabel.hidden = !(disclosure || group);
-  handle.disclosureButton.state = state == 5001 ? NSControlStateValueOn : NSControlStateValueOff;
+  handle.disclosureButton.state =
+      (state == 5001 || state == 6501) ? NSControlStateValueOn : NSControlStateValueOff;
   box.transparent = !group;
   if (disclosure) {
     box.title = @"";
@@ -2163,13 +2285,9 @@ void uih_macos_catalog_control_set_primary_text(
     case UIHMacCatalogTooltip:
     case UIHMacCatalogBadge:
     case UIHMacCatalogInlineNotice: {
-      NSTextField *label = nil;
-      for (NSView *candidate in handle.contentView.subviews) {
-        if ([candidate.identifier isEqualToString:@"messageTitle"]) {
-          label = (NSTextField *)candidate;
-        }
-      }
+      NSTextField *label = (NSTextField *)UIHSubview(handle, @"messageTitle");
       label.stringValue = text;
+      UIHLayoutMessage(handle);
       break;
     }
     case UIHMacCatalogDialog:
@@ -2219,11 +2337,8 @@ void uih_macos_catalog_control_set_secondary_text(
              handle.catalogKind == UIHMacCatalogBadge ||
              handle.catalogKind == UIHMacCatalogInlineNotice) {
     handle.view.toolTip = text;
-    for (NSView *candidate in handle.contentView.subviews) {
-      if ([candidate.identifier isEqualToString:@"messageDetail"]) {
-        ((NSTextField *)candidate).stringValue = text;
-      }
-    }
+    ((NSTextField *)UIHSubview(handle, @"messageDetail")).stringValue = text;
+    UIHLayoutMessage(handle);
   } else if (handle.catalogKind == UIHMacCatalogImage ||
              handle.catalogKind == UIHMacCatalogIcon) {
     handle.focusView.accessibilityLabel = text;
@@ -2259,6 +2374,61 @@ void uih_macos_catalog_control_set_state(
     handle.collectionSelectionMode = MAX(0, MIN(2, state));
   } else if (handle.catalogKind == UIHMacCatalogContainer) {
     UIHConfigureContainer(handle, state);
+  }
+}
+
+void uih_macos_catalog_control_set_row_sizing(
+    UIHMacControlRef reference,
+    int32_t sizing,
+    double fixedHeight) {
+  UIHAssertMainThread();
+  UIHMacControlHandle *handle = UIHControl(reference);
+  NSTableView *table = handle.collectionAdapter != nil
+      ? handle.collectionAdapter.table
+      : handle.outlineAdapter.outline;
+  if (table == nil) {
+    return;
+  }
+
+  table.usesAutomaticRowHeights = NO;
+  if (handle.collectionAdapter != nil) {
+    handle.collectionAdapter.contentSizedRows = NO;
+  }
+  if (handle.outlineAdapter != nil) {
+    handle.outlineAdapter.contentSizedRows = NO;
+  }
+
+  switch (sizing) {
+    case 1:
+      table.rowSizeStyle = NSTableViewRowSizeStyleSmall;
+      break;
+    case 2:
+      table.rowSizeStyle = NSTableViewRowSizeStyleMedium;
+      break;
+    case 3:
+      table.rowSizeStyle = NSTableViewRowSizeStyleLarge;
+      break;
+    case 4:
+      if (isfinite(fixedHeight) && fixedHeight > 0) {
+        table.rowSizeStyle = NSTableViewRowSizeStyleCustom;
+        table.rowHeight = fixedHeight;
+      } else {
+        table.rowSizeStyle = NSTableViewRowSizeStyleDefault;
+      }
+      break;
+    case 5:
+      table.rowSizeStyle = NSTableViewRowSizeStyleCustom;
+      table.usesAutomaticRowHeights = YES;
+      if (handle.collectionAdapter != nil) {
+        handle.collectionAdapter.contentSizedRows = YES;
+      }
+      if (handle.outlineAdapter != nil) {
+        handle.outlineAdapter.contentSizedRows = YES;
+      }
+      break;
+    default:
+      table.rowSizeStyle = NSTableViewRowSizeStyleDefault;
+      break;
   }
 }
 
@@ -2654,7 +2824,9 @@ void uih_macos_catalog_control_set_presentation(
     controller.view = content;
     NSPopover *popover = [[NSPopover alloc] init];
     popover.contentViewController = controller;
-    popover.behavior = NSPopoverBehaviorTransient;
+    popover.behavior = UIHControlGalleryTestActive
+        ? NSPopoverBehaviorApplicationDefined
+        : NSPopoverBehaviorTransient;
     popover.delegate = handle;
     [popover showRelativeToRect:anchor.view.bounds ofView:anchor.view preferredEdge:NSRectEdgeMaxY];
     handle.popover = popover;
@@ -2965,11 +3137,83 @@ void uih_macos_text_editor_end_presentation(UIHMacControlRef reference) {
   }
 }
 
+void uih_macos_control_measure(
+    UIHMacControlRef reference,
+    double maximumWidth,
+    double maximumHeight,
+    UIHMacRect *result) {
+  UIHAssertMainThread();
+  UIHMacControlHandle *handle = UIHControl(reference);
+  NSView *view = handle.view;
+  NSSize measured = view.fittingSize;
+
+  if (handle.kind == UIHMacControlKindCatalog &&
+      (handle.catalogKind == UIHMacCatalogTooltip ||
+       handle.catalogKind == UIHMacCatalogBadge ||
+       handle.catalogKind == UIHMacCatalogInlineNotice)) {
+    NSTextField *title = (NSTextField *)UIHSubview(handle, @"messageTitle");
+    NSTextField *detail = (NSTextField *)UIHSubview(handle, @"messageDetail");
+    NSSize titleSize = [title.stringValue sizeWithAttributes:@{
+      NSFontAttributeName: title.font
+    }];
+    NSSize detailSize = [detail.stringValue sizeWithAttributes:@{
+      NSFontAttributeName: detail.font
+    }];
+    CGFloat titleWidth =
+        ceil(MAX(titleSize.width, title.cell.cellSize.width)) + 2;
+    CGFloat detailWidth =
+        ceil(MAX(detailSize.width, detail.cell.cellSize.width)) + 2;
+    NSBox *box = (NSBox *)handle.view;
+    CGFloat horizontalChrome =
+        MAX(0, NSWidth(box.bounds) - NSWidth(box.contentView.bounds));
+    CGFloat verticalChrome =
+        MAX(0, NSHeight(box.bounds) - NSHeight(box.contentView.bounds));
+    if (handle.catalogKind == UIHMacCatalogBadge) {
+      measured.width = MAX(measured.width,
+          titleWidth + 16 + horizontalChrome);
+      measured.height = MAX(measured.height,
+          ceil(titleSize.height) + 10 + verticalChrome);
+    } else {
+      measured.width = MAX(measured.width,
+          MAX(titleWidth, detailWidth) + 24 + horizontalChrome);
+      measured.height = MAX(measured.height,
+          ceil(titleSize.height + detailSize.height) + 18 + verticalChrome);
+    }
+  }
+
+  if (UIHIsTextEditorHandle(handle) && maximumWidth > 0 && isfinite(maximumWidth)) {
+    NSTextView *editor = (NSTextView *)handle.focusView;
+    editor.textContainer.containerSize = NSMakeSize(maximumWidth, CGFLOAT_MAX);
+    [editor.layoutManager ensureLayoutForTextContainer:editor.textContainer];
+    NSRect used = [editor.layoutManager usedRectForTextContainer:editor.textContainer];
+    measured.width = maximumWidth;
+    measured.height = MAX(editor.font.pointSize + 8, NSHeight(used) + 8);
+  }
+
+  if (!(measured.width > 0) || !isfinite(measured.width)) {
+    measured.width = MAX(0, handle.desiredFrame.size.width);
+  }
+  if (!(measured.height > 0) || !isfinite(measured.height)) {
+    measured.height = MAX(0, handle.desiredFrame.size.height);
+  }
+  if (maximumWidth > 0 && isfinite(maximumWidth)) {
+    measured.width = MIN(measured.width, maximumWidth);
+  }
+  if (maximumHeight > 0 && isfinite(maximumHeight)) {
+    measured.height = MIN(measured.height, maximumHeight);
+  }
+  result->x = 0;
+  result->y = 0;
+  result->width = measured.width;
+  result->height = measured.height;
+}
+
 void uih_macos_control_set_frame(UIHMacControlRef reference, const UIHMacRect *frame) {
   UIHAssertMainThread();
   UIHMacControlHandle *handle = UIHControl(reference);
   handle.desiredFrame = UIHRect(frame);
   handle.view.frame = handle.desiredFrame;
+  UIHLayoutMessage(handle);
   UIHLayoutContainer(handle);
 }
 
@@ -3392,6 +3636,7 @@ void uih_macos_test_schedule_control_gallery_script(
     uint64_t containerIdentity,
     uint64_t nestedChildIdentity) {
   UIHAssertMainThread();
+  UIHControlGalleryTestActive = YES;
 
   UIHTestAfter(0.12, ^{
     UIHMacWindowHandle *window = UIHState.windows[@(windowIdentity)];
@@ -3403,15 +3648,15 @@ void uih_macos_test_schedule_control_gallery_script(
       [NSApplication.sharedApplication stop:nil];
       return;
     }
-    if (UIHState.controls.count < 89) {
+    if (UIHState.controls.count < 174) {
       UIHTestFail([NSString stringWithFormat:
-          @"control gallery registered only %lu of 89 controls",
+          @"control gallery registered only %lu of 174 controls",
           (unsigned long)UIHState.controls.count]);
     }
 
     BOOL seenCatalog[UIHMacCatalogContainer + 1] = {NO};
     BOOL seenLegacy[4] = {NO};
-    UIHMacControlHandle *richText = nil;
+    UIHMacControlHandle *richText = UIHState.controls[@102];
     for (UIHMacControlHandle *control in UIHState.controls.allValues) {
       NSString *expectedIdentifier =
           [NSString stringWithFormat:@"uih-control-%llu", control.identity];
@@ -3423,9 +3668,6 @@ void uih_macos_test_schedule_control_gallery_script(
           control.catalogKind >= UIHMacCatalogRichText &&
           control.catalogKind <= UIHMacCatalogContainer) {
         seenCatalog[control.catalogKind] = YES;
-        if (control.catalogKind == UIHMacCatalogRichText) {
-          richText = control;
-        }
       } else if (control.kind >= UIHMacControlKindLabel &&
                  control.kind <= UIHMacControlKindTextEditor) {
         seenLegacy[control.kind] = YES;
@@ -3441,11 +3683,123 @@ void uih_macos_test_schedule_control_gallery_script(
         UIHTestFail([NSString stringWithFormat:@"legacy control kind %ld is missing", (long)kind]);
       }
     }
-    if (rootTabs.catalogKind != UIHMacCatalogTabView || rootTabs.slots.count != 5) {
-      UIHTestFail(@"ordinary tab view did not retain all five gallery pages");
+    if (rootTabs.catalogKind != UIHMacCatalogTabView || rootTabs.slots.count != 6) {
+      UIHTestFail(@"ordinary tab view did not retain all six gallery pages");
     }
     if (nestedChild.view.superview != container.contentView) {
       UIHTestFail(@"arbitrary child was not parented inside its semantic container");
+    }
+
+    UIHMacControlHandle *layoutRoot = UIHState.controls[@6000];
+    UIHMacControlHandle *flowGroup = UIHState.controls[@6010];
+    UIHMacControlHandle *fixedFlow = UIHState.controls[@6011];
+    UIHMacControlHandle *growOne = UIHState.controls[@6012];
+    UIHMacControlHandle *growTwo = UIHState.controls[@6013];
+    UIHMacControlHandle *evenBadge = UIHState.controls[@6024];
+    UIHMacControlHandle *gridFixed = UIHState.controls[@6031];
+    UIHMacControlHandle *wrapFirst = UIHState.controls[@6051];
+    UIHMacControlHandle *wrapLast = UIHState.controls[@6058];
+    UIHMacControlHandle *compactAdaptive = UIHState.controls[@6071];
+    UIHMacControlHandle *wideAdaptive = UIHState.controls[@6072];
+    UIHMacControlHandle *compactFirst = UIHState.controls[@6080];
+    UIHMacControlHandle *compactSecond = UIHState.controls[@6081];
+    UIHMacControlHandle *wideFirst = UIHState.controls[@6090];
+    UIHMacControlHandle *wideSecond = UIHState.controls[@6091];
+    UIHMacControlHandle *tableGroup = UIHState.controls[@6100];
+    UIHMacControlHandle *tableHeaderFirst = UIHState.controls[@6110];
+    UIHMacControlHandle *tableHeaderLast = UIHState.controls[@6113];
+    UIHMacControlHandle *tableFinalCell = UIHState.controls[@6129];
+    UIHMacControlHandle *tableVerticalLine = UIHState.controls[@6140];
+    UIHMacControlHandle *tableHorizontalLine = UIHState.controls[@6150];
+    if (layoutRoot == nil || flowGroup == nil || fixedFlow == nil ||
+        growOne == nil || growTwo == nil || evenBadge == nil || gridFixed == nil ||
+        wrapFirst == nil || wrapLast == nil || compactAdaptive == nil ||
+        wideAdaptive == nil || compactFirst == nil || compactSecond == nil ||
+        wideFirst == nil || wideSecond == nil || tableGroup == nil ||
+        tableHeaderFirst == nil || tableHeaderLast == nil ||
+        tableFinalCell == nil || tableVerticalLine == nil ||
+        tableHorizontalLine == nil) {
+      UIHTestFail(@"portable layout lab did not realize all native peers");
+    } else {
+      if (layoutRoot.containerState != 6100 ||
+          layoutRoot.containerScrollView == nil ||
+          !layoutRoot.contentView.isFlipped ||
+          flowGroup.view.superview != layoutRoot.contentView ||
+          fixedFlow.view.superview != flowGroup.contentView) {
+        UIHTestFail(@"portable scroll/group hosts lost their top-left hierarchy");
+      }
+      NSClipView *layoutClip = layoutRoot.containerScrollView.contentView;
+      CGFloat layoutScrollRange =
+          NSHeight(layoutRoot.contentView.frame) - NSHeight(layoutClip.bounds);
+      if (layoutScrollRange <= 0.5) {
+        UIHTestFail(@"portable scroll host did not preserve its larger layout document");
+      } else {
+        [layoutClip scrollToPoint:NSMakePoint(0, layoutScrollRange)];
+        [layoutRoot.containerScrollView reflectScrolledClipView:layoutClip];
+        if (NSMinY(layoutClip.bounds) <= 0.5) {
+          UIHTestFail(@"portable scroll host did not scroll through its layout document");
+        }
+        [layoutClip scrollToPoint:NSMakePoint(0, 0)];
+        [layoutRoot.containerScrollView reflectScrolledClipView:layoutClip];
+      }
+      if (fabs(NSWidth(fixedFlow.view.frame) - 130) > 0.5 ||
+          NSWidth(growTwo.view.frame) <= NSWidth(growOne.view.frame) ||
+          NSMinX(growOne.view.frame) <= NSMaxX(fixedFlow.view.frame)) {
+        UIHTestFail(@"portable flex basis, gap, or weighted growth is incorrect");
+      }
+      NSTextField *evenBadgeTitle =
+          (NSTextField *)UIHSubview(evenBadge, @"messageTitle");
+      NSSize evenBadgeTextSize =
+          [evenBadgeTitle.stringValue sizeWithAttributes:@{
+            NSFontAttributeName: evenBadgeTitle.font
+          }];
+      CGFloat evenBadgeTextWidth =
+          ceil(MAX(evenBadgeTextSize.width,
+                   evenBadgeTitle.cell.cellSize.width)) + 2;
+      CGFloat evenBadgeChrome =
+          NSWidth(evenBadge.view.bounds) -
+          NSWidth(((NSBox *)evenBadge.view).contentView.bounds);
+      if (![evenBadgeTitle.stringValue isEqualToString:@"Even 1"] ||
+          NSWidth(evenBadge.view.frame) + 0.5 <
+              evenBadgeTextWidth + 16 + evenBadgeChrome ||
+          NSWidth(evenBadgeTitle.frame) + 0.5 < evenBadgeTextWidth) {
+        UIHTestFail([NSString stringWithFormat:
+            @"portable intrinsic measurement clipped badge text "
+             "(value=%@, control=%.1f, title=%.1f, text=%.1f, content=%.1f)",
+            evenBadgeTitle.stringValue,
+            NSWidth(evenBadge.view.frame),
+            NSWidth(evenBadgeTitle.frame),
+            evenBadgeTextSize.width,
+            NSWidth(((NSBox *)evenBadge.view).contentView.bounds)]);
+      }
+      if (fabs(NSWidth(gridFixed.view.frame) - 170) > 0.5) {
+        UIHTestFail(@"portable fixed grid track was not committed natively");
+      }
+      if (tableGroup.view.superview != layoutRoot.contentView ||
+          tableHeaderFirst.view.superview != tableGroup.contentView) {
+        UIHTestFail(@"portable table grid lost its retained native hierarchy");
+      }
+      if (NSMinX(tableHeaderLast.view.frame) <= NSMaxX(tableHeaderFirst.view.frame) ||
+          NSMinY(tableFinalCell.view.frame) <= NSMaxY(tableHeaderFirst.view.frame)) {
+        UIHTestFail(@"portable table grid did not form distinct rows and columns");
+      }
+      if (fabs(NSWidth(tableVerticalLine.view.frame) - 1) > 0.5 ||
+          NSHeight(tableVerticalLine.view.frame) <= NSHeight(tableHeaderFirst.view.frame) ||
+          fabs(NSHeight(tableHorizontalLine.view.frame) - 1) > 0.5 ||
+          NSWidth(tableHorizontalLine.view.frame) <= NSWidth(tableHeaderFirst.view.frame)) {
+        UIHTestFail(@"portable table grid separator tracks do not outline its cells");
+      }
+      if (NSMinY(wrapLast.view.frame) <= NSMinY(wrapFirst.view.frame)) {
+        UIHTestFail(@"portable wrap layout did not form multiple visual lines");
+      }
+      if (compactAdaptive.view.frame.size.width < 400 &&
+          NSMinY(compactSecond.view.frame) <= NSMinY(compactFirst.view.frame)) {
+        UIHTestFail(@"compact adaptive layout did not use its column strategy");
+      }
+      if (wideAdaptive.view.frame.size.width >= 400 &&
+          NSMinX(wideSecond.view.frame) <= NSMinX(wideFirst.view.frame)) {
+        UIHTestFail(@"wide adaptive layout did not use its row strategy");
+      }
     }
     if (richText == nil || ![richText.focusView isKindOfClass:NSTextView.class]) {
       UIHTestFail(@"rich text did not map to an attributed native text peer");
@@ -3471,7 +3825,9 @@ void uih_macos_test_schedule_control_gallery_script(
       BOOL hasItalic = (italicFont.fontDescriptor.symbolicTraits &
                         NSFontDescriptorTraitItalic) != 0;
       if (!hasBold || !hasColor || !hasSize || !hasItalic) {
-        UIHTestFail(@"rich text color, size, bold, or italic runs were not realized natively");
+        UIHTestFail([NSString stringWithFormat:
+            @"rich text realization failed (bold=%d color=%d size=%d italic=%d, pointSize=%.2f)",
+            hasBold, hasColor, hasSize, hasItalic, sizeFont.pointSize]);
       }
     }
 
@@ -3500,10 +3856,68 @@ void uih_macos_test_schedule_control_gallery_script(
     UIHMacControlHandle *repeaterPeer = UIHState.controls[@305];
     UIHMacControlHandle *sidebarPeer = UIHState.controls[@306];
     if (listPeer.collectionAdapter == nil || gridPeer.gridAdapter == nil ||
-        treePeer.outlineAdapter == nil || tablePeer.collectionAdapter.table.tableColumns.count != 2 ||
+        treePeer.outlineAdapter == nil || tablePeer.collectionAdapter == nil ||
         repeaterPeer.gridAdapter == nil || !repeaterPeer.gridAdapter.repeater ||
         sidebarPeer.collectionAdapter.table.style != NSTableViewStyleSourceList) {
       UIHTestFail(@"collection families collapsed to indistinguishable native peers");
+    }
+    NSTableView *nativeTable = tablePeer.collectionAdapter.table;
+    if (listPeer.collectionAdapter.table.rowSizeStyle != NSTableViewRowSizeStyleDefault ||
+        treePeer.outlineAdapter.outline.rowSizeStyle != NSTableViewRowSizeStyleDefault ||
+        nativeTable.rowSizeStyle != NSTableViewRowSizeStyleDefault ||
+        sidebarPeer.collectionAdapter.table.rowSizeStyle != NSTableViewRowSizeStyleDefault) {
+      UIHTestFail(@"row-based controls did not preserve AppKit's system-default row size policy");
+    }
+    uih_macos_catalog_control_set_row_sizing((__bridge UIHMacControlRef)tablePeer, 4, 31);
+    if (nativeTable.rowSizeStyle != NSTableViewRowSizeStyleCustom ||
+        fabs(nativeTable.rowHeight - 31) > 0.001) {
+      UIHTestFail(@"explicit fixed row sizing did not reach NSTableView");
+    }
+    uih_macos_catalog_control_set_row_sizing((__bridge UIHMacControlRef)tablePeer, 5, 0);
+    if (!nativeTable.usesAutomaticRowHeights ||
+        !tablePeer.collectionAdapter.contentSizedRows) {
+      UIHTestFail(@"content-sized rows did not enable AppKit automatic row heights");
+    }
+    uih_macos_catalog_control_set_row_sizing((__bridge UIHMacControlRef)tablePeer, 0, 0);
+    if (nativeTable.rowSizeStyle != NSTableViewRowSizeStyleDefault ||
+        nativeTable.usesAutomaticRowHeights) {
+      UIHTestFail(@"system-default row sizing was not restored");
+    }
+    if (nativeTable == nil || nativeTable.headerView == nil ||
+        NSHeight(nativeTable.headerView.frame) < 20 ||
+        nativeTable.tableColumns.count != 2 ||
+        !nativeTable.usesAlternatingRowBackgroundColors ||
+        ![nativeTable.tableColumns[0].title isEqualToString:@"Item"] ||
+        ![nativeTable.tableColumns[1].title isEqualToString:@"Value"]) {
+      UIHTestFail(@"TableView is not an identifiable native two-column table with header and alternating rows");
+    }
+    UIHCenteredTableCellView *selectedTableCell = (UIHCenteredTableCellView *)
+        [nativeTable viewAtColumn:0 row:1 makeIfNecessary:YES];
+    UIHCenteredTableCellView *selectedTreeCell = (UIHCenteredTableCellView *)
+        [treePeer.outlineAdapter.outline viewAtColumn:0 row:1 makeIfNecessary:YES];
+    [selectedTableCell layoutSubtreeIfNeeded];
+    [selectedTreeCell layoutSubtreeIfNeeded];
+    BOOL (^isVerticallyCentered)(UIHCenteredTableCellView *) =
+        ^BOOL(UIHCenteredTableCellView *cell) {
+          if (![cell isKindOfClass:UIHCenteredTableCellView.class]) {
+            return NO;
+          }
+          CGFloat lower = NSMinY(cell.centeredLabel.frame) - NSMinY(cell.bounds);
+          CGFloat upper = NSMaxY(cell.bounds) - NSMaxY(cell.centeredLabel.frame);
+          return lower >= -0.5 && upper >= -0.5 && fabs(lower - upper) <= 0.5;
+        };
+    if (!isVerticallyCentered(selectedTableCell) ||
+        !isVerticallyCentered(selectedTreeCell)) {
+      UIHTestFail(@"selected table or tree text is not vertically centered in its row");
+    }
+    UIHMacGridItem *firstGridItem = (UIHMacGridItem *)
+        [gridPeer.gridAdapter.collection itemAtIndexPath:
+            [NSIndexPath indexPathForItem:0 inSection:0]];
+    if (firstGridItem == nil ||
+        !NSContainsRect(firstGridItem.card.contentView.bounds, firstGridItem.titleLabel.frame) ||
+        !NSContainsRect(firstGridItem.card.contentView.bounds, firstGridItem.detailLabel.frame) ||
+        NSIntersectsRect(firstGridItem.titleLabel.frame, firstGridItem.detailLabel.frame)) {
+      UIHTestFail(@"CollectionView card text escapes its content bounds or overlaps");
     }
 
     rootTabs.slots[@9201].hidden = YES;
@@ -3618,7 +4032,15 @@ void uih_macos_test_schedule_control_gallery_script(
                     UIHMacControlHandle *popover = UIHState.controls[@(popoverIdentity)];
                     if (popover == nil || popover.popover == nil || !popover.popover.shown ||
                         !popover.presentationVisible) {
-                      UIHTestFail(@"desired popover state did not remain anchored and visible");
+                      UIHTestFail([NSString stringWithFormat:
+                          @"desired popover state did not remain anchored and visible "
+                           "(handle=%d, peer=%d, shown=%d, desired=%d, appActive=%d, anchorWindow=%d)",
+                          popover != nil,
+                          popover.popover != nil,
+                          popover.popover.shown,
+                          popover.presentationVisible,
+                          NSApplication.sharedApplication.active,
+                          popoverButton.view.window != nil]);
                     } else {
                       [popover.popover performClose:nil];
                     }
