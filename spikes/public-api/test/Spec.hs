@@ -4,7 +4,7 @@
 module Main (main) where
 
 import Examples.MultiwindowEditor
-import UIH.Sketch
+import HaskeLUI.Sketch
 
 main :: IO ()
 main = do

@@ -6,8 +6,8 @@ Toolchain: GHC 9.10.3, `base-4.20.2.0`, `generic-lens`
 
 ## Purpose
 
-UIH applications keep authoritative state in ordinary immutable Haskell
-records. `Property` gives a field a typed focus and stable UIH identity;
+HaskeLUI applications keep authoritative state in ordinary immutable Haskell
+records. `Property` gives a field a typed focus and stable HaskeLUI identity;
 `Binding` adds the pure editing protocol needed by controls. Together they
 replace repetitive record updates without making application authors learn a
 general optics library.
@@ -55,7 +55,7 @@ Models derive `Generic`, then define one root:
 {-# LANGUAGE OverloadedRecordDot #-}
 
 import GHC.Generics (Generic)
-import UIH.Property
+import HaskeLUI.Property
 
 data Document = Document
   { title :: Text
@@ -104,7 +104,7 @@ documentTitle =
   fromLens (PropertyId "document.title") (#document . #title)
 ```
 
-UIH exposes its minimal `Lens'` representation and does not require the full
+HaskeLUI exposes its minimal `Lens'` representation and does not require the full
 `lens` package. Lenses from `lens`, `generic-lens`, and handwritten lenses are
 representation-compatible.
 
@@ -300,12 +300,12 @@ Live bindings default to `RefreshIfPristine`; staged bindings default to
 
 ## Pure/impure boundary
 
-`UIH.Property` and `UIH.Binding` contain no `IO`. Parsing, synchronous
+`HaskeLUI.Property` and `HaskeLUI.Binding` contain no `IO`. Parsing, synchronous
 validation, reconciliation, action construction, and transaction construction
 are deterministic and headless-testable.
 
 Network, filesystem, service, and delayed validation will live in
-`UIH.Validation.Async`. That API must expose its `IO` runner, cancellation,
+`HaskeLUI.Validation.Async`. That API must expose its `IO` runner, cancellation,
 revision/stale-result handling, and pending-commit policy in its types. It is
 not required to use the property API or live bindings today.
 
@@ -335,7 +335,7 @@ Still runtime work:
 These are integration layers around the implemented pure semantics, not a
 reason to postpone using properties and live bindings in application code.
 
-The text-editor example also validates the intended interim treatment of
+Visual Haskell also validates the intended interim treatment of
 dynamically keyed child state. A selected `Map DocumentKey Document` entry is
 not represented as a total lens. It uses `controlledWith`, creates total
 `Action Document` values, then explicitly lifts them through the established

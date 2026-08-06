@@ -1,6 +1,6 @@
 # Public API spike
 
-This package is a compile-only design test for UIH's surface API. Its types have enough representation for smoke tests, but deliberately contain no reconciler, renderer, native objects, or effect interpreter.
+This package is a compile-only design test for HaskeLUI's surface API. Its types have enough representation for smoke tests, but deliberately contain no reconciler, renderer, native objects, or effect interpreter.
 
 The first example is a realistic multiwindow document editor. It exercises:
 

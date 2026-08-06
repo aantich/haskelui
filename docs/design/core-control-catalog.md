@@ -1,12 +1,12 @@
 # Portable Core control catalog
 
 Status: Accepted; Core, headless, AppKit, and gallery vertical slice implemented  
-Scope: Semantic controls that every conforming general-purpose UIH desktop backend must support  
+Scope: Semantic controls that every conforming general-purpose HaskeLUI desktop backend must support
 Platform baseline: AppKit on macOS and WinUI 3 / Windows App SDK on Windows
 
 ## 1. Decision
 
-UIH Core defines a semantic lowest-common-denominator catalog rather than the
+HaskeLUI Core defines a semantic lowest-common-denominator catalog rather than the
 literal intersection of AppKit and WinUI class names. A control belongs in the
 portable catalog when both backends can preserve its value, interaction,
 keyboard, focus, accessibility, and lifecycle semantics using either one native
@@ -33,7 +33,7 @@ The catalog has four layers:
 4. **Presentation and shell surfaces** expose commands or transient content in
    platform-appropriate windows, menus, toolbars, dialogs, and popovers.
 
-The concrete vertical-slice `UIH.Core.Control` IR may temporarily use records
+The concrete vertical-slice `HaskeLUI.Core.Control` IR may temporarily use records
 and explicit frames. The final public API remains opaque `View model`
 combinators backed by `Binding`, `StateSource`, `Command`, and typed callbacks.
 Adding a concrete IR node therefore does not make its record constructor the
@@ -43,7 +43,7 @@ permanent source API.
 
 ### 3.1 Content and layout
 
-| UIH semantic component | AppKit realization | WinUI realization |
+| HaskeLUI semantic component | AppKit realization | WinUI realization |
 |---|---|---|
 | Plain text | label `NSTextField` | `TextBlock` |
 | Rich text | attributed text field or `NSTextView` | `RichTextBlock` |
@@ -66,7 +66,7 @@ native metrics remain backend policy.
 
 ### 3.2 Commands and Boolean choice
 
-| UIH semantic component | AppKit realization | WinUI realization |
+| HaskeLUI semantic component | AppKit realization | WinUI realization |
 |---|---|---|
 | Button | `NSButton` | `Button` |
 | Repeat button | continuous `NSButton` | `RepeatButton` |
@@ -90,7 +90,7 @@ second action identity for an existing command.
 
 ### 3.3 Text and value input
 
-| UIH semantic component | AppKit realization | WinUI realization |
+| HaskeLUI semantic component | AppKit realization | WinUI realization |
 |---|---|---|
 | Text field | `NSTextField` | `TextBox` |
 | Plain text area | plain `NSTextView` | multiline `TextBox` |
@@ -114,14 +114,14 @@ commit policy, undo, and external synchronization matter. Already-typed
 selection values may use `StateSource`. A backend never writes an invalid draft
 into an authoritative model value.
 
-Date and time values use UIH calendar/time component types rather than Unix
+Date and time values use HaskeLUI calendar/time component types rather than Unix
 timestamps. The backend performs locale-specific presentation. Color values use
 a portable color space declaration; the initial sRGB `Color` value is the
 baseline.
 
 ### 3.4 Collections and navigation
 
-| UIH semantic component | AppKit realization | WinUI realization |
+| HaskeLUI semantic component | AppKit realization | WinUI realization |
 |---|---|---|
 | List view | single-column `NSTableView` | `ListView` |
 | Collection/grid view | `NSCollectionView` | `ItemsView`/`GridView` |
@@ -157,7 +157,7 @@ data CollectionRowSizing
   | ContentSizedRows
 ```
 
-`PlatformDefaultRows` is the default. It deliberately contains no UIH point
+`PlatformDefaultRows` is the default. It deliberately contains no HaskeLUI point
 height. On AppKit it maps to `NSTableViewRowSizeStyleDefault`, so the effective
 small, medium, or large density follows the preference selected by the user in
 System Settings. `CompactRows`, `StandardRows`, and `SpaciousRows` are semantic
@@ -181,13 +181,13 @@ implicitly mutate authoritative selection unless the control's declared
 selection policy says so.
 
 `NavigationView` is not a low-level Core node. It is the standard composition of
-a window/workspace, sidebar pane, keyed collection, commands, and content. UIH
+a window/workspace, sidebar pane, keyed collection, commands, and content. HaskeLUI
 may provide an ergonomic pattern constructor without adding a backend-shaped
 primitive.
 
 ### 3.5 Presentation, feedback, and shell
 
-| UIH semantic component | AppKit realization | WinUI realization |
+| HaskeLUI semantic component | AppKit realization | WinUI realization |
 |---|---|---|
 | Menu/menu bar/context menu | `NSMenu` | `MenuFlyout`/`MenuBar`/context flyout |
 | Toolbar | `NSToolbar` | `CommandBar` |
@@ -209,7 +209,7 @@ identity. A button may request presentation through an action, but it does not
 imperatively retain or own a native dialog object. Dismissal publishes a typed
 request/result and reconciliation controls final lifetime.
 
-Title-bar APIs are semantic window options. UIH does not offer a generic custom
+Title-bar APIs are semantic window options. HaskeLUI does not offer a generic custom
 title-bar view that encourages applications to imitate another operating
 system's chrome.
 
@@ -262,7 +262,7 @@ participation, and deterministic destruction.
 The headless backend retains the complete desired semantic tree and supports
 pure validation without opening native windows.
 
-A `uih-control-gallery` example is the catalog conformance fixture. One process
+A `haskelui-control-gallery` example is the catalog conformance fixture. One process
 declares every required Core control, divides them into navigable categories,
 binds interactive samples to one pure Haskell model, and exposes the resulting
 values in a shared event log/status area. Its deterministic AppKit script must
@@ -279,7 +279,7 @@ appearance may differ, but semantics and event traces must conform.
 The repository now implements the complete catalog described by the current
 concrete Core IR:
 
-- `UIH.Core.Control` has distinct constructors and typed specification records
+- `HaskeLUI.Core.Control` has distinct constructors and typed specification records
   for all catalog members. `CatalogControlKind` is exhaustive, `controlKey`,
   `controlFrame`, recursive child traversal, and pure catalog validation are
   total over the sum type.

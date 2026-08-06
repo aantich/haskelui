@@ -1,13 +1,13 @@
 resolver: lts-24.50
 
 packages:
-  - packages/uih-core
-  - packages/uih-runtime
-  - backends/headless/uih-backend-headless
-  - backends/macos/uih-backend-appkit
+  - packages/haskelui-core
+  - packages/haskelui-runtime
+  - backends/headless/haskelui-backend-headless
+  - backends/macos/haskelui-backend-appkit
   - examples/appkit-vertical
   - examples/control-gallery
-  - examples/text-editor
+  - vh
   - spikes/property-api
   - spikes/public-api
 

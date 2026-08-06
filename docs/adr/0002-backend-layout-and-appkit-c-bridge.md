@@ -5,9 +5,9 @@ Date: 2026-08-05
 
 ## Context
 
-UIH needs native and custom backends without allowing SDL, AppKit, WinUI, or foreign object types to shape the public core. Native APIs also evolve across operating-system releases, so repository layout must support capability differences without cloning an entire backend for each version.
+HaskeLUI needs native and custom backends without allowing SDL, AppKit, WinUI, or foreign object types to shape the public core. Native APIs also evolve across operating-system releases, so repository layout must support capability differences without cloning an entire backend for each version.
 
-The available Haskell Objective-C packages do not provide a sufficiently current, comprehensive AppKit foundation for UIH's GHC 9.10.3 baseline. Direct Objective-C runtime dispatch from Haskell would also expose ABI, ownership, delegate, and method-signature details to the backend implementation.
+The available Haskell Objective-C packages do not provide a sufficiently current, comprehensive AppKit foundation for HaskeLUI's GHC 9.10.3 baseline. Direct Objective-C runtime dispatch from Haskell would also expose ABI, ownership, delegate, and method-signature details to the backend implementation.
 
 ## Decision
 
@@ -39,7 +39,7 @@ Applications consume semantic capabilities rather than comparing raw OS versions
 The AppKit backend uses:
 
 ```text
-UIH semantic values
+HaskeLUI semantic values
   -> Haskell AppKit reconciler
   -> narrow prefixed C ABI
   -> Objective-C implementation compiled with ARC
@@ -52,7 +52,7 @@ The C ABI exposes opaque handles, fixed-width identities, fixed-layout geometry,
 
 `NSApplication` owns the process main event loop. AppKit operations assert main-thread access. The blocking `NSApplication.run` bridge is imported as a safe FFI call; short nonblocking setters are unsafe FFI calls.
 
-Target/action and delegate objects normalize AppKit callbacks into command, text-change, and close-request events carrying stable UIH identities. The Objective-C shim schedules these shallow callbacks onto the main queue so Haskell model transition and reconciliation occur after the originating AppKit callback returns.
+Target/action and delegate objects normalize AppKit callbacks into command, text-change, and close-request events carrying stable HaskeLUI identities. The Objective-C shim schedules these shallow callbacks onto the main queue so Haskell model transition and reconciliation occur after the originating AppKit callback returns.
 
 ### Ownership
 
@@ -78,7 +78,7 @@ The target-built native suite also passes on the development host. This remains 
 
 ### Comprehensive generated AppKit bindings
 
-Rejected for the first implementation because UIH needs a small semantic adapter, not exposure of the entire object model. Generated bindings would increase ABI and ownership surface without resolving reconciliation policy.
+Rejected for the first implementation because HaskeLUI needs a small semantic adapter, not exposure of the entire object model. Generated bindings would increase ABI and ownership surface without resolving reconciliation policy.
 
 ### Direct Objective-C runtime calls from Haskell
 
@@ -94,7 +94,7 @@ Rejected because it duplicates reconciliation and guarantees drift. Capability a
 
 ## Consequences
 
-- UIH owns a small amount of Objective-C bridge code.
+- HaskeLUI owns a small amount of Objective-C bridge code.
 - Native ownership and callback lifetime can be audited locally.
 - Backend packages remain independently replaceable.
 - Adding a native operation requires coordinated C-header, Objective-C, and Haskell-FFI changes.

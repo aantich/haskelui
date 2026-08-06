@@ -14,9 +14,9 @@ module Example.AppKitVertical
 import Data.Text (Text)
 import qualified Data.Text as Text
 import GHC.Generics (Generic)
-import UIH.Binding
-import UIH.Core
-import UIH.Property
+import HaskeLUI.Binding
+import HaskeLUI.Core
+import HaskeLUI.Property
 
 data Model = Model
   { name :: !Text
@@ -68,7 +68,8 @@ application =
           , dirty = True
           , mainWindowOpen = True
           , inspectorOpen = True
-          }
+        }
+    , appInitialEffects = []
     , appView = render
     , appHandleEvent = handleEvent
     }
@@ -89,7 +90,7 @@ mainWindow :: Model -> WindowSpec
 mainWindow model =
   WindowSpec
     { windowKey = mainWindowKey
-    , windowTitle = if model.dirty then "UIH AppKit PoC — Edited" else "UIH AppKit PoC"
+    , windowTitle = if model.dirty then "HaskeLUI AppKit PoC — Edited" else "HaskeLUI AppKit PoC"
     , windowFrame = Rect 120 180 540 320
     , windowControls =
         [ Label greetingLabelKey (Rect 24 260 480 24) ("Hello, " <> model.name <> "!")

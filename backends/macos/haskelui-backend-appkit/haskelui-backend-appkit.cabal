@@ -1,0 +1,76 @@
+cabal-version: 2.2
+
+-- This file has been generated from package.yaml by hpack version 0.39.6.
+--
+-- see: https://github.com/sol/hpack
+
+name:           haskelui-backend-appkit
+version:        0.1.0.0
+homepage:       https://github.com/aantich/haskelui#readme
+bug-reports:    https://github.com/aantich/haskelui/issues
+author:         HaskeLUI contributors
+maintainer:     HaskeLUI contributors
+copyright:      2026 HaskeLUI contributors
+license:        BSD-3-Clause
+build-type:     Simple
+extra-source-files:
+    cbits/include/HaskeLUIAppKit.h
+    cbits/compat/HaskeLUIAppKitCompatibility.h
+
+source-repository head
+  type: git
+  location: https://github.com/aantich/haskelui
+
+library
+  exposed-modules:
+      HaskeLUI.Backend.AppKit
+      HaskeLUI.Backend.AppKit.Testing
+  other-modules:
+      HaskeLUI.Backend.AppKit.Internal.Capabilities
+      HaskeLUI.Backend.AppKit.Internal.FFI
+  hs-source-dirs:
+      src
+  ghc-options: -Wall -Wcompat
+  build-depends:
+      base >=4.20.2 && <4.21
+    , bytestring
+    , containers
+    , haskelui-core
+    , haskelui-runtime
+    , text
+  default-language: Haskell2010
+  if os(darwin)
+    cc-options: -fobjc-arc
+    include-dirs:
+        cbits/include
+    install-includes:
+        HaskeLUIAppKit.h
+    c-sources:
+        cbits/HaskeLUIAppKit.m
+    frameworks:
+        AppKit
+        Foundation
+  if !os(darwin)
+    buildable: False
+
+test-suite haskelui-backend-appkit-test
+  type: exitcode-stdio-1.0
+  main-is: Spec.hs
+  other-modules:
+      Paths_haskelui_backend_appkit
+  autogen-modules:
+      Paths_haskelui_backend_appkit
+  hs-source-dirs:
+      test
+  ghc-options: -Wall -Wcompat
+  build-depends:
+      base >=4.20.2 && <4.21
+    , bytestring
+    , containers
+    , haskelui-backend-appkit
+    , haskelui-core
+    , haskelui-runtime
+    , text
+  default-language: Haskell2010
+  if !os(darwin)
+    buildable: False

@@ -1,10 +1,10 @@
-name: uih-property-spike
+name: haskelui-property-spike
 version: 0.1.0.0
-github: aantich/uih
+github: aantich/haskelui
 license: BSD-3-Clause
-author: UIH contributors
-maintainer: UIH contributors
-copyright: 2026 UIH contributors
+author: HaskeLUI contributors
+maintainer: HaskeLUI contributors
+copyright: 2026 HaskeLUI contributors
 
 extra-source-files:
   - README.md
@@ -27,4 +27,4 @@ tests:
     main: Spec.hs
     source-dirs: test
     dependencies:
-      - uih-property-spike
+      - haskelui-property-spike

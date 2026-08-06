@@ -5,9 +5,9 @@ module Main (main) where
 
 import Data.List (nub, sort)
 import Example.ControlGallery
-import UIH.Backend.Headless (newHeadlessBackend)
-import UIH.Core
-import UIH.Runtime (runApp)
+import HaskeLUI.Backend.Headless (newHeadlessBackend)
+import HaskeLUI.Core
+import HaskeLUI.Runtime (runApp)
 
 main :: IO ()
 main = do

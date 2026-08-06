@@ -1,19 +1,20 @@
-# UIH
+# HaskeLUI
 
-UIH is an experimental native Haskell application framework. Applications describe semantic scenes, windows, controls, commands, bindings, and transactions without depending on SDL, AppKit, WinUI, or another backend API.
+HaskeLUI is an experimental native Haskell application framework. Applications describe semantic scenes, windows, controls, commands, bindings, and transactions without depending on SDL, AppKit, WinUI, or another backend API.
 
 The repository is currently validating the architecture through small compiled and native vertical slices. It is not yet a usable application library.
 
 For a task-oriented explanation of the implemented application API, including
 state management, windows, workspaces, controls, layout, collections, styled
 text, effects, project structure, and testing, read the
-[UIH User Guide](docs/USER_GUIDE.md).
+[HaskeLUI User Guide](docs/USER_GUIDE.md).
 
 ## Repository layout
 
 ```text
 packages/       Platform-independent core and runtime libraries
 backends/       Headless, native-platform, and portable rendering backends
+vh/             Visual Haskell, the featured native editor product
 examples/       Executable architecture and backend examples
 spikes/         Disposable compile-time API experiments
 docs/design/    Current architecture proposal
@@ -24,7 +25,7 @@ Backends are isolated from the public core. See [backends/README.md](backends/RE
 
 ## Toolchain
 
-UIH uses Stack with the installed system GHC 9.10.3 and `base-4.20.2.0`.
+HaskeLUI uses Stack with the installed system GHC 9.10.3 and `base-4.20.2.0`.
 
 ```console
 stack test
@@ -33,18 +34,18 @@ stack test
 The AppKit vertical example is macOS-only:
 
 ```console
-stack exec uih-appkit-vertical
+stack exec haskelui-appkit-vertical
 ```
 
 It opens two native windows and exercises retained native controls, shared menu/button commands, model-driven updates, declarative window lifetime, and close veto.
 
-The macOS workspace text editor opens multiple UTF-8 files as document tabs in one native split-view workspace. It includes a left open-documents pane, central editors, a right inspector, a shared status area, dirty tracking, Command-S, deferred dirty-tab close, and pure Haskell syntax highlighting for `.hs` and `.lhs` files:
+Visual Haskell opens multiple UTF-8 files as document tabs in one native split-view workspace. It includes a project tree, central editors, a right inspector, a shared status area, dirty tracking, Command-S, deferred dirty-tab close, pure Haskell syntax highlighting for `.hs` and `.lhs` files, and versioned `.vihs` workspace restoration:
 
 ```console
-stack exec uih-text-editor
+stack exec vh
 ```
 
-See [the editor V1/V2 contract](examples/text-editor/README.md).
+See [the editor V1/V2 contract](vh/README.md).
 
 The Core control gallery declares every portable control in one model-driven
 native application. Its six tabs cover content, commands, text/value input,
@@ -52,13 +53,13 @@ collections, shell/presentation feedback, arbitrary-child containers, and the
 portable layout system:
 
 ```console
-stack exec uih-control-gallery
+stack exec haskelui-control-gallery
 ```
 
 Open the visual layout lab directly with:
 
 ```console
-stack exec uih-control-gallery -- --layout
+stack exec haskelui-control-gallery -- --layout
 ```
 
 The gallery's model/headless test proves exhaustive catalog coverage and its

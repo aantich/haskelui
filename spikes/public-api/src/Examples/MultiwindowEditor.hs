@@ -22,7 +22,7 @@ import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
 import GHC.Generics (Generic)
-import UIH.Sketch
+import HaskeLUI.Sketch
 
 newtype DocumentId = DocumentId Int
   deriving stock (Eq, Ord, Show)

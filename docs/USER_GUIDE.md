@@ -1,4 +1,4 @@
-# UIH User Guide
+# HaskeLUI User Guide
 
 Status: implemented vertical-slice API
 
@@ -6,7 +6,7 @@ Toolchain: Stack, GHC 9.10.3
 
 Current native backend: macOS AppKit
 
-UIH is an experimental framework for writing native desktop applications in
+HaskeLUI is an experimental framework for writing native desktop applications in
 Haskell. Application code owns ordinary immutable Haskell state and describes
 windows, workspaces, controls, commands, and layout without importing a native
 UI toolkit. A backend retains and updates the corresponding native objects.
@@ -38,11 +38,12 @@ yet.
 
 ## 1. The programming model
 
-Every UIH application is an `App model`:
+Every HaskeLUI application is an `App model`:
 
 ```haskell
 data App model = App
   { appInitialModel :: model
+  , appInitialEffects :: [Effect]
   , appView         :: model -> AppView
   , appHandleEvent  :: UIEvent -> model -> Transaction model
   }
@@ -56,7 +57,7 @@ Application code does not mutate native controls directly.
 flowchart LR
   M["Haskell model"] --> V["appView"]
   V --> D["AppView: windows, controls, commands"]
-  D --> R["UIH runtime"]
+  D --> R["HaskeLUI runtime"]
   R --> B["Native or headless backend"]
   B --> E["typed UIEvent"]
   E --> U["appHandleEvent"]
@@ -69,11 +70,12 @@ flowchart LR
 The runtime performs the cycle:
 
 1. Render the initial model.
-2. Reconcile the desired window and control trees with retained native peers.
-3. Normalize a native callback into `UIEvent`.
-4. Apply the returned transaction.
-5. Render the updated model.
-6. Interpret explicitly requested effects and return their results as events.
+2. Interpret `appInitialEffects` and return their results as normal events.
+3. Reconcile the desired window and control trees with retained native peers.
+4. Normalize a native callback into `UIEvent`.
+5. Apply the returned transaction.
+6. Render the updated model.
+7. Interpret explicitly requested effects and return their results as events.
 
 This architecture keeps application behavior deterministic and makes most of
 the program testable without AppKit.
@@ -91,16 +93,16 @@ the program testable without AppKit.
 
 ## 2. Run a first application
 
-Applications normally depend on `uih-core`, `uih-runtime`, and one backend. A
+Applications normally depend on `haskelui-core`, `haskelui-runtime`, and one backend. A
 macOS executable in this workspace uses:
 
 ```yaml
 dependencies:
   - base >= 4.20.2 && < 4.21
   - text
-  - uih-core
-  - uih-runtime
-  - uih-backend-appkit
+  - haskelui-core
+  - haskelui-runtime
+  - haskelui-backend-appkit
 ```
 
 Here is a complete small application:
@@ -113,9 +115,9 @@ Here is a complete small application:
 module Main (main) where
 
 import Data.Text (Text)
-import UIH.Backend.AppKit (appKitBackend)
-import UIH.Core
-import UIH.Runtime (runApp)
+import HaskeLUI.Backend.AppKit (appKitBackend)
+import HaskeLUI.Core
+import HaskeLUI.Runtime (runApp)
 
 data Model = Model
   { name :: !Text
@@ -137,6 +139,7 @@ application :: App Model
 application =
   App
     { appInitialModel = Model "Haskell" False True
+    , appInitialEffects = []
     , appView = view
     , appHandleEvent = update
     }
@@ -193,9 +196,9 @@ Notice three properties of this program:
 The examples in this repository can be run with:
 
 ```console
-stack exec uih-appkit-vertical
-stack exec uih-text-editor
-stack exec uih-control-gallery
+stack exec haskelui-appkit-vertical
+stack exec vh
+stack exec haskelui-control-gallery
 ```
 
 ## 3. State, events, and transactions
@@ -282,7 +285,7 @@ it. Put supported work in `transactionEffects`, and handle the resulting
 
 ### Named model properties
 
-UIH's property API is lens-backed, but ordinary application code does not need
+HaskeLUI's property API is lens-backed, but ordinary application code does not need
 to learn lens operators. Derive `Generic`, define one root, and use checked
 record-dot paths:
 
@@ -292,7 +295,7 @@ record-dot paths:
 {-# LANGUAGE OverloadedRecordDot #-}
 
 import GHC.Generics (Generic)
-import UIH.Property
+import HaskeLUI.Property
 
 data Document = Document
   { title :: !Text
@@ -356,7 +359,7 @@ documentTitle =
   fromLens (PropertyId "document.title") (#document . #title)
 ```
 
-This explicit form needs `OverloadedLabels`. UIH uses a minimal van Laarhoven
+This explicit form needs `OverloadedLabels`. HaskeLUI uses a minimal van Laarhoven
 `Lens'`; applications may interoperate with `lens` or `generic-lens` without
 making the full lens package part of the beginner API.
 
@@ -371,7 +374,7 @@ do not use `.=` because ordinary `Action` has no failure channel.
 commits a model value. A direct text binding can be concise:
 
 ```haskell
-import UIH.Binding
+import HaskeLUI.Binding
 
 titleBinding :: Binding Model Text
 titleBinding =
@@ -439,7 +442,7 @@ A value behind `Map key child` is not a total property of the parent: its key
 may be absent by the time an action is interpreted. Do not disguise it as a
 total lens.
 
-The text editor demonstrates the current explicit pattern:
+Visual Haskell demonstrates the current explicit pattern:
 
 1. Look up the document by its stable `DocumentKey` when handling the event.
 2. Build a `controlledWith` binding from that document's current value.
@@ -454,7 +457,7 @@ missing-key diagnostic and insertion policies.
 
 ## 4. Identity and reconciliation
 
-UIH retains native objects by stable typed keys:
+HaskeLUI retains native objects by stable typed keys:
 
 - `WindowKey` identifies a window.
 - `ElementKey` identifies a control.
@@ -621,7 +624,7 @@ The exhaustive executable reference is `examples/control-gallery`. Open it
 while developing controls:
 
 ```console
-stack exec uih-control-gallery
+stack exec haskelui-control-gallery
 ```
 
 ### Common construction patterns
@@ -671,7 +674,7 @@ responder across normal model updates.
 
 ## 8. Portable layout
 
-UIH currently supports two placement approaches:
+HaskeLUI currently supports two placement approaches:
 
 1. Direct `Rect` frames for small examples, fixed compositions, and the outer
    frame of a layout root.
@@ -876,7 +879,7 @@ and currently reject nondefault row policies.
 
 ## 10. Text, rich text, and presentation layers
 
-UIH separates authoritative content from derived presentation.
+HaskeLUI separates authoritative content from derived presentation.
 
 ### Static attributed text
 
@@ -886,7 +889,7 @@ Build authored text ergonomically from continuous runs:
 heading :: AttributedText
 heading =
   attributedTextFromRuns
-    [ TextRun "UIH " (mempty {textFontWeight = Just Bold})
+    [ TextRun "HaskeLUI " (mempty {textFontWeight = Just Bold})
     , TextRun "native UI" (mempty {textForeground = Just (RGBA 0.1 0.4 0.9 1)})
     ]
 ```
@@ -986,7 +989,9 @@ data Effect
   | RequestOpenProjectFolder
   | ReadDirectory FilePath
   | ReadTextFile FilePath
+  | ReadOptionalTextFile FilePath
   | WriteTextFile EffectKey FilePath Text
+  | WriteTextFileAtomically EffectKey FilePath Text
 ```
 
 The runtime converts results back into:
@@ -995,6 +1000,7 @@ The runtime converts results back into:
 - `ProjectFolderChosen path`
 - `DirectoryRead path (Either Text [FileSystemEntry])`
 - `TextFileRead path (Either Text Text)`
+- `OptionalTextFileRead path (Either Text (Maybe Text))`
 - `TextFileWritten key path writtenSnapshot (Either Text ())`
 
 A typical open flow is:
@@ -1027,18 +1033,27 @@ normalized child path, display name, and whether the child is a file or
 directory. The runtime sorts directories before files, case-insensitively.
 The application remains responsible for stable item identities, loaded state,
 expansion, filtering/ignore policy, refresh, and mapping a file selection to a
-document tab. The example editor demonstrates all of those responsibilities
+document tab. Visual Haskell implements all of those responsibilities
 except filtering and refresh.
 
 For saving, keep an `EffectKey` per document and compare the completion's exact
 written snapshot with the document's current contents. An edit made while the
 write is in progress must remain dirty even when the older snapshot succeeds.
-The included text editor demonstrates this pattern.
+Visual Haskell demonstrates this pattern.
 
 The current interpreter performs synchronous directory enumeration and UTF-8
-reads/writes. Save As, atomic replacement, other encodings, filesystem
-watching, ignore-file rules, external-change detection, cancellation, and a
-general background task executor are not implemented yet.
+reads/writes. `WriteTextFileAtomically` writes a sibling temporary file and
+then replaces the destination; it is intended for compact metadata such as
+Visual Haskell's `.vihs` workspace state. Save As, atomic document-save policy,
+other encodings, filesystem watching, ignore-file rules, external-change
+detection, cancellation, and a general background task executor are not
+implemented yet.
+
+Visual Haskell is the complete persistence implementation. It uses an optional startup
+read for the per-user `last-workspace` locator, then restores the selected
+folder's versioned `.vihs` file. Tabs, active file, expanded folders, explorer
+selection, and pane state are stored as safe project-relative paths. See
+[Visual Haskell workspace persistence](design/visual-haskell-workspaces.md).
 
 ## 13. Structuring a real application
 
@@ -1167,14 +1182,14 @@ For visual inspection, the control gallery contains every implemented control
 and every portable layout strategy:
 
 ```console
-stack exec uih-control-gallery
-stack exec uih-control-gallery -- --collections
-stack exec uih-control-gallery -- --layout
+stack exec haskelui-control-gallery
+stack exec haskelui-control-gallery -- --collections
+stack exec haskelui-control-gallery -- --layout
 ```
 
 ## 15. Current boundaries
 
-UIH is a substantial working vertical slice, not yet a released general-purpose
+HaskeLUI is a substantial working vertical slice, not yet a released general-purpose
 application framework. Plan around these current boundaries:
 
 - The AppKit backend and headless backend exist; the Windows backend does not.
@@ -1207,8 +1222,9 @@ Start with these executable examples:
 
 - `examples/appkit-vertical`: smallest multiwindow application, commands,
   editing, close veto, and native reconciliation.
-- `examples/text-editor`: real workspace, panes, tabs, file effects, dirty-state
-  workflow, native text editing, and Haskell syntax presentation.
+- `vh`: Visual Haskell, with persistent `.vihs` workspaces,
+  panes, tabs, file effects, dirty-state workflow, native text editing, and
+  Haskell syntax presentation.
 - `examples/control-gallery`: every Core control and portable layout strategy.
 
 Then consult the focused design documents:
@@ -1218,6 +1234,7 @@ Then consult the focused design documents:
 - [Core control catalog](design/core-control-catalog.md)
 - [Portable layout system](design/layout-system.md)
 - [Window and workspace surface](design/window-workspace-surface-api.md)
+- [Visual Haskell workspace persistence](design/visual-haskell-workspaces.md)
 - [Pure bindings, transactions, and async-validation boundary](adr/0001-pure-bindings-transactions-and-async-validation.md)
 - [Backend layout and AppKit bridge](adr/0002-backend-layout-and-appkit-c-bridge.md)
 - [File effects and text editor](adr/0003-file-effects-and-native-text-editor.md)

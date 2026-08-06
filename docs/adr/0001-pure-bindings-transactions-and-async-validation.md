@@ -3,7 +3,7 @@
 Status: Accepted  
 Date: 2026-08-05
 
-Implementation: `UIH.Property` and the pure `UIH.Binding` layer are implemented;
+Implementation: `HaskeLUI.Property` and the pure `HaskeLUI.Binding` layer are implemented;
 retained edit sessions, async validation, and the undo interpreter remain.
 
 ## Context
@@ -78,7 +78,7 @@ Pending validation explicitly selects `BlockCommit`, `OptimisticCommit`, or `Adv
 
 ### Module boundary
 
-The production package places pure editing in `UIH.Binding`. Impure validation declarations will live in `UIH.Validation.Async`. An umbrella module may re-export both without erasing their type-level distinction.
+The production package places pure editing in `HaskeLUI.Binding`. Impure validation declarations will live in `HaskeLUI.Validation.Async`. An umbrella module may re-export both without erasing their type-level distinction.
 
 ## Alternatives considered
 

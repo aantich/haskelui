@@ -1,15 +1,15 @@
-name: uih-example-control-gallery
+name: haskelui-example-control-gallery
 version: 0.1.0.0
-github: aantich/uih
+github: aantich/haskelui
 license: BSD-3-Clause
-author: UIH contributors
-maintainer: UIH contributors
-copyright: 2026 UIH contributors
+author: HaskeLUI contributors
+maintainer: HaskeLUI contributors
+copyright: 2026 HaskeLUI contributors
 
 dependencies:
   - base >= 4.20.1 && < 4.21
   - text
-  - uih-core
+  - haskelui-core
 
 library:
   source-dirs: src
@@ -20,13 +20,13 @@ library:
     - -Wcompat
 
 executables:
-  uih-control-gallery:
+  haskelui-control-gallery:
     main: Main.hs
     source-dirs: app
     dependencies:
-      - uih-backend-appkit
-      - uih-example-control-gallery
-      - uih-runtime
+      - haskelui-backend-appkit
+      - haskelui-example-control-gallery
+      - haskelui-runtime
     ghc-options:
       - -Wall
       - -Wcompat
@@ -40,16 +40,16 @@ tests:
     main: ModelSpec.hs
     source-dirs: test/model
     dependencies:
-      - uih-backend-headless
-      - uih-example-control-gallery
-      - uih-runtime
+      - haskelui-backend-headless
+      - haskelui-example-control-gallery
+      - haskelui-runtime
   control-gallery-native-test:
     main: NativeSpec.hs
     source-dirs: test/native
     dependencies:
-      - uih-backend-appkit
-      - uih-example-control-gallery
-      - uih-runtime
+      - haskelui-backend-appkit
+      - haskelui-example-control-gallery
+      - haskelui-runtime
     when:
       - condition: '!os(darwin)'
         buildable: false

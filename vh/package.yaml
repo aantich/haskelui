@@ -1,0 +1,66 @@
+name: visual-haskell
+version: 0.1.0.0
+github: aantich/haskelui
+license: BSD-3-Clause
+author: HaskeLUI contributors
+maintainer: HaskeLUI contributors
+copyright: 2026 HaskeLUI contributors
+
+dependencies:
+  - aeson
+  - base >= 4.20.2 && < 4.21
+  - bytestring
+  - containers
+  - filepath
+  - text
+  - haskelui-core
+
+library:
+  source-dirs: src
+  exposed-modules:
+    - VisualHaskell
+    - VisualHaskell.Highlighting
+    - VisualHaskell.WorkspaceState
+
+executables:
+  vh:
+    main: Main.hs
+    source-dirs: app
+    dependencies:
+      - directory
+      - filepath
+      - haskelui-backend-appkit
+      - visual-haskell
+      - haskelui-runtime
+    ghc-options:
+      - -Wall
+      - -Wcompat
+      - -threaded
+    when:
+      - condition: '!os(darwin)'
+        buildable: false
+
+tests:
+  vh-model-test:
+    main: ModelSpec.hs
+    source-dirs: test/model
+    dependencies:
+      - visual-haskell
+  vh-native-test:
+    main: NativeSpec.hs
+    source-dirs: test/native
+    dependencies:
+      - directory
+      - haskelui-backend-appkit
+      - visual-haskell
+      - haskelui-runtime
+    when:
+      - condition: '!os(darwin)'
+        buildable: false
+  vh-workspace-persistence-test:
+    main: WorkspaceSpec.hs
+    source-dirs: test/workspace
+    dependencies:
+      - directory
+      - visual-haskell
+      - haskelui-runtime

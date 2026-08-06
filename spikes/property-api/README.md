@@ -1,10 +1,10 @@
 # Property API spike
 
-Status: completed and superseded by the production `UIH.Property` and
-`UIH.Binding` modules. This package remains as a compiler-diagnostic and design
-history fixture; application code should use `uih-core`.
+Status: completed and superseded by the production `HaskeLUI.Property` and
+`HaskeLUI.Binding` modules. This package remains as a compiler-diagnostic and design
+history fixture; application code should use `haskelui-core`.
 
-This is deliberately disposable architecture-testing code. It checks the proposed UIH property surface against GHC 9.10.3 rather than establishing a stable package API.
+This is deliberately disposable architecture-testing code. It checks the proposed HaskeLUI property surface against GHC 9.10.3 rather than establishing a stable package API.
 
 The spike exercises:
 
@@ -25,7 +25,7 @@ stack test
 ## Findings
 
 1. GHC 9.10.3 accepts `property id (#document . #title)` with `generic-lens`.
-2. UIH only needs the small van Laarhoven `Lens'` representation and three tiny interpreters (`view`, `set`, and `over`). Pulling the full `lens` package is unnecessary for core interoperability and substantially increases the transitive dependency graph.
+2. HaskeLUI only needs the small van Laarhoven `Lens'` representation and three tiny interpreters (`view`, `set`, and `over`). Pulling the full `lens` package is unnecessary for core interoperability and substantially increases the transitive dependency graph.
 3. A generic virtual `HasField` instance can turn `properties.document.title` into a typed path on GHC 9.10.3. Each segment contributes both a generic lens and its type-level field name, so the resulting action reports `document.title` without duplicated strings or Template Haskell.
 4. This dot syntax is ordinary `OverloadedRecordDot`; it does not use `OverloadedRecordUpdate` or `RebindableSyntax`.
 5. Total properties and partial properties should remain distinct. A partial keyed lookup needs an explicit missing-target result; a total lens cannot represent that honestly.
@@ -34,7 +34,7 @@ stack test
 
 ## Provisional recommendation
 
-- UIH core owns or exposes a minimal van Laarhoven-compatible lens type.
+- HaskeLUI core owns or exposes a minimal van Laarhoven-compatible lens type.
 - Generic derivation is supplied by `generic-lens`, potentially through a small adapter package if core dependency size becomes important.
 - The preferred generated surface is `properties.document.title`, with `property id (#document . #title)` as the explicit constructor and interoperability escape hatch.
 - Model properties use `.=`; element properties use `setElement`.

@@ -6,7 +6,7 @@ Implementation status: Initial Core/AppKit/editor vertical slice implemented; er
 
 ## 1. Outcome
 
-UIH supports two distinct, complementary native desktop surfaces:
+HaskeLUI supports two distinct, complementary native desktop surfaces:
 
 - A `documentWindow` presents one primary document in one operating-system window. On platforms that support system window tabbing, several document windows may be grouped by the system.
 - A `workspaceWindow` presents application-managed tools and documents inside one operating-system window, with nested split panes, internal tab groups, an optional shared toolbar, and an optional shared status area.
@@ -38,13 +38,13 @@ The first implementation does not need tab drag-and-drop, tear-out, automatic la
 The proposed modules are:
 
 ```text
-UIH.Scene.Window       common and document/workspace window declarations
-UIH.Workspace          workspace root, pane tree, pane state, and status area
-UIH.Workspace.Tab      workspace tab groups, tabs, and transfer requests
-UIH.StateSource        explicit retained/restored/controlled/model ownership
+HaskeLUI.Scene.Window       common and document/workspace window declarations
+HaskeLUI.Workspace          workspace root, pane tree, pane state, and status area
+HaskeLUI.Workspace.Tab      workspace tab groups, tabs, and transfer requests
+HaskeLUI.StateSource        explicit retained/restored/controlled/model ownership
 ```
 
-The ordinary umbrella `UIH` module may re-export the common constructors. Detailed event and policy types remain available from their focused modules.
+The ordinary umbrella `HaskeLUI` module may re-export the common constructors. Detailed event and policy types remain available from their focused modules.
 
 All data constructors shown as opaque are hidden. Applications construct them through checked functions so that backend representation can evolve.
 
@@ -118,7 +118,7 @@ Ownership is exclusive:
 
 `StateSource` is not a replacement for `Binding`. A text field still uses `Binding` because invalid drafts, parsing, validation, commit timing, conflicts, and undo matter. Tab selection and a committed splitter position use `StateSource` because they are already typed values with control-specific commit behavior.
 
-`Restorable` supplies a stable codec. UIH provides instances for its standard state types; applications may derive or define it for their own types. `restoredStateWith` is the explicit-codec form. Restoration therefore never relies on `Show`/`Read`, runtime type reflection, or an unversioned backend encoding.
+`Restorable` supplies a stable codec. HaskeLUI provides instances for its standard state types; applications may derive or define it for their own types. `restoredStateWith` is the explicit-codec form. Restoration therefore never relies on `Show`/`Read`, runtime type reflection, or an unversioned backend encoding.
 
 Each consuming control defines when it publishes changes. Tab selection publishes immediately. A pane keeps live drag geometry inside the runtime and publishes one committed state when the resize gesture ends. This avoids rebuilding the application model for every pointer movement.
 
@@ -465,7 +465,7 @@ Live splitter movement is retained runtime interaction. `propertyState` or `cont
 
 ## 9. Workspace tab groups
 
-UIH keeps three concepts distinct:
+HaskeLUI keeps three concepts distinct:
 
 - `tabView`: simple selectable pages such as preference categories
 - System window tabbing: platform grouping of whole document windows
@@ -485,7 +485,7 @@ workspaceTabGroup
 
 The selected key is explicit. The order of the `[WorkspaceTab model]` declaration is authoritative. A user selection updates the supplied `StateSource` immediately.
 
-When `retainedState` or `restoredState` owns selection and the selected tab disappears, the control chooses the next tab, then the previous tab, then `Nothing`. It may do this because it owns that value. When `controlledState` or `propertyState` supplies a key that is not declared, UIH reports a diagnostic and displays no selected content; it never silently rewrites application-owned state. Reducers that close or move a selected tab must choose the successor in the same transaction. UIH can provide pure helper functions for that transition without hiding it in the control.
+When `retainedState` or `restoredState` owns selection and the selected tab disappears, the control chooses the next tab, then the previous tab, then `Nothing`. It may do this because it owns that value. When `controlledState` or `propertyState` supplies a key that is not declared, HaskeLUI reports a diagnostic and displays no selected content; it never silently rewrites application-owned state. Reducers that close or move a selected tab must choose the successor in the same transaction. HaskeLUI can provide pure helper functions for that transition without hiding it in the control.
 
 ### 9.1 Document and tool tabs
 
@@ -635,7 +635,7 @@ One possible surface use is:
 ```haskell
 editorWorkspaceWindow model windowKey state =
   workspaceWindow windowKey
-    [ windowTitle "UIH Editor"
+    [ windowTitle "HaskeLUI Editor"
     , windowToolbar (editorToolbar model windowKey)
     , windowRestorationKey (workspaceRestorationKey windowKey)
     , onWindowCloseRequest $ \request ->
@@ -696,7 +696,7 @@ The example is intentionally explicit about authoritative order, selection, acti
 
 The semantic structure is portable; exact composition is platform-specific.
 
-| UIH semantic concept | AppKit realization | Windows realization |
+| HaskeLUI semantic concept | AppKit realization | Windows realization |
 |---|---|---|
 | `documentWindow` | `NSWindow` with document metadata; optional system window tabbing | native app window and document metadata where available |
 | `workspaceWindow` | `NSWindow` hosting a controller hierarchy | WinUI/Windows App SDK window hosting a view hierarchy |
@@ -705,7 +705,7 @@ The semantic structure is portable; exact composition is platform-specific.
 | workspace tab group | native `NSTabViewController` when sufficient, otherwise a composite of native AppKit views and controllers | WinUI `TabView` when sufficient, otherwise a native composite |
 | status area | ordinary bottom `NSView` hierarchy | ordinary bottom WinUI layout row |
 
-A composite made from native controls is still a native realization. UIH does not require one semantic node to correspond to exactly one platform object.
+A composite made from native controls is still a native realization. HaskeLUI does not require one semantic node to correspond to exactly one platform object.
 
 The adapter must preserve:
 
@@ -719,7 +719,7 @@ The adapter must preserve:
 - Hidden-tab and collapsed-pane state
 - Deterministic disposal when tabs, panes, or windows disappear
 
-Backends may differ in chrome, divider metrics, animations, compact behavior, and toolbar placement. UIH promises semantic equivalence, not pixel identity.
+Backends may differ in chrome, divider metrics, animations, compact behavior, and toolbar placement. HaskeLUI promises semantic equivalence, not pixel identity.
 
 ## 12. Critical review and resulting revisions
 
@@ -797,4 +797,4 @@ The first implementation now proves the semantic/backend boundary with:
 - A one-window text editor with multiple document tabs, left open-document information, right document information, shared status, syntax highlighting, Save, and dirty-close negotiation
 - Pure, headless, and deterministic native tests, including tab selection/close event delivery and zero-resource shutdown
 
-The current production `UIH.Core` is still a compiled vertical-slice IR rather than the final opaque `View model` package described in this document. It carries concrete `[Control]` leaves and explicit selected/pane state. The later public-surface migration will lower `WorkspaceItem model`, `StateSource`, and typed combinators into this semantic IR without changing the AppKit ownership and event contracts proven here.
+The current production `HaskeLUI.Core` is still a compiled vertical-slice IR rather than the final opaque `View model` package described in this document. It carries concrete `[Control]` leaves and explicit selected/pane state. The later public-surface migration will lower `WorkspaceItem model`, `StateSource`, and typed combinators into this semantic IR without changing the AppKit ownership and event contracts proven here.

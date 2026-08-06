@@ -6,7 +6,7 @@ Scope: Core layout vocabulary, deterministic solver, control integration, and Ap
 
 ## 1. Contract
 
-UIH layout is a pure, backend-neutral constraint system. A parent proposes
+HaskeLUI layout is a pure, backend-neutral constraint system. A parent proposes
 constraints, a child reports a legal measured size and optional baselines, and
 the parent assigns a final rectangle. The result is a `LayoutPlan key` containing
 stable-keyed frames, visibility, paint order, and diagnostics.
@@ -23,7 +23,7 @@ semantic controls + Layout ElementKey
       cached intrinsic measurements
                 |
                 v
-        pure UIH.Layout solver
+        pure HaskeLUI.Layout solver
                 |
                 v
  frames + visibility + paint order + diagnostics
@@ -41,7 +41,7 @@ to the solver.
 
 ## 2. Public model
 
-`UIH.Layout` exposes four layers:
+`HaskeLUI.Layout` exposes four layers:
 
 1. Geometry and constraints: `Dp`, `Size`, `LayoutRect`, `Limit`, and
    `Constraints`.
@@ -223,7 +223,7 @@ layout hash, and measurement generation without changing the public types.
 
 ## 7. Verification
 
-`packages/uih-core/test/LayoutSpec.hs` covers:
+`packages/haskelui-core/test/LayoutSpec.hs` covers:
 
 - box padding, alignment, bounds, aspect ratio, and visibility;
 - every main and cross alignment, baseline alignment, grow/shrink freezing,
@@ -245,7 +245,7 @@ arrangements. The gallery's sixth page is a scrollable visual lab containing
 native controls for every strategy:
 
 ```console
-stack exec uih-control-gallery -- --layout
+stack exec haskelui-control-gallery -- --layout
 ```
 
 ## 8. Deliberate boundaries

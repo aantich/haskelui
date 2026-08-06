@@ -5,7 +5,7 @@ Date: 2026-08-05
 
 ## Context
 
-Syntax highlighting needs styled ranges, but keywords, comments, and language grammars are application or plugin concepts. Putting them in UIH Core would specialize a general text renderer around code editors and would not directly support authored rich text, diagnostics, search matches, spellchecking, or other annotations.
+Syntax highlighting needs styled ranges, but keywords, comments, and language grammars are application or plugin concepts. Putting them in HaskeLUI Core would specialize a general text renderer around code editors and would not directly support authored rich text, diagnostics, search matches, spellchecking, or other annotations.
 
 Authored formatting and derived highlighting use the same visual properties while having different ownership. Authored bold, fonts, and colors must eventually participate in persistence, clipboard, dirty state, editing, and undo. Syntax and search presentation must never become document content or create undo actions.
 
@@ -13,7 +13,7 @@ Backends also use incompatible text indices. Haskell-facing lexers naturally ope
 
 ## Decision
 
-UIH Core defines generic portable primitives:
+HaskeLUI Core defines generic portable primitives:
 
 - Partial `TextStyle` values for color, font family/size/weight/slant, underline, strikethrough, letter spacing, and baseline offset.
 - Generic `TextSpan a` values over scalar-indexed `TextRange`.

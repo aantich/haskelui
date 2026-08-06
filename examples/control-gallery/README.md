@@ -1,4 +1,4 @@
-# UIH Core control gallery
+# HaskeLUI Core control gallery
 
 This is the executable conformance fixture for the portable Core catalog. One
 pure Haskell application declares every `Control` constructor, including all 50
@@ -9,13 +9,13 @@ state visibly reconcile through the backend.
 On macOS:
 
 ```console
-stack run uih-control-gallery
+stack run haskelui-control-gallery
 ```
 
 The six tabs keep the complete catalog usable in one native window. Every
 collection/navigation peer is permanently captioned so the native table cannot
 be confused with the neighboring list, grid, tree, repeater, or source list.
-Run `stack run uih-control-gallery -- --collections` to open that comparison
+Run `stack run haskelui-control-gallery -- --collections` to open that comparison
 directly, or use `--layout` for the portable layout lab. The model
 test proves catalog coverage, identity uniqueness, validation, and headless
 retention. The native test additionally verifies rich-text attributes,

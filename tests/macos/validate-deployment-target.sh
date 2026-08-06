@@ -9,20 +9,20 @@ work_dir=".stack-work-macos${target_tag}"
 
 cd "$repo_root"
 
-echo "Building and testing UIH with MACOSX_DEPLOYMENT_TARGET=$target in $work_dir"
+echo "Building and testing HaskeLUI with MACOSX_DEPLOYMENT_TARGET=$target in $work_dir"
 MACOSX_DEPLOYMENT_TARGET="$target" \
   stack --work-dir "$work_dir" test \
-    uih-example-appkit-vertical \
-    uih-example-control-gallery \
-    uih-example-text-editor
+    haskelui-example-appkit-vertical \
+    haskelui-example-control-gallery \
+    visual-haskell
 
 install_root="$({
   MACOSX_DEPLOYMENT_TARGET="$target" \
     stack --work-dir "$work_dir" path --local-install-root
 } 2>/dev/null)"
-binary="$install_root/bin/uih-appkit-vertical"
-editor_binary="$install_root/bin/uih-text-editor"
-gallery_binary="$install_root/bin/uih-control-gallery"
+binary="$install_root/bin/haskelui-appkit-vertical"
+editor_binary="$install_root/bin/vh"
+gallery_binary="$install_root/bin/haskelui-control-gallery"
 
 first_match() {
   local search_root="$1"
@@ -30,9 +30,9 @@ first_match() {
   rg --files -uu "$search_root" | rg "$pattern" | awk 'NR == 1 { print; exit }'
 }
 
-appkit_object="$(first_match "backends/macos/uih-backend-appkit/$work_dir" '/UIHAppKit\.o$')"
-core_object="$(first_match "packages/uih-core/$work_dir" '/UIH/Core\.o$')"
-runtime_object="$(first_match "packages/uih-runtime/$work_dir" '/UIH/Runtime\.o$')"
+appkit_object="$(first_match "backends/macos/haskelui-backend-appkit/$work_dir" '/HaskeLUIAppKit\.o$')"
+core_object="$(first_match "packages/haskelui-core/$work_dir" '/HaskeLUI/Core\.o$')"
+runtime_object="$(first_match "packages/haskelui-runtime/$work_dir" '/HaskeLUI/Runtime\.o$')"
 
 verify_minos() {
   local artifact="$1"
@@ -70,7 +70,7 @@ verify_minos "$runtime_object"
 ghc_libdir="$(ghc --print-libdir)"
 rts_archive="$(first_match "$ghc_libdir" '/rts-[^/]+/libHSrts-[^/]+_thr\.a$')"
 base_archive="$(first_match "$ghc_libdir" '/base-[^/]+/libHSbase-[^/]+-[^/_]+\.a$')"
-runtime_inspect_dir="$(mktemp -d "${TMPDIR:-/tmp}/uih-runtime-inspect.XXXXXX")"
+runtime_inspect_dir="$(mktemp -d "${TMPDIR:-/tmp}/haskelui-runtime-inspect.XXXXXX")"
 trap 'rm -rf "$runtime_inspect_dir"' EXIT
 rts_member="$(ar -t "$rts_archive" | awk '/\.thr_o$/ { print; exit }')"
 base_member="$(ar -t "$base_archive" | awk '/\.o$/ { print; exit }')"

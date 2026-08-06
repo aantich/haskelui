@@ -18,7 +18,7 @@ module Example.ControlGallery
 import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import UIH.Core
+import HaskeLUI.Core
 
 data GalleryModel = GalleryModel
   { galleryWindowOpen :: !Bool
@@ -92,6 +92,7 @@ application :: App GalleryModel
 application =
   App
     { appInitialModel = initialModel
+    , appInitialEffects = []
     , appView = renderGallery
     , appHandleEvent = handleGalleryEvent
     }
@@ -103,6 +104,7 @@ layoutApplication :: App GalleryModel
 layoutApplication =
   application
     { appInitialModel = initialModel {galleryPage = Just layoutPage}
+    , appInitialEffects = []
     }
 
 -- | The exhaustive gallery with the native collection-control page selected.
@@ -112,6 +114,7 @@ collectionApplication :: App GalleryModel
 collectionApplication =
   application
     { appInitialModel = initialModel {galleryPage = Just collectionPage}
+    , appInitialEffects = []
     }
 
 renderGallery :: GalleryModel -> AppView
@@ -125,7 +128,7 @@ galleryWindow :: GalleryModel -> WindowSpec
 galleryWindow model =
   WindowSpec
     { windowKey = galleryWindowKey
-    , windowTitle = "UIH Core Control Gallery"
+    , windowTitle = "HaskeLUI Core Control Gallery"
     , windowFrame = Rect 70 70 1320 900
     , windowControls = galleryControls model
     }
@@ -661,7 +664,7 @@ linedTableLayoutExample =
       , (6115, 3, 3, "Haskell")
       , (6116, 5, 3, "Modified")
       , (6117, 7, 3, "12 KB")
-      , (6118, 1, 5, "UIH.Core")
+      , (6118, 1, 5, "HaskeLUI.Core")
       , (6119, 3, 5, "Module")
       , (6120, 5, 5, "Clean")
       , (6121, 7, 5, "8 KB")
@@ -813,7 +816,7 @@ galleryCollectionItems :: GalleryModel -> [CollectionItem]
 galleryCollectionItems model =
   [ CollectionItem (CollectionItemKey 1) "Project" "root" Nothing 0 True (isExpanded 1)
   , CollectionItem (CollectionItemKey 2) "Main.hs" "Haskell source" Nothing 1 False False
-  , CollectionItem (CollectionItemKey 3) "UIH.Core" "library module" Nothing 1 False False
+  , CollectionItem (CollectionItemKey 3) "HaskeLUI.Core" "library module" Nothing 1 False False
   , CollectionItem (CollectionItemKey 4) "README.md" "documentation" Nothing 0 False False
   , CollectionItem (CollectionItemKey 5) "Lazy folder" "children not loaded" Nothing 0 True False
   ]

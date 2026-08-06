@@ -1,17 +1,17 @@
-name: uih-example-appkit-vertical
+name: haskelui-example-appkit-vertical
 version: 0.1.0.0
-github: aantich/uih
+github: aantich/haskelui
 license: BSD-3-Clause
-author: UIH contributors
-maintainer: UIH contributors
-copyright: 2026 UIH contributors
+author: HaskeLUI contributors
+maintainer: HaskeLUI contributors
+copyright: 2026 HaskeLUI contributors
 
 dependencies:
   - base >= 4.20.2 && < 4.21
   - text
-  - uih-backend-appkit
-  - uih-core
-  - uih-runtime
+  - haskelui-backend-appkit
+  - haskelui-core
+  - haskelui-runtime
 
 library:
   source-dirs: src
@@ -19,11 +19,11 @@ library:
     - Example.AppKitVertical
 
 executables:
-  uih-appkit-vertical:
+  haskelui-appkit-vertical:
     main: Main.hs
     source-dirs: app
     dependencies:
-      - uih-example-appkit-vertical
+      - haskelui-example-appkit-vertical
     ghc-options:
       - -Wall
       - -Wcompat
@@ -37,7 +37,7 @@ tests:
     main: Spec.hs
     source-dirs: test
     dependencies:
-      - uih-example-appkit-vertical
+      - haskelui-example-appkit-vertical
     when:
       - condition: '!os(darwin)'
         buildable: false

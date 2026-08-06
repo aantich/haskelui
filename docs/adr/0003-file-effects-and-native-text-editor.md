@@ -17,7 +17,9 @@ The current vertical runtime adds explicit first-order file effects to `Transact
 - `RequestOpenProjectFolder`
 - `ReadDirectory path`
 - `ReadTextFile path`
+- `ReadOptionalTextFile path`
 - `WriteTextFile effectKey path contents`
+- `WriteTextFileAtomically effectKey path contents`
 
 Their normalized results return as `UIEvent` values. File chooser realization belongs to the shell backend; byte reading, UTF-8 decoding, encoding, and writing belong to the runtime effect interpreter. Views and event handlers remain pure descriptions.
 
@@ -37,7 +39,7 @@ The current file interpreter is deliberately synchronous and UTF-8-only. This pr
 
 ## Syntax-highlighting direction
 
-Highlighting is editor presentation, not attributed document content. A highlighter consumes an immutable text snapshot and returns semantic spans, then a theme resolves them into generic UIH text-style layers. Syntax types stay outside Core; see ADR 0004.
+Highlighting is editor presentation, not attributed document content. A highlighter consumes an immutable text snapshot and returns semantic spans, then a theme resolves them into generic HaskeLUI text-style layers. Syntax types stay outside Core; see ADR 0004.
 
 AppKit applies derived styles as temporary layout attributes without changing characters, authored attributes, selection, marked IME ranges, or undo history. Stale revisions are discarded. Full-document pure highlighting is acceptable for the V2 proof; incremental and asynchronous highlighting are later optimizations behind the same contract.
 
@@ -51,5 +53,10 @@ AppKit applies derived styles as temporary layout attributes without changing ch
 - The explicit effect list is a concrete vertical-slice subset of the eventual typed effect/executor API, not a commitment to a permanently closed algebra.
 - Production document services still need Save As, atomic replacement,
   encoding policy, ignore files, filesystem watching/refresh, external-change
-  handling, app termination negotiation, restoration, and background
-  execution.
+handling, app termination negotiation, restoration, and background
+execution.
+
+Workspace restoration is now implemented for Visual Haskell metadata. The
+versioned `.vihs` format and its failure rules are specified in
+`docs/design/visual-haskell-workspaces.md`; unsaved-buffer crash recovery and
+background execution remain separate work.

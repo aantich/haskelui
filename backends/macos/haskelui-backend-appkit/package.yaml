@@ -1,0 +1,57 @@
+name: haskelui-backend-appkit
+version: 0.1.0.0
+github: aantich/haskelui
+license: BSD-3-Clause
+author: HaskeLUI contributors
+maintainer: HaskeLUI contributors
+copyright: 2026 HaskeLUI contributors
+
+extra-source-files:
+  - cbits/include/HaskeLUIAppKit.h
+  - cbits/compat/HaskeLUIAppKitCompatibility.h
+
+dependencies:
+  - base >= 4.20.2 && < 4.21
+  - bytestring
+  - containers
+  - text
+  - haskelui-core
+  - haskelui-runtime
+
+ghc-options:
+  - -Wall
+  - -Wcompat
+
+library:
+  source-dirs: src
+  exposed-modules:
+    - HaskeLUI.Backend.AppKit
+    - HaskeLUI.Backend.AppKit.Testing
+  other-modules:
+    - HaskeLUI.Backend.AppKit.Internal.Capabilities
+    - HaskeLUI.Backend.AppKit.Internal.FFI
+  when:
+    - condition: os(darwin)
+      c-sources:
+        - cbits/HaskeLUIAppKit.m
+      include-dirs:
+        - cbits/include
+      install-includes:
+        - HaskeLUIAppKit.h
+      frameworks:
+        - AppKit
+        - Foundation
+      cc-options:
+        - -fobjc-arc
+    - condition: '!os(darwin)'
+      buildable: false
+
+tests:
+  haskelui-backend-appkit-test:
+    main: Spec.hs
+    source-dirs: test
+    dependencies:
+      - haskelui-backend-appkit
+    when:
+      - condition: '!os(darwin)'
+        buildable: false

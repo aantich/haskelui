@@ -1,12 +1,12 @@
-# UIH Architecture Proposal
+# HaskeLUI Architecture Proposal
 
 Status: Draft for discussion, architecture revision 15
-Audience: UIH users, contributors, and backend implementers  
+Audience: HaskeLUI users, contributors, and backend implementers
 Scope: Public API, runtime architecture, backend boundaries, and initial delivery plan
 
 ## 1. Executive summary
 
-UIH is a native Haskell application framework for building rich desktop applications. Its public API describes applications in terms of models, scenes, windows, commands, semantic controls, layout, and effects. It does not expose SDL, AppKit, WinUI, HTML, CSS, or a particular renderer.
+HaskeLUI is a native Haskell application framework for building rich desktop applications. Its public API describes applications in terms of models, scenes, windows, commands, semantic controls, layout, and effects. It does not expose SDL, AppKit, WinUI, HTML, CSS, or a particular renderer.
 
 The central architecture is:
 
@@ -15,18 +15,18 @@ Haskell application
     -> semantic scenes, views, and commands
     -> runtime reconciliation
     -> platform shell and control realization
-    -> native controls or UIH retained elements
+    -> native controls or HaskeLUI retained elements
     -> display list
     -> SDL3, Metal, Direct2D/Direct3D, or another renderer
 ```
 
-UIH deliberately separates the application model from rendering:
+HaskeLUI deliberately separates the application model from rendering:
 
 - `App` describes the initial model, scenes, commands, effects, and subscriptions.
 - `Scene` describes windows, document groups, settings, utilities, and other top-level surfaces.
 - `View model` describes semantic controls and layout whose callbacks produce typed actions over `model`.
 - `Action model` is a reified, inspectable transaction language for model properties, element properties, typed events, commands, and effects.
-- `Property model value` wraps a composable lens with UIH identity and policy metadata; applications use a small `get`/`.=`/`modify`/`bind` vocabulary rather than learning the machinery of lenses.
+- `Property model value` wraps a composable lens with HaskeLUI identity and policy metadata; applications use a small `get`/`.=`/`modify`/`bind` vocabulary rather than learning the machinery of lenses.
 - `Binding model control` defines how a control reads, drafts, validates, commits, synchronizes, and groups undo for an authoritative value; its hidden model-value type may differ from the control type.
 - Ordinary bindings are pure. Impure validation is a separate, visibly attached `AsyncValidation control` declaration owned and cancelled by the retained runtime.
 - The runtime reconciles short-lived declarative descriptions with persistent windows and elements.
@@ -34,7 +34,7 @@ UIH deliberately separates the application model from rendering:
 - SDL3 is an important backend, but it is not the foundation of the public API.
 - Scene content is extensible so that future continuously rendered or game-oriented scene drivers can share the application, window, input, and resource runtime without being forced through the UI view language.
 
-The existing `uih-legacy` repository remains a prototype and research reference. The new implementation will not depend on it and will not incrementally refactor its SDL2-shaped runtime.
+The existing `haskelui-legacy` repository remains a prototype and research reference. The new implementation will not depend on it and will not incrementally refactor its SDL2-shaped runtime.
 
 ## 2. Motivation
 
@@ -59,7 +59,7 @@ SDL2 to SDL3 would already require substantial backend work. More importantly, t
 
 ### 3.1 Product goals
 
-UIH should support applications such as:
+HaskeLUI should support applications such as:
 
 - Multiwindow document editors
 - IDE-like applications with tabs, split panes, trees, editors, and tool windows
@@ -103,7 +103,7 @@ The architecture should permit:
 - A portable SDL3 custom-rendered backend
 - A macOS AppKit backend
 - A Windows backend using Windows App SDK/WinUI or a lower-level Win32 bridge
-- Native platform shells combined with UIH custom-rendered content
+- Native platform shells combined with HaskeLUI custom-rendered content
 - Native controls combined with custom-rendered islands under documented constraints
 - Future renderers without changing application code
 - Extensible scene-content drivers with on-demand, continuous, or fixed-step scheduling
@@ -112,11 +112,11 @@ The architecture should permit:
 
 The project uses Stack for the Haskell build, test, benchmark, and executable workflow. The initial compiler baseline is the system-installed GHC 9.10.3 with `base-4.20.2.0`, as reported by the local package database. Stack configuration should select that compiler and use the system installation rather than silently downloading or selecting a different GHC.
 
-Public API experiments must compile on this baseline. In particular, UIH may use `OverloadedLabels`, `OverloadedRecordDot`, `HasField`, generic lens derivation, and ordinary operators, but it must not depend on later GHC behavior or on experimental `OverloadedRecordUpdate`.
+Public API experiments must compile on this baseline. In particular, HaskeLUI may use `OverloadedLabels`, `OverloadedRecordDot`, `HasField`, generic lens derivation, and ordinary operators, but it must not depend on later GHC behavior or on experimental `OverloadedRecordUpdate`.
 
 ## 4. Non-goals
 
-UIH is not intended to be:
+HaskeLUI is not intended to be:
 
 - A browser engine
 - A full implementation of HTML, the DOM, or CSS
@@ -126,7 +126,7 @@ UIH is not intended to be:
 - A framework where every hover, cursor blink, or pointer movement produces an application action
 - A promise that arbitrary custom styling can be applied to native controls
 - A compatibility layer for the legacy public API
-- A complete ECS, physics engine, audio engine, or general game engine in the first UIH release
+- A complete ECS, physics engine, audio engine, or general game engine in the first HaskeLUI release
 
 Platform-specific functionality remains possible through explicit extension modules. It should not leak into portable core types.
 
@@ -170,7 +170,7 @@ Durable domain values use `Property model value`; retained UI-only values use th
 
 ### 5.10 Lenses underneath, properties at the surface
 
-Total model properties use lenses as their construction and composition foundation. UIH does not equate a property with a raw lens: a property also carries stable identity and optional metadata needed by actions, diagnostics, codecs, undo, and tooling. The ordinary application API is deliberately smaller than a general lens library. Users primarily `get`, assign, modify, and bind named properties; experienced users can construct them from any compatible lens.
+Total model properties use lenses as their construction and composition foundation. HaskeLUI does not equate a property with a raw lens: a property also carries stable identity and optional metadata needed by actions, diagnostics, codecs, undo, and tooling. The ordinary application API is deliberately smaller than a general lens library. Users primarily `get`, assign, modify, and bind named properties; experienced users can construct them from any compatible lens.
 
 ## 6. Vocabulary
 
@@ -211,7 +211,7 @@ Total model properties use lenses as their construction and composition foundati
 : A short-lived declarative description of controls and layout inside a scene.
 
 `Element`
-: A persistent runtime realization of a view node. It may own a native peer or be implemented by UIH.
+: A persistent runtime realization of a view node. It may own a native peer or be implemented by HaskeLUI.
 
 `Native peer`
 : An AppKit, WinUI, Win32, or other platform object representing an element.
@@ -251,8 +251,8 @@ flowchart TD
     ViewTree --> Elements["Retained element tree"]
 
     Elements --> Native["Native control peers"]
-    Elements --> Custom["UIH custom elements"]
-    Custom --> Layout["UIH layout"]
+    Elements --> Custom["HaskeLUI custom elements"]
+    Custom --> Layout["HaskeLUI layout"]
     Layout --> DisplayList["Display list"]
     DisplayList --> Graphics["Graphics backend"]
 
@@ -357,7 +357,7 @@ It is not required by ordinary component composition.
 
 ### 8.1 Properties and typed events
 
-The standard model-property implementation is a named lens wrapped in UIH semantics:
+The standard model-property implementation is a named lens wrapped in HaskeLUI semantics:
 
 ```haskell
 data Property model value = Property
@@ -378,7 +378,7 @@ data Event model event = Event
   }
 ```
 
-A raw lens is only a getter/setter focus. The `Property` wrapper additionally gives that focus stable identity and a place for encoding, diagnostics, action metadata, and tooling policy. UIH therefore does not define `Property` as a type synonym for `Lens'`; edit-session policy lives in `Binding` instead.
+A raw lens is only a getter/setter focus. The `Property` wrapper additionally gives that focus stable identity and a place for encoding, diagnostics, action metadata, and tooling policy. HaskeLUI therefore does not define `Property` as a type synonym for `Lens'`; edit-session policy lives in `Binding` instead.
 
 Properties may be created from handwritten, generated, or generically derived lenses. With overloaded field labels, ordinary nested records can be exposed with little ceremony:
 
@@ -465,7 +465,7 @@ rename =
 
 The GHC 9.10.3 property spike validates this syntax with a generic virtual `HasField` instance backed by `generic-lens`. Each segment contributes its generic lens and type-level field name, producing the identity `document.title` without a duplicated string or Template Haskell. Invalid fields produce a focused compile error naming the missing field and its containing type.
 
-The dotted left side is an `OverloadedRecordDot` expression over UIH path values, followed by UIH's ordinary `.=` operator. It is not a nested record update and does not require `OverloadedRecordUpdate` or `RebindableSyntax`. `property "document.title" (#document . #title)` remains the explicit construction and interoperability form.
+The dotted left side is an `OverloadedRecordDot` expression over HaskeLUI path values, followed by HaskeLUI's ordinary `.=` operator. It is not a nested record update and does not require `OverloadedRecordUpdate` or `RebindableSyntax`. `property "document.title" (#document . #title)` remains the explicit construction and interoperability form.
 
 Total `Property` values always focus exactly one model value. A partial focus
 into a collection or sum type uses the implemented, distinct
@@ -523,7 +523,7 @@ editorState =
     }
 ```
 
-Users do not need to understand lens implementation details to use `Property`, but lens interoperability is standard rather than an optional afterthought. The compiled property spike selected a minimal van Laarhoven-compatible representation plus `generic-lens`; whether generic derivation lives in `uih-core` or a standard re-exported adapter remains open.
+Users do not need to understand lens implementation details to use `Property`, but lens interoperability is standard rather than an optional afterthought. The compiled property spike selected a minimal van Laarhoven-compatible representation plus `generic-lens`; whether generic derivation lives in `haskelui-core` or a standard re-exported adapter remains open.
 
 Dynamic keyed children require an analogous component boundary:
 
@@ -541,7 +541,7 @@ scopeAt
 
 ### 8.3 Controlled and uncontrolled state
 
-UIH distinguishes:
+HaskeLUI distinguishes:
 
 - Durable semantic state stored in the application or nested component model
 - Retained element mechanics such as hover, pressed state, pointer capture, caret blinking, and intermediate IME state
@@ -706,7 +706,7 @@ Commands and ordinary control actions are related but distinct:
 - A local callback may assign a model property, assign an element property, emit a typed event, start an effect, or return an opaque named action.
 - A control may invoke a command rather than duplicate its operation.
 
-Backend adapters map command metadata to native equivalents where available. UIH retains semantic ownership even when the platform presents the menu or shortcut.
+Backend adapters map command metadata to native equivalents where available. HaskeLUI retains semantic ownership even when the platform presents the menu or shortcut.
 
 ## 11. Event and focus system
 
@@ -801,7 +801,7 @@ Portable layout concepts include:
 - Aspect ratio
 - Scroll and viewport constraints
 
-The initial layout model may borrow proven flexbox and grid semantics, but UIH will expose typed Haskell values rather than parse CSS strings.
+The initial layout model may borrow proven flexbox and grid semantics, but HaskeLUI will expose typed Haskell values rather than parse CSS strings.
 
 ### 12.4 Custom elements
 
@@ -978,10 +978,10 @@ textField
 
 `asyncValidation` visibly accepts an `IO` runner; it is not a `BindingOption` and cannot make the pure binding implicitly effectful. The retained runtime owns each request and must associate it with the element identity and edit revision, cancel obsolete work where possible, ignore stale results unconditionally, and dispose it with the element.
 
-The production module `UIH.Binding` contains only the pure binding, draft,
+The production module `HaskeLUI.Binding` contains only the pure binding, draft,
 conflict, and transaction-construction surface. The future
-`UIH.Validation.Async` module will contain `AsyncValidation`, its `IO`
-constructor, and runtime policies. An umbrella `UIH` package may re-export both,
+`HaskeLUI.Validation.Async` module will contain `AsyncValidation`, its `IO`
+constructor, and runtime policies. An umbrella `HaskeLUI` package may re-export both,
 but types and call sites continue to expose which layer is impure.
 
 The initial pending-result policies are:
@@ -1027,7 +1027,7 @@ Model properties use `.=`. Element properties use the visibly ownership-specific
 
 ## 13. Appearance, styling, and themes
 
-UIH distinguishes semantic appearance from exact paint.
+HaskeLUI distinguishes semantic appearance from exact paint.
 
 ### 13.1 Semantic appearance
 
@@ -1072,7 +1072,7 @@ transform ...
 blendMode ...
 ```
 
-UIH should not claim that an arbitrary shadow or gradient can be imposed on every native control.
+HaskeLUI should not claim that an arbitrary shadow or gradient can be imposed on every native control.
 
 ### 13.4 Realization preference
 
@@ -1104,7 +1104,7 @@ Environment values flow down the semantic tree:
 - Input modality
 - Backend capabilities
 
-UIH will not initially implement CSS selectors, specificity, or a global cascade. Typed modifiers, reusable styles, and environment/theme values provide the primary composition mechanism.
+HaskeLUI will not initially implement CSS selectors, specificity, or a global cascade. Typed modifiers, reusable styles, and environment/theme values provide the primary composition mechanism.
 
 ## 14. View identity and reconciliation
 
@@ -1168,7 +1168,7 @@ There are two viable layout strategies:
 
 ### 15.1 Framework-managed layout
 
-UIH computes geometry using a common layout engine. Native leaf controls provide intrinsic measurement and are assigned frames by their adapter.
+HaskeLUI computes geometry using a common layout engine. Native leaf controls provide intrinsic measurement and are assigned frames by their adapter.
 
 Advantages:
 
@@ -1183,7 +1183,7 @@ Costs:
 
 ### 15.2 Native-managed layout
 
-The adapter lowers UIH layout concepts to AppKit constraints, WinUI panels, or another native system.
+The adapter lowers HaskeLUI layout concepts to AppKit constraints, WinUI panels, or another native system.
 
 Advantages:
 
@@ -1310,21 +1310,21 @@ Services include:
 
 | Configuration | Shell | Controls | Text | Graphics |
 |---|---|---|---|---|
-| Portable SDL3 | SDL3 | UIH custom | SDL_ttf 3 plus UIH text runtime | SDL3 GPU/renderer |
-| macOS custom | AppKit | UIH custom with selected native islands | CoreText or another shaped-text adapter | Metal or SDL3 GPU |
+| Portable SDL3 | SDL3 | HaskeLUI custom | SDL_ttf 3 plus HaskeLUI text runtime | SDL3 GPU/renderer |
+| macOS custom | AppKit | HaskeLUI custom with selected native islands | CoreText or another shaped-text adapter | Metal or SDL3 GPU |
 | macOS native | AppKit | AppKit controls | Native controls/CoreText | Native/custom surfaces as needed |
-| Windows custom | Windows shell | UIH custom with selected native islands | DirectWrite or another shaped-text adapter | Direct2D/Direct3D or SDL3 GPU |
+| Windows custom | Windows shell | HaskeLUI custom with selected native islands | DirectWrite or another shaped-text adapter | Direct2D/Direct3D or SDL3 GPU |
 | Windows native | Windows App SDK or Win32 | WinUI/Win32 controls | Native controls/DirectWrite | Native/custom surfaces as needed |
 
 Representative semantic mappings:
 
-| UIH concept | macOS | Windows | SDL3 custom |
+| HaskeLUI concept | macOS | Windows | SDL3 custom |
 |---|---|---|---|
 | Window | `NSWindow` | `AppWindow`/`HWND` | `SDL_Window` |
-| Button | `NSButton` | WinUI `Button` | UIH button element |
-| Text field | `NSTextField`/`NSTextView` | `TextBox`/`RichEditBox` | UIH text element and IME bridge |
-| Menu command | `NSMenuItem` and responder chain | command/menu APIs | UIH command router and menu presentation |
-| Scroll view | `NSScrollView` | WinUI `ScrollViewer` | UIH scroll element |
+| Button | `NSButton` | WinUI `Button` | HaskeLUI button element |
+| Text field | `NSTextField`/`NSTextView` | `TextBox`/`RichEditBox` | HaskeLUI text element and IME bridge |
+| Menu command | `NSMenuItem` and responder chain | command/menu APIs | HaskeLUI command router and menu presentation |
+| Scroll view | `NSScrollView` | WinUI `ScrollViewer` | HaskeLUI scroll element |
 | Custom surface | `NSView`/Metal layer | swap-chain/custom drawing host | SDL renderer/GPU surface |
 
 The mappings are semantic, not promises of identical appearance or every platform-specific behavior.
@@ -1342,7 +1342,7 @@ Common restrictions include:
 - Native popups may escape the custom surface hierarchy.
 - Accessibility focus must remain synchronized across both trees.
 
-UIH therefore treats hybrid boundaries explicitly. The backend may group adjacent custom elements into one render surface and host native peers in declared slots. Diagnostics explain when a requested composition cannot be satisfied.
+HaskeLUI therefore treats hybrid boundaries explicitly. The backend may group adjacent custom elements into one render surface and host native peers in declared slots. Diagnostics explain when a requested composition cannot be satisfied.
 
 ## 19. Text input and editing
 
@@ -1430,7 +1430,7 @@ The framework should provide conventions and services without requiring every ap
 
 ### 20.2 Tabs
 
-UIH distinguishes:
+HaskeLUI distinguishes:
 
 - `TabView`: selectable pages inside one view
 - Window tabbing: operating-system grouping of scene instances
@@ -1470,7 +1470,7 @@ index to a changed list.
 
 AppKit system window tabbing may group complete `documentWindow` scenes. An
 in-window `workspaceTabGroup` instead lowers to an AppKit view-controller/native
-view composition, WinUI `TabView`, or a UIH custom realization. CSS-like layout
+view composition, WinUI `TabView`, or a HaskeLUI custom realization. CSS-like layout
 is not responsible for this application-level behavior.
 
 That early sketch is refined as follows:
@@ -1621,7 +1621,7 @@ Every backend should pass shared behavioral tests for:
 The repository is a Stack-managed Cabal multi-package project:
 
 ```text
-uih/
+haskelui/
   stack.yaml
   README.md
   docs/
@@ -1629,15 +1629,15 @@ uih/
       architecture.md
     adr/
   packages/
-    uih-core/
-    uih-runtime/
+    haskelui-core/
+    haskelui-runtime/
   backends/
     README.md
     headless/
-      uih-backend-headless/
+      haskelui-backend-headless/
     macos/
-      uih-backend-appkit/
-        src/UIH/Backend/AppKit/Internal/
+      haskelui-backend-appkit/
+        src/HaskeLUI/Backend/AppKit/Internal/
         cbits/include/
         cbits/compat/
     windows/                    # introduced with its vertical slice
@@ -1651,11 +1651,11 @@ uih/
 
 The initial buildable packages are:
 
-- `uih-core`
-- `uih-runtime`
-- `uih-backend-headless`
-- `uih-backend-appkit`
-- `uih-example-appkit-vertical`
+- `haskelui-core`
+- `haskelui-runtime`
+- `haskelui-backend-headless`
+- `haskelui-backend-appkit`
+- `haskelui-example-appkit-vertical`
 
 Other packages are introduced when their interfaces are ready. Empty package scaffolding should not create false certainty about backend boundaries.
 
@@ -1666,17 +1666,17 @@ An operating-system family normally has one backend package. Version differences
 The core dependency graph should point inward:
 
 ```text
-examples -> public UIH packages
+examples -> public HaskeLUI packages
 backends -> runtime/core/layout/display-list
 runtime -> core
 core -> small, platform-independent dependencies only
 ```
 
-`uih-core` must not depend on SDL, platform FFI packages, GPU APIs, or backend implementations.
+`haskelui-core` must not depend on SDL, platform FFI packages, GPU APIs, or backend implementations.
 
-## 26. Relationship to `uih-legacy`
+## 26. Relationship to `haskelui-legacy`
 
-`uih-legacy` is preserved as a separate sibling repository. The new repository has no build dependency on it.
+`haskelui-legacy` is preserved as a separate sibling repository. The new repository has no build dependency on it.
 
 Legacy code may be consulted for:
 
@@ -1807,7 +1807,7 @@ The first meaningful milestone is complete when:
 - Named lens-backed properties compose across component boundaries without manual action routing.
 - Model and element properties have distinct ownership and types.
 - Typed domain events can be interpreted and replayed when encoded.
-- The runtime performs no backend-specific imports in `uih-core`.
+- The runtime performs no backend-specific imports in `haskelui-core`.
 
 The first SDL3 milestone additionally requires:
 
@@ -1879,7 +1879,7 @@ Mitigation: Keep the manual constructor explicit and testable, but make the chec
 
 ### 29.10 Lens machinery leaks through the surface API
 
-Risk: General optic terminology, operators, type errors, or dependencies make ordinary UIH code intimidating.
+Risk: General optic terminology, operators, type errors, or dependencies make ordinary HaskeLUI code intimidating.
 
 Mitigation: Center documentation and control APIs on `Property`, `get`, `.=`, `modify`, `bind`, and dotted property paths. Keep raw-lens construction and advanced optics in an interoperability layer. The GHC 9.10.3 spike confirms that invalid dotted fields produce focused, useful diagnostics.
 
@@ -1903,7 +1903,7 @@ following questions remain intentionally open.
 
 ### 30.2 Backend and implementation decisions that may follow spikes
 
-11. The Windows baseline: WinUI 3, Win32 plus modern graphics, or a layered combination. This controls deployment, packaging, native-control reach, renderer interoperation, and how much ABI surface UIH must own. The current recommendation is a layered backend: Windows App SDK/WinUI where it supplies durable shell and controls, with Win32 and UIH-rendered islands behind explicit capabilities rather than exposed through Core.
+11. The Windows baseline: WinUI 3, Win32 plus modern graphics, or a layered combination. This controls deployment, packaging, native-control reach, renderer interoperation, and how much ABI surface HaskeLUI must own. The current recommendation is a layered backend: Windows App SDK/WinUI where it supplies durable shell and controls, with Win32 and HaskeLUI-rendered islands behind explicit capabilities rather than exposed through Core.
 12. The granularity at which native and custom elements may be mixed. Arbitrary per-glyph or per-decoration mixing would make focus, clipping, z-order, accessibility, and composition expensive; allowing only whole retained element islands is simpler but less flexible. The current recommendation is whole semantic elements and explicit custom-surface hosts, with no undocumented native-object escape hatch.
 13. The first production text stack for the SDL3 backend. Candidates include HarfBuzz plus FreeType, platform text APIs, or a higher-level shaping abstraction. It must support fallback, BiDi, grapheme navigation, IME geometry, accessibility ranges, and stable cache keys; a Latin-only rasterizer is not an acceptable intermediate public contract.
 14. Whether display-list types live in a separate public package or remain internal. Public types enable third-party renderers and snapshot tooling but create an early compatibility promise; internal types permit iteration but constrain extensions. The current recommendation is an internal package with a deliberately small custom-element façade until two graphical backends validate the representation.
@@ -1922,7 +1922,7 @@ The binding surface itself is no longer open. Two implementation contracts still
 
 The following are accepted unless later superseded by an ADR:
 
-1. UIH starts as a clean repository; `uih-legacy` remains separate.
+1. HaskeLUI starts as a clean repository; `haskelui-legacy` remains separate.
 2. The public core has no SDL dependency.
 3. `App`, `Scene`, and `View` are distinct layers.
 4. The primary interaction API is callback-oriented; callbacks return `Action model`, not arbitrary `IO`.
@@ -1948,19 +1948,19 @@ The following are accepted unless later superseded by an ADR:
 24. Controlled and uncontrolled state are both supported with one authoritative owner per value.
 25. Scene content is extensible beyond UI views so future render/game scene drivers can share the runtime without forcing game worlds through the UI hierarchy.
 26. Total `Property model value` values are backed by composable lenses that focus exactly one value.
-27. `Property` is not a synonym for a raw lens; it also carries UIH identity and metadata for actions and tooling.
+27. `Property` is not a synonym for a raw lens; it also carries HaskeLUI identity and metadata for actions and tooling.
 28. The ordinary property vocabulary is `get`, `.=`, `modify`, `bind`, and property composition; users are not required to learn general lens machinery.
 29. `property`/`fromLens` with an explicit `PropertyId` is the guaranteed baseline constructor, including support for overloaded-label lenses such as `#document . #title`.
-30. Property composition combines both the underlying lens and qualified UIH identity.
+30. Property composition combines both the underlying lens and qualified HaskeLUI identity.
 31. Partial focus uses `OptionalProperty`; reads return `Maybe`, updates return
     `Either PropertyApplyError`, and it does not masquerade as total `.=`.
-32. Stack is the standard project workflow for building, testing, benchmarking, and running UIH.
+32. Stack is the standard project workflow for building, testing, benchmarking, and running HaskeLUI.
 33. The initial compiler baseline is the system GHC 9.10.3 with `base-4.20.2.0`; Stack should use that installation rather than substituting another compiler.
-34. UIH property syntax may use GHC 9.10.3 overloaded labels and record-dot expressions, but the public API does not depend on experimental `OverloadedRecordUpdate`.
-35. UIH's low-level total-property representation is a minimal van Laarhoven-compatible lens core; the full `lens` package is not required by `uih-core`.
+34. HaskeLUI property syntax may use GHC 9.10.3 overloaded labels and record-dot expressions, but the public API does not depend on experimental `OverloadedRecordUpdate`.
+35. HaskeLUI's low-level total-property representation is a minimal van Laarhoven-compatible lens core; the full `lens` package is not required by `haskelui-core`.
 36. `generic-lens` interoperates directly with that representation and supplies checked overloaded-label and record-field lenses.
 37. The preferred generated model-property form is `properties.document.title`; it derives both the lens and qualified identity without Template Haskell. The explicit `property id (#document . #title)` form remains supported.
-38. Model properties use `.=` while model-free element properties use `setElement`; UIH does not overload `.=` across both ownership domains.
+38. Model properties use `.=` while model-free element properties use `setElement`; HaskeLUI does not overload `.=` across both ownership domains.
 39. Total and partial model focus remain separate types. The production
     `OptionalProperty` contract exposes missing or rejected updates explicitly.
 40. Application scenes are desired-state declarations; keyed windows, settings, and state-driven dialogs are top-level resources rather than ordinary view nodes.
@@ -1984,9 +1984,9 @@ The following are accepted unless later superseded by an ADR:
 58. One backend package represents an operating-system family. OS-release variation is isolated through deployment targets, capability detection, availability checks, and small compatibility sources rather than cloned version-specific backends.
 59. The AppKit backend uses a narrow prefixed C ABI implemented in Objective-C with ARC. Public and shared-runtime Haskell types never expose `NSWindow`, `NSView`, selectors, or Objective-C runtime objects.
 60. AppKit owns the process main event loop and all AppKit object access occurs on the main thread. The blocking event-loop FFI call is `safe`; short nonblocking bridge operations use `unsafe` calls.
-61. Native callbacks carry stable UIH identities and normalized payloads. The Objective-C shim schedules shallow callbacks onto the main queue; Haskell actions and reconciliation run after the originating AppKit callback returns.
+61. Native callbacks carry stable HaskeLUI identities and normalized payloads. The Objective-C shim schedules shallow callbacks onto the main queue; Haskell actions and reconciliation run after the originating AppKit callback returns.
 62. Native handles have explicit create/update/destroy ownership. Reconciliation, not garbage-collector finalization, performs ordinary resource release and unregisters callbacks before peer destruction.
-63. UIH exposes distinct `documentWindow` and `workspaceWindow` surfaces on the same scene runtime; traditional document windows and IDE-style shared workspaces are both first-class.
+63. HaskeLUI exposes distinct `documentWindow` and `workspaceWindow` surfaces on the same scene runtime; traditional document windows and IDE-style shared workspaces are both first-class.
 64. System window tabbing is separate from application-managed `workspaceTabGroup` state and lifecycle.
 65. Documents, document views/tabs, tab groups, panes, and windows use distinct typed identities; multiple tabs may present the same document.
 66. Pane trees carry semantic sidebar, content, inspector, and auxiliary roles in addition to generic nesting and sizing constraints.
@@ -2005,7 +2005,7 @@ The following are accepted unless later superseded by an ADR:
 79. Menus, toolbar items, context-menu items, buttons, and shortcuts reuse `CommandId` rather than defining surface-specific action identities.
 80. Dialogs and popovers are keyed desired-state presentations. Native peers are created and dismissed by reconciliation; imperative presentation from arbitrary callbacks is not the public ownership model.
 81. Appearance technologies such as glass, vibrancy, and Mica are backend policy. Media, web, map, ink, platform status items, and other specialized integrations live in focused packages or service layers.
-82. A single backend-independent `uih-control-gallery` application declares every required Core control and acts as the catalog conformance fixture for headless, AppKit, and future Windows backends.
+82. A single backend-independent `haskelui-control-gallery` application declares every required Core control and acts as the catalog conformance fixture for headless, AppKit, and future Windows backends.
 83. The concrete Core catalog IR uses distinct specification types for actions, Boolean values, choices, text input, numeric input, calendar/time values, color, collections, menus, presentations, messages, tabs, and arbitrary-child containers rather than a universal property bag.
 84. Catalog events use normalized typed payloads at the Haskell boundary; platform enum values, selected indexes, native dates, and native colors do not escape the adapter.
 85. `Container` and ordinary `TabView` are recursively keyed controls. Their arbitrary child controls are flattened for reconciliation and explicitly reparented to retained native container/page slots.
@@ -2054,7 +2054,7 @@ The architecture synthesizes ideas rather than cloning one framework:
   <https://react.dev/learn/sharing-state-between-components>  
   <https://react.dev/learn/preserving-and-resetting-state>
 
-- Haskell lenses and optics: composable typed field focus, generic overloaded-label derivation, and a minimal core suitable for wrapping in UIH properties  
+- Haskell lenses and optics: composable typed field focus, generic overloaded-label derivation, and a minimal core suitable for wrapping in HaskeLUI properties
   <https://hackage.haskell.org/package/lens>  
   <https://hackage.haskell.org/package/optics-core/docs/Optics-Label.html>
 
@@ -2066,14 +2066,14 @@ The architecture synthesizes ideas rather than cloning one framework:
   <https://wiki.libsdl.org/SDL3/FrontPage>  
   <https://wiki.libsdl.org/SDL3_ttf/FrontPage>
 
-These references are research inputs. UIH’s public contract is defined by this repository and its accepted ADRs.
+These references are research inputs. HaskeLUI’s public contract is defined by this repository and its accepted ADRs.
 
 ## 33. Next design artifacts
 
 The next artifacts should be created in this order:
 
 1. In progress: the [multiwindow editor public API spike](../../spikes/public-api/README.md) validates future opaque control combinators; the concrete control surface remains available today
-2. Completed and productionized: the [GHC 9.10.3 property API spike](../../spikes/property-api/README.md) led to `UIH.Property`, `UIH.Binding`, Core tests, and the [production design](property-binding-api.md)
+2. Completed and productionized: the [GHC 9.10.3 property API spike](../../spikes/property-api/README.md) led to `HaskeLUI.Property`, `HaskeLUI.Binding`, Core tests, and the [production design](property-binding-api.md)
 3. Accepted and partially implemented: [ADR 0001](../adr/0001-pure-bindings-transactions-and-async-validation.md) fixes the pure binding, transaction envelope, draft synchronization, and async-validation boundary; retained draft sessions, async execution, and the undo runtime remain
 4. An ADR defining property identity, declaration, derivation, and persistence/versioning
 5. An ADR defining semantic view identity and reconciliation

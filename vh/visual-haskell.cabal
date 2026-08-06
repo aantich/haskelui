@@ -1,0 +1,132 @@
+cabal-version: 2.2
+
+-- This file has been generated from package.yaml by hpack version 0.39.6.
+--
+-- see: https://github.com/sol/hpack
+
+name:           visual-haskell
+version:        0.1.0.0
+homepage:       https://github.com/aantich/haskelui#readme
+bug-reports:    https://github.com/aantich/haskelui/issues
+author:         HaskeLUI contributors
+maintainer:     HaskeLUI contributors
+copyright:      2026 HaskeLUI contributors
+license:        BSD-3-Clause
+build-type:     Simple
+
+source-repository head
+  type: git
+  location: https://github.com/aantich/haskelui
+
+library
+  exposed-modules:
+      VisualHaskell
+      VisualHaskell.Highlighting
+      VisualHaskell.WorkspaceState
+  other-modules:
+      Paths_visual_haskell
+  autogen-modules:
+      Paths_visual_haskell
+  hs-source-dirs:
+      src
+  build-depends:
+      aeson
+    , base >=4.20.2 && <4.21
+    , bytestring
+    , containers
+    , filepath
+    , haskelui-core
+    , text
+  default-language: Haskell2010
+
+executable vh
+  main-is: Main.hs
+  other-modules:
+      Paths_visual_haskell
+  autogen-modules:
+      Paths_visual_haskell
+  hs-source-dirs:
+      app
+  ghc-options: -Wall -Wcompat -threaded
+  build-depends:
+      aeson
+    , base >=4.20.2 && <4.21
+    , bytestring
+    , containers
+    , directory
+    , filepath
+    , haskelui-backend-appkit
+    , haskelui-core
+    , haskelui-runtime
+    , text
+    , visual-haskell
+  default-language: Haskell2010
+  if !os(darwin)
+    buildable: False
+
+test-suite vh-model-test
+  type: exitcode-stdio-1.0
+  main-is: ModelSpec.hs
+  other-modules:
+      Paths_visual_haskell
+  autogen-modules:
+      Paths_visual_haskell
+  hs-source-dirs:
+      test/model
+  build-depends:
+      aeson
+    , base >=4.20.2 && <4.21
+    , bytestring
+    , containers
+    , filepath
+    , haskelui-core
+    , text
+    , visual-haskell
+  default-language: Haskell2010
+
+test-suite vh-native-test
+  type: exitcode-stdio-1.0
+  main-is: NativeSpec.hs
+  other-modules:
+      Paths_visual_haskell
+  autogen-modules:
+      Paths_visual_haskell
+  hs-source-dirs:
+      test/native
+  build-depends:
+      aeson
+    , base >=4.20.2 && <4.21
+    , bytestring
+    , containers
+    , directory
+    , filepath
+    , haskelui-backend-appkit
+    , haskelui-core
+    , haskelui-runtime
+    , text
+    , visual-haskell
+  default-language: Haskell2010
+  if !os(darwin)
+    buildable: False
+
+test-suite vh-workspace-persistence-test
+  type: exitcode-stdio-1.0
+  main-is: WorkspaceSpec.hs
+  other-modules:
+      Paths_visual_haskell
+  autogen-modules:
+      Paths_visual_haskell
+  hs-source-dirs:
+      test/workspace
+  build-depends:
+      aeson
+    , base >=4.20.2 && <4.21
+    , bytestring
+    , containers
+    , directory
+    , filepath
+    , haskelui-core
+    , haskelui-runtime
+    , text
+    , visual-haskell
+  default-language: Haskell2010

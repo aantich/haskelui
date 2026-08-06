@@ -4,7 +4,7 @@ module Main (main) where
 
 import Control.Monad (unless)
 import Example.ControlGallery (application, galleryWindowKey, rootTabKey)
-import UIH.Backend.AppKit.Testing
+import HaskeLUI.Backend.AppKit.Testing
   ( AppKitControlGalleryTestSpec (..)
   , AppKitDebugCounters (..)
   , appKitBackendWithControlGalleryTest
@@ -12,8 +12,8 @@ import UIH.Backend.AppKit.Testing
   , queryAppKitDebugCounters
   , queryAppKitLastTestFailure
   )
-import UIH.Core (ElementKey (..))
-import UIH.Runtime (runApp)
+import HaskeLUI.Core (ElementKey (..))
+import HaskeLUI.Runtime (runApp)
 
 main :: IO ()
 main = do

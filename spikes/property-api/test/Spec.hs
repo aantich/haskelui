@@ -6,7 +6,7 @@ module Main (main) where
 
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
-import UIH.Property.Spike
+import HaskeLUI.Property.Spike
 
 main :: IO ()
 main = do

@@ -5,9 +5,9 @@
 module Main (main) where
 
 import Data.Text (Text)
-import UIH.Backend.AppKit (appKitBackend)
-import UIH.Core
-import UIH.Runtime (runApp)
+import HaskeLUI.Backend.AppKit (appKitBackend)
+import HaskeLUI.Core
+import HaskeLUI.Runtime (runApp)
 
 data Model = Model
   { name :: !Text
@@ -29,6 +29,7 @@ application :: App Model
 application =
   App
     { appInitialModel = Model "Haskell" False True
+    , appInitialEffects = []
     , appView = view
     , appHandleEvent = update
     }

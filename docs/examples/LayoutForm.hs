@@ -7,7 +7,7 @@ module LayoutForm
   ) where
 
 import Data.Text (Text)
-import UIH.Core
+import HaskeLUI.Core
 
 data ProfileModel = ProfileModel
   { profileName :: Text

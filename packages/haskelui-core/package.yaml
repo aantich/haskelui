@@ -1,0 +1,28 @@
+name: haskelui-core
+version: 0.1.0.0
+github: aantich/haskelui
+license: BSD-3-Clause
+author: HaskeLUI contributors
+maintainer: HaskeLUI contributors
+copyright: 2026 HaskeLUI contributors
+
+dependencies:
+  - base >= 4.20.2 && < 4.21
+  - containers
+  - generic-lens
+  - text
+
+ghc-options:
+  - -Wall
+  - -Wcompat
+
+library:
+  source-dirs: src
+
+tests:
+  haskelui-core-test:
+    main: Spec.hs
+    source-dirs: test
+    dependencies:
+      - containers
+      - haskelui-core

@@ -10,7 +10,7 @@ import Example.AppKitVertical
   , nameFieldKey
   , saveCommand
   )
-import UIH.Backend.AppKit.Testing
+import HaskeLUI.Backend.AppKit.Testing
   ( AppKitDebugCounters (..)
   , AppKitVerticalTestSpec (..)
   , appKitBackendWithVerticalTest
@@ -18,7 +18,7 @@ import UIH.Backend.AppKit.Testing
   , queryAppKitDebugCounters
   , queryAppKitLastTestFailure
   )
-import UIH.Runtime (runApp)
+import HaskeLUI.Runtime (runApp)
 
 main :: IO ()
 main = do

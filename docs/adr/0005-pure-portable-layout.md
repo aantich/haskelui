@@ -5,14 +5,14 @@ Date: 2026-08-06
 
 ## Context
 
-UIH must arrange the same semantic control tree through AppKit, a future
+HaskeLUI must arrange the same semantic control tree through AppKit, a future
 Windows backend, and custom renderers. Lowering every layout directly to native
 constraints would make behavior diverge across backends, while measuring native
 controls inside the recursive solver would make Core impure and hard to test.
 
 ## Decision
 
-UIH uses the pure `UIH.Layout` constraint solver for portable control geometry.
+HaskeLUI uses the pure `HaskeLUI.Layout` constraint solver for portable control geometry.
 Backends provide cached `IntrinsicMetrics` for native leaves in a separate
 measurement phase and commit the resulting stable-keyed frames. The typed
 built-in vocabulary is box, flow, wrap, grid, overlay, canvas, split, and
