@@ -88,9 +88,12 @@ uploads every open Haskell snapshot, and requests the active document once.
 This bounds interactive backlog to an already-running stale GHC pass plus the
 latest requested revision. The GHC-9.10 worker retains one component-scoped
 `runGhc` session, initializes `hie-bios` and GHC once, and assigns a stable
-target timestamp to each path/revision/hash. Consequently `LoadAllTargets`
-reuses GHC's module graph and parsed/typechecked home modules; only changed
-targets and their invalidated dependents are rebuilt. Debug events report
+target timestamp to each path/revision/hash. `LoadAllTargets` is no longer used
+for ordinary requests: the worker rebuilds the module graph,
+then uses `LoadUpTo` for the requested module. All open unsaved buffers remain
+targets and therefore authoritative dependencies, while unrelated targets and
+reverse dependants are not compiled. GHC still reuses parsed/typechecked home
+modules from the persistent session. Debug events report
 `session=cold|warm` and preserve total analysis timing. Interrupting an
 already-running stale load remains a separate efficiency improvement;
 acceptance identities continue to provide correctness.

@@ -20,6 +20,7 @@ dependencies:
   - visual-haskell-analysis-client
   - visual-haskell-analysis-protocol
   - visual-haskell-semantic-model
+  - visual-haskell-type-diagram
   - visual-haskell-textmate
 
 library:

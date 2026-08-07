@@ -44,6 +44,7 @@ import Data.IORef
   , readIORef
   , writeIORef
   )
+import Data.List (find)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (catMaybes)
@@ -59,6 +60,7 @@ import GHC.Core.DataCon
   , dataConFieldLabels
   , dataConFullSig
   , dataConName
+  , dataConOrigArgTys
   , dataConRepType
   )
 import GHC.Core.TyCon
@@ -79,7 +81,7 @@ import GHC.Core.Type
   , splitAppTy_maybe
   , splitForAllTyCoVar_maybe
   , splitFunTy_maybe
-  , splitTyConApp_maybe
+  , splitTyConAppNoView_maybe
   )
 import GHC.Data.StringBuffer (stringToStringBuffer)
 import GHC.Driver.Monad (pushLogHookM)
@@ -132,8 +134,10 @@ import GHC.Utils.Outputable
 import GHC.Utils.Logger (LogAction, LogFlags (..))
 import GHC.Data.FastString (unpackFS)
 import GHC.Unit.Types
-  ( moduleName
+  ( mkModule
+  , moduleName
   , moduleUnit
+  , toUnitId
   , unitString
   )
 import HIE.Bios.Environment (initSession)
@@ -324,7 +328,12 @@ analyzeInCurrentSession invocation captureReference previousTargets documents re
           (\snapshot -> snapshotTarget (targetTimestamp targetCache snapshot) snapshot)
           (Map.elems documents)
       GHC.setTargets targets
-      loadResult <- GHC.load GHC.LoadAllTargets
+      -- Keep every open buffer in the module graph so dependencies can use
+      -- their unsaved contents, but load only the requested module and its
+      -- dependency closure. Loading every target also recompiles unrelated
+      -- reverse dependants (often the largest application module) whenever a
+      -- small leaf module is inspected.
+      loadResult <- loadRequestedModule requestedSnapshot
       liftIO (writeIORef captureReference Nothing)
       diagnostics <- liftIO (readIORef diagnosticReference)
       (declarations, typeTable) <-
@@ -350,6 +359,31 @@ analyzeInCurrentSession invocation captureReference previousTargets documents re
               }
         , targetCache
         )
+
+loadRequestedModule :: DocumentSnapshot -> GHC.Ghc GHC.SuccessFlag
+loadRequestedModule requestedSnapshot =
+  GHC.handleSourceError
+    (const (pure GHC.Failed))
+    $ do
+      graph <- GHC.depanal [] False
+      case find requestedSummary (GHC.mgModSummaries graph) of
+        Nothing ->
+          -- This should only be reachable for an unusual target that GHC
+          -- cannot associate with a source location. Preserve correctness in
+          -- that case, even though the fallback is intentionally slower.
+          GHC.load GHC.LoadAllTargets
+        Just summary ->
+          let sourceModule = GHC.ms_mod summary
+              homeModule =
+                mkModule
+                  (toUnitId (moduleUnit sourceModule))
+                  (moduleName sourceModule)
+           in GHC.load (GHC.LoadUpTo homeModule)
+  where
+    requestedPath = normalise requestedSnapshot.snapshotPath
+    requestedSummary summary =
+      (normalise <$> GHC.ml_hs_file (GHC.ms_location summary))
+        == Just requestedPath
 
 refreshTargetCache
   :: UTCTime
@@ -543,11 +577,11 @@ semanticTypesForTyCon constructor =
 
 semanticTypesForDataCon :: DataCon -> [Type]
 semanticTypesForDataCon constructor =
-  let (_, existentialVariables, _, constraints, arguments, result) =
+  let (_, existentialVariables, _, constraints, _, result) =
         dataConFullSig constructor
    in fmap varType existentialVariables
         <> constraints
-        <> fmap scaledThing arguments
+        <> fmap scaledThing (dataConOrigArgTys constructor)
         <> [result]
 
 typeDeclarationSemanticsFor
@@ -626,8 +660,13 @@ typeConstructorSemanticsFor snapshot constructor =
     , typeConstructorSemanticRange = sourceRangeFor snapshot (nameSrcSpan (dataConName constructor))
     }
   where
-    (_, existentialVariables, _, constraints, arguments, result) =
+    (_, existentialVariables, _, constraints, _, result) =
       dataConFullSig constructor
+    -- Original arguments retain source-facing synonyms when GHC preserves
+    -- them (notably FilePath) and avoid representation-only argument shapes.
+    -- GHC may still expand a local alias such as TraceSink; the pure diagram
+    -- projection compacts an exact alias RHS back to its declared local node.
+    arguments = dataConOrigArgTys constructor
 
 typeMethodSemanticsFor
   :: DocumentSnapshot
@@ -713,7 +752,7 @@ normalizeType ghcType
       if isInvisibleFunArg flag
         then ConstrainedType <$> (pure <$> recordType argument) <*> recordType result
         else FunctionType <$> recordType argument <*> recordType result
-  | Just (constructor, arguments) <- splitTyConApp_maybe ghcType = do
+  | Just (constructor, arguments) <- splitTyConAppNoView_maybe ghcType = do
       argumentIdentifiers <- traverse recordType arguments
       if constructor == listTyCon
         then case argumentIdentifiers of
@@ -744,7 +783,15 @@ renderType :: Type -> Text
 renderType = Text.pack . showSDocUnsafe . ppr
 
 qualifiedName :: Name -> Text
-qualifiedName = Text.pack . showSDocUnsafe . ppr
+qualifiedName name =
+  case nameModule_maybe name of
+    Nothing -> occurrence
+    Just definingModule ->
+      Text.pack (moduleNameString (moduleName definingModule))
+        <> "."
+        <> occurrence
+  where
+    occurrence = nameText name
 
 sourceRangeFor :: DocumentSnapshot -> SrcSpan -> Maybe RevisionedSourceRange
 sourceRangeFor snapshot (RealSrcSpan realSpan _) =

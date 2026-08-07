@@ -183,10 +183,44 @@ accepted analysis snapshots. Its monospaced, selectable, scrollable text shows:
 - The normalized structured-type table and typed reference, alias,
   constraint, superclass, and recursive-SCC relationship edges
 
-The eventual diagram consumes this same immutable contract; Debug mode is not
-a parallel representation that can drift from it. `TypeUniverse` already
-models ADTs, newtypes, aliases, classes, constructors, record fields, methods,
-origins, and recursive/reference relations. The GHC 9.10 worker projects those
+Rich mode consumes this same immutable contract; Debug mode is not a parallel
+representation that can drift from it. The interactive drawing surface shows
+typed cards and relationships for the selected scope:
+
+- ADTs expose constructors and nested record fields; newtypes, aliases,
+  classes, families, and unresolved declarations retain distinct visual forms.
+- Current-file, workspace, package, built-in, unknown, and external-reference
+  origins use both labeled badges and color accents, so provenance never relies
+  on color alone.
+- Reference, alias, constraint, superclass, and recursive edges have distinct
+  line/label styles. Mutually recursive SCCs receive a visible family hull.
+- Click cards, rows, edges, or recursive families to select them. Drag a card
+  to pin its position, drag empty canvas to pan, and scroll to pan. Command- or
+  Control-scroll zooms around the pointer.
+- Collapse a card with its disclosure control. Double-click a declaration,
+  constructor, field, or method to activate its source tab and exact range.
+- Scene projection, layout, routing, rendering, hit testing, and interaction
+  live in the pure `visual-haskell-type-diagram` package. AppKit only compiles
+  the resulting generic HaskeLUI drawing and input values.
+- The inspector divider has no artificial maximum width. Before the first
+  current snapshot arrives, rich mode shows a native activity indicator and
+  the live GHC status instead of a misleading empty canvas.
+- Exact local alias RHS matches are represented by their declared alias card,
+  so fields written via aliases such as `TraceSink` do not fan out into
+  implementation details such as `Char` and `IO`. Constructor result types do
+  not generate false recursive loops.
+- Function-valued fields remain one structured relationship. Their argument
+  and result endpoints appear as compact cards connected by a bold arrow;
+  long curried chains collapse through an ellipsis whose hover detail shows the
+  full type.
+- Cards size to their contents within configurable bounds. Truncated headers,
+  provenance, and row types expose their complete text in a drawing-surface
+  hover popover. External cards show the defining GHC module when known rather
+  than the generic “external reference” label.
+
+`TypeUniverse` models ADTs, newtypes, aliases, classes, constructors, record
+fields, methods, origins, and recursive/reference relations. The GHC 9.10
+worker projects those
 shapes directly from GHC's typed `TyCon`, `DataCon`, and `Class` values; the
 universe never guesses structure from pretty-printed text. Compiler symbol
 identity uses unit, module, namespace, and occurrence rather than session-local
@@ -206,9 +240,9 @@ Functions Debug mode is presently a preview over the same universe's value
 declaration type usages. A dedicated function-universe contract will replace
 that preview when work begins on the Functions visual surface.
 
-To inspect the live contract, open and trust a Haskell workspace, wait for a
-current GHC result, select **Types**, enable **Debug mode**, and switch between
-the two scopes.
+To inspect it, open and trust a Haskell workspace, wait for a current GHC
+result, select **Types**, and switch between the two scopes. Enable **Debug
+mode** to compare the diagram with its complete textual semantic foundation.
 
 The GHC worker is a sibling executable and the `vh` build target includes it
 automatically. It uses `hie-bios` 0.18 for explicit or implicit project flags,
@@ -220,11 +254,13 @@ ambiguous `stack repl` selection in the self-hosting workspace.
 The worker discovers the active component and initializes one persistent
 `runGhc` session on the first analysis. Later full document snapshots update
 in-memory targets inside that same session with stable per-revision timestamps,
-allowing GHC to reuse its module graph and parsed/typechecked cache. The
-self-hosted verification measured 31–174 ms warm edits after 0.8–2.4 s cold
-loads; the two-module fixture measured 1–80 ms warm edits across successful,
-broken, and recovered revisions. These measurements are diagnostic baselines
-rather than public timing guarantees.
+allowing GHC to reuse its module graph and parsed/typechecked cache. Every open
+buffer remains a target so unsaved dependencies are authoritative, but each
+request loads only the requested module and its dependency closure; unrelated
+open reverse dependants are not compiled. The focused fixture currently
+measures about 1.25 s for a cold load and 4–5 ms for warm broken/recovered
+edits. These measurements are diagnostic baselines rather than public timing
+guarantees.
 
 The current worker supports exactly GHC 9.10.3. `hie-bios`, rather than a VH
 Cabal/Stack parser, remains the authority for the actual cradle, flags, package

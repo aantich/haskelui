@@ -85,6 +85,7 @@ import HaskeLUI.Core hiding (Path)
 import HaskeLUI.Property
 import qualified VisualHaskell.Semantic as Semantic
 import VisualHaskell.TextMate
+import qualified VisualHaskell.TypeDiagram as TypeDiagram
 
 data Document = Document
   { documentKey :: !DocumentKey
@@ -132,6 +133,7 @@ data EditorModel = EditorModel
   , selectedInspectorTab :: !TabKey
   , typesInspectorDebug :: !Bool
   , typesInspectorScope :: !TypeInspectorScope
+  , typeDiagramState :: !TypeDiagram.TypeDiagramState
   , functionsInspectorDebug :: !Bool
   , selectedProblem :: !(Maybe CollectionItemKey)
   , nextNavigationIdentity :: !Word64
@@ -239,6 +241,12 @@ typesInspectorDebugKey, typesInspectorScopeKey, functionsInspectorDebugKey :: El
 typesInspectorDebugKey = ElementKey 222
 typesInspectorScopeKey = ElementKey 223
 functionsInspectorDebugKey = ElementKey 232
+
+typesInspectorDiagramKey, typesInspectorLoadingKey, typesInspectorLoadingLabelKey, typesInspectorLoadingStatusKey :: ElementKey
+typesInspectorDiagramKey = ElementKey 224
+typesInspectorLoadingKey = ElementKey 226
+typesInspectorLoadingLabelKey = ElementKey 227
+typesInspectorLoadingStatusKey = ElementKey 228
 
 currentFileTypeScopeKey, projectTypeScopeKey :: ChoiceKey
 currentFileTypeScopeKey = ChoiceKey 1
@@ -366,6 +374,7 @@ initialModel =
     , selectedInspectorTab = documentInspectorTabKey
     , typesInspectorDebug = False
     , typesInspectorScope = CurrentFileTypeScope
+    , typeDiagramState = TypeDiagram.initialTypeDiagramState
     , functionsInspectorDebug = False
     , selectedProblem = Nothing
     , nextNavigationIdentity = 1
@@ -491,7 +500,7 @@ inspectorPane model =
   WorkspacePaneSpec
     { workspacePaneKey = inspectorPaneKey
     , workspacePaneRole = InspectorPane
-    , workspacePaneSizing = PaneSizing (Just 180) (Just 270) (Just 480) 0
+    , workspacePaneSizing = PaneSizing (Just 220) (Just 360) Nothing 0
     , workspacePaneState = model.inspectorState
     , workspacePaneItem =
         WorkspaceItemSpec
@@ -812,18 +821,65 @@ typesInspectorItems model =
         [ fillInspectorItem 168 16 16 16
             (debugTextControl 225 (typesInspectorDebugText model))
         ]
+      else if typesInspectorAnalysisPending model
+        then
+          [ fixedInspectorItem 18 194
+              (ActivityIndicator typesInspectorLoadingKey (Rect 0 0 24 24) True)
+          , topStretchInspectorItem 192 54 16
+              (Label typesInspectorLoadingLabelKey (Rect 0 0 198 24) "Analyzing types…")
+          , topStretchInspectorItem 224 18 16
+              (Label typesInspectorLoadingStatusKey (Rect 0 0 234 44) model.analysisStatus)
+          ]
       else
-        [ topStretchInspectorItem 168 16 16
-            ( InlineNotice
-                MessageControlSpec
-                  { messageControlKey = ElementKey 224
-                  , messageControlFrame = Rect 0 0 238 104
-                  , messageControlTitle = "Visual inspector"
-                  , messageControlMessage =
-                      "The visual type map will consume the same semantic universe exposed by Debug mode."
-                  }
-            )
+        [ fillInspectorItem 168 12 12 12
+            (typeDiagramControl model)
         ]
+
+-- The rich view never presents an empty canvas while the selected semantic
+-- snapshot is still in flight. Project mode can progressively show accepted
+-- snapshots; it waits only until the first current project snapshot arrives.
+typesInspectorAnalysisPending :: EditorModel -> Bool
+typesInspectorAnalysisPending model =
+  model.analysisWorkspaceTrusted
+    && model.projectRoot /= Nothing
+    && case model.typesInspectorScope of
+      CurrentFileTypeScope ->
+        case selectedDocument model of
+          Just document -> isHaskellDocument document && not (documentAnalysisIsCurrent model document)
+          Nothing -> False
+      ProjectTypeScope ->
+        let haskellDocuments = filter isHaskellDocument (Map.elems model.documents)
+         in not (null haskellDocuments)
+              && not (any (documentAnalysisIsCurrent model) haskellDocuments)
+
+typeDiagramControl :: EditorModel -> Control
+typeDiagramControl model =
+  DrawingSurface
+    DrawingSurfaceSpec
+      { drawingSurfaceKey = typesInspectorDiagramKey
+      , drawingSurfaceFrame = typeDiagramViewport
+      , drawingSurfaceRevision = presentation.diagramPresentationRevision
+      , drawingSurfaceDrawing = presentation.diagramPresentationDrawing
+      , drawingSurfaceIntrinsicMetrics = presentation.diagramPresentationIntrinsicMetrics
+      , drawingSurfaceAccessibleLabel = presentation.diagramPresentationAccessibleLabel
+      , drawingSurfaceInputMode = DrawingInputEnabled
+      , drawingSurfaceHitTest = presentation.diagramPresentationHitTest
+      , drawingSurfaceCursor = presentation.diagramPresentationCursor
+      }
+  where
+    presentation = typeDiagramPresentationFor model
+
+typeDiagramViewport :: Rect
+typeDiagramViewport = Rect 0 0 1600 1800
+
+typeDiagramPresentationFor :: EditorModel -> TypeDiagram.TypeDiagramPresentation
+typeDiagramPresentationFor model =
+  TypeDiagram.renderTypeDiagram
+    TypeDiagram.defaultDiagramMetrics
+    (TypeDiagram.diagramTheme model.systemColorScheme)
+    typeDiagramViewport
+    (TypeDiagram.projectTypeDiagram (typeUniverseFor model) model.typeDiagramState)
+    model.typeDiagramState
 
 functionsInspectorItems :: EditorModel -> [InspectorTabItem]
 functionsInspectorItems model =
@@ -1946,6 +2002,8 @@ handleEventWithoutPersistence event model =
               | choice == currentFileTypeScopeKey -> setTypeInspectorScope CurrentFileTypeScope
               | choice == projectTypeScopeKey -> setTypeInspectorScope ProjectTypeScope
             _ -> noTransaction
+    DrawingInputReceived key input
+      | key == typesInspectorDiagramKey -> handleTypesDiagramInput input model
     CollectionSelectionChanged key [selectedKey]
       | key == projectTreeKey -> selectProjectEntry selectedKey model
       | key == problemsListKey -> selectProblem selectedKey model
@@ -1992,7 +2050,12 @@ handleEventWithoutPersistence event model =
       transactionFromAction
         "Set Types inspector scope"
         NoUndo
-        (editorProperties.typesInspectorScope .= scope)
+        ( batchActions
+            "Set Types inspector scope"
+            [ editorProperties.typesInspectorScope .= scope
+            , modify editorProperties.typeDiagramState TypeDiagram.resetTypeDiagramSelection
+            ]
+        )
 
 markAnalysisPending :: Document -> EditorModel -> Transaction EditorModel -> Transaction EditorModel
 markAnalysisPending document model update
@@ -2583,6 +2646,90 @@ selectProblem selectedKey model =
         , selectedProblem = Just problem.problemKey
         , nextNavigationIdentity = current.nextNavigationIdentity + 1
         }
+
+handleTypesDiagramInput :: DrawingInput -> EditorModel -> Transaction EditorModel
+handleTypesDiagramInput input model =
+  transactionFromAction
+    "Interact with Types diagram"
+    NoUndo
+    ( actionWithProperties
+        "Interact with Types diagram"
+        [ propertyId editorProperties.typeDiagramState
+        , propertyId editorProperties.documents
+        , propertyId editorProperties.selectedTab
+        , propertyId editorProperties.nextNavigationIdentity
+        ]
+        applyUpdate
+    )
+  where
+    universe = typeUniverseFor model
+    update =
+      TypeDiagram.handleTypeDiagramInput
+        TypeDiagram.defaultDiagramMetrics
+        (typeDiagramPresentationFor model)
+        input
+        model.typeDiagramState
+    applyUpdate current =
+      let currentWithDiagram =
+            current {typeDiagramState = update.updatedTypeDiagramState}
+       in maybe
+            currentWithDiagram
+            (revealDiagramPart universe currentWithDiagram)
+            update.activatedDiagramPart
+
+revealDiagramPart
+  :: Semantic.TypeUniverse Semantic.RevisionedSourceRange
+  -> EditorModel
+  -> TypeDiagram.DiagramPart
+  -> EditorModel
+revealDiagramPart universe model part =
+  case TypeDiagram.sourceLocationForPart universe part of
+    Nothing -> model
+    Just (documentId, sourceRange) ->
+      case find ((== documentId) . analysisDocumentId) (Map.elems model.documents) of
+        Nothing -> model
+        Just document ->
+          case semanticTextRange document sourceRange of
+            Nothing -> model
+            Just textRange ->
+              model
+                { documents =
+                    Map.adjust
+                      (\current ->
+                        current
+                          { documentNavigation =
+                              Just
+                                TextNavigationRequest
+                                  { textNavigationKey = TextNavigationKey model.nextNavigationIdentity
+                                  , textNavigationRevision = current.documentRevision
+                                  , textNavigationRange = textRange
+                                  , textNavigationSelect = True
+                                  , textNavigationFocus = True
+                                  }
+                          }
+                      )
+                      document.documentKey
+                      model.documents
+                , selectedTab = Just document.documentTabKey
+                , nextNavigationIdentity = model.nextNavigationIdentity + 1
+                }
+
+semanticTextRange
+  :: Document
+  -> Semantic.RevisionedSourceRange
+  -> Maybe TextRange
+semanticTextRange document sourceRange
+  | sourceRange.sourceRangeRevision /= semanticRevision document.documentRevision = Nothing
+  | otherwise = do
+      let index =
+            Semantic.buildCoordinateIndex
+              (semanticRevision document.documentRevision)
+              document.documentContents
+      start <- either (const Nothing) Just (Semantic.positionToScalarOffset index sourceRange.sourceRangeStart)
+      end <- either (const Nothing) Just (Semantic.positionToScalarOffset index sourceRange.sourceRangeEnd)
+      if start <= end
+        then Just (TextRange start (end - start))
+        else Nothing
 
 setProjectExpansion :: CollectionItemKey -> Bool -> EditorModel -> Transaction EditorModel
 setProjectExpansion itemKey expanded model =

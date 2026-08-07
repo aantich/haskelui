@@ -1,0 +1,38 @@
+name: visual-haskell-type-diagram
+version: 0.1.0.0
+synopsis: Pure interactive type-universe diagrams for Visual Haskell
+description: Projects compiler-independent type semantics into deterministic, backend-neutral HaskeLUI drawings and hit regions.
+category: Development
+github: aantich/haskelui
+license: BSD-3-Clause
+author: Visual Haskell contributors
+maintainer: Visual Haskell contributors
+copyright: 2026 Visual Haskell contributors
+
+dependencies:
+  - base >= 4.20.2 && < 4.21
+  - containers
+  - haskelui-core
+  - text
+  - visual-haskell-semantic-model
+
+ghc-options:
+  - -Wall
+  - -Wcompat
+
+library:
+  source-dirs: src
+  exposed-modules:
+    - VisualHaskell.TypeDiagram
+    - VisualHaskell.TypeDiagram.Interaction
+    - VisualHaskell.TypeDiagram.Layout
+    - VisualHaskell.TypeDiagram.Projection
+    - VisualHaskell.TypeDiagram.Render
+    - VisualHaskell.TypeDiagram.Scene
+
+tests:
+  visual-haskell-type-diagram-test:
+    main: Spec.hs
+    source-dirs: test
+    dependencies:
+      - visual-haskell-type-diagram

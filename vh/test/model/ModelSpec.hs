@@ -152,6 +152,21 @@ main = do
     openFolderRequest.transactionEffects
   assert "editor starts with one workspace window" (length initialView.appWindows == 1)
   assert "empty workspace validates" (all (null . validateWindowWorkspace) initialView.appWindows)
+  assert
+    "the inspector can grow without an artificial maximum extent"
+    ( case
+        [ pane.workspacePaneSizing
+        | window <- initialView.appWindows
+        , workspace <- maybe [] pure (windowWorkspace window)
+        , pane <- paneSpecs workspace.workspaceRoot
+        , pane.workspacePaneRole == InspectorPane
+        ] of
+        [sizing] ->
+          sizing.paneMinimumExtent == Just 220
+            && sizing.panePreferredExtent == Just 360
+            && sizing.paneMaximumExtent == Nothing
+        _ -> False
+    )
   assertEqual
     "the inspector exposes document, problems, types, and functions tabs"
     ["Document", "Problems (0)", "Types", "Functions"]
@@ -170,6 +185,7 @@ main = do
       initialFunctionsControls = inspectorTabControls "Functions" initialView.appWindows
       typesDebugToggle = onlyToggle "Types debug toggle" initialTypesControls
       typesScopeChoice = onlyChoice "Types scope selector" initialTypesControls
+      typesDiagram = onlyDrawingSurface "Types visual diagram" initialTypesControls
       functionsDebugToggle = onlyToggle "Functions debug toggle" initialFunctionsControls
   assertEqual "Types inspector starts in rich mode" ToggleOff typesDebugToggle.toggleControlValue
   assertEqual
@@ -177,6 +193,36 @@ main = do
     (Just (ChoiceKey 1))
     typesScopeChoice.choiceControlSelected
   assertEqual "Functions inspector owns an independent debug mode" ToggleOff functionsDebugToggle.toggleControlValue
+  assertEqual "Types visual diagram starts interactive" DrawingInputEnabled typesDiagram.drawingSurfaceInputMode
+  assertEqual "Types visual diagram drawing validates" [] (validateDrawing typesDiagram.drawingSurfaceDrawing)
+  assertEqual "Types visual diagram hit map validates" [] (validateDrawingHitTest typesDiagram.drawingSurfaceHitTest)
+  assert
+    "Types visual diagram exposes an honest empty semantic summary"
+    ("0 types and 0 relationships" `Text.isInfixOf` typesDiagram.drawingSurfaceAccessibleLabel)
+
+  let diagramPanUpdate =
+        application.appHandleEvent
+          ( DrawingInputReceived
+              typesDiagram.drawingSurfaceKey
+              ( DrawingScrollInput
+                  DrawingScrollEvent
+                    { drawingScrollPosition = Point 100 100
+                    , drawingScrollDelta = Point 12 8
+                    , drawingScrollIsPrecise = True
+                    , drawingScrollModifiers = noDrawingModifiers
+                    , drawingScrollTarget = Nothing
+                    }
+              )
+          )
+          initial
+      diagramPannedModel = applyTransaction diagramPanUpdate initial
+      pannedDiagram =
+        onlyDrawingSurface
+          "panned Types visual diagram"
+          (inspectorTabControls "Types" (application.appView diagramPannedModel).appWindows)
+  assert
+    "Types visual diagram input advances retained presentation state"
+    (pannedDiagram.drawingSurfaceRevision /= typesDiagram.drawingSurfaceRevision)
 
   let typesDebugUpdate =
         application.appHandleEvent
@@ -708,6 +754,8 @@ main = do
           (TextChanged firstDocumentEditorKey "module Main where\nvalue = 2\n")
           compilerOpened
       compilerEdited = applyTransaction compilerEditUpdate compilerOpened
+      compilerTypesControls =
+        inspectorTabControls "Types" (compilerApplication.appView compilerOpened).appWindows
   assertEqual
     "opening an active Haskell document schedules one debounced compiler request"
     [TaskKey "visual-haskell.analysis.edit-debounce"]
@@ -716,6 +764,13 @@ main = do
     "editing replaces the same document-analysis debounce task"
     [TaskKey "visual-haskell.analysis.edit-debounce"]
     (taskKeys compilerEditUpdate.transactionCommands)
+  assert
+    "the rich Types inspector shows native progress while its semantic snapshot is pending"
+    ( any
+        (\case ActivityIndicator _ _ active -> active; _ -> False)
+        compilerTypesControls
+        && not (any (\case DrawingSurface {} -> True; _ -> False) compilerTypesControls)
+    )
   debouncedRequest <- runOnlyTask compilerEditUpdate.transactionCommands compilerEdited
   assertEqual
     "the completed debounce sends the latest snapshot and one analysis request"
@@ -823,6 +878,12 @@ onlyRichText label controls =
   case [spec | RichText spec <- controls] of
     [spec] -> spec
     matches -> error (label <> ": expected one rich text control, got " <> show (length matches))
+
+onlyDrawingSurface :: String -> [Control] -> DrawingSurfaceSpec
+onlyDrawingSurface label controls =
+  case [spec | DrawingSurface spec <- controls] of
+    [spec] -> spec
+    matches -> error (label <> ": expected one drawing surface, got " <> show (length matches))
 
 sidebarAndInspectorStates :: [WindowSpec] -> [PaneState]
 sidebarAndInspectorStates windows =

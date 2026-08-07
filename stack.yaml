@@ -10,6 +10,7 @@ packages:
   - examples/drawing-primitives
   - vh
   - vh/packages/semantic-model
+  - vh/packages/type-diagram
   - vh/packages/analysis-protocol
   - vh/packages/analysis-client
   - vh/packages/textmate

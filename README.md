@@ -85,6 +85,7 @@ tests/macos/validate-deployment-target.sh 13.0
 - [Architecture proposal](docs/design/architecture.md)
 - [HaskeLUI services, tasks, and external events](docs/design/services-tasks-external-events.md)
 - [Visual Haskell long-term vision](docs/design/visual-haskell-vision.md)
+- [Visual Haskell interactive Type Universe](docs/design/visual-haskell-type-diagram.md)
 - [Visual Haskell analysis spine](docs/design/visual-haskell-analysis-spine.md)
 - [Portable Core control catalog](docs/design/core-control-catalog.md)
 - [Document/workspace window surface API](docs/design/window-workspace-surface-api.md)

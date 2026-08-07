@@ -2013,11 +2013,18 @@ application framework. Plan around these current boundaries:
   deliberately remain VH-owned rather than HaskeLUI APIs. Current compiler
   analysis sends authoritative full snapshots, debounces interactive requests,
   checks the active document, and reuses one persistent component-scoped GHC
-  session with stable target versions. GHC incrementally reloads the changed
-  module and invalidated dependents instead of recreating its session for every
-  edit. Current-revision compiler diagnostics, colored
+  session with stable target versions. Every open buffer remains an in-memory
+  target, while each request loads only the selected module and its dependency
+  closure; unrelated open reverse dependants are not compiled. GHC
+  incrementally reloads the changed module and invalidated dependencies instead
+  of recreating its session for every edit. Current-revision compiler diagnostics, colored
   underline layers, the Problems inspector, and keyed source navigation are
-  implemented. In-progress cancellation, custom invalidation beyond GHC's own
+  implemented. The Types drawing uses bounded content-sized cards, dedicated
+  separator padding, hover overflow details, defining-module labels for
+  external constructors, and composite function nodes whose endpoint cards are
+  joined by directional arrows. External source-file navigation remains an
+  indexing concern: VH navigates only when it owns a revision-bound entity
+  range and never guesses a package path. In-progress cancellation, custom invalidation beyond GHC's own
   module graph, declaration outline,
   hover/definition queries, and component-selection UI are the next product
   layers. The current worker accepts exactly GHC 9.10.3; a different
@@ -2068,6 +2075,7 @@ Then consult the focused design documents:
 - [Architecture](design/architecture.md)
 - [HaskeLUI services, tasks, and external events](design/services-tasks-external-events.md)
 - [Visual Haskell long-term vision](design/visual-haskell-vision.md)
+- [Visual Haskell interactive Type Universe](design/visual-haskell-type-diagram.md)
 - [Property and binding API](design/property-binding-api.md)
 - [Core control catalog](design/core-control-catalog.md)
 - [Portable layout system](design/layout-system.md)

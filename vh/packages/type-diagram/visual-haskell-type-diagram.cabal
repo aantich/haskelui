@@ -1,0 +1,64 @@
+cabal-version: 2.2
+
+-- This file has been generated from package.yaml by hpack version 0.39.6.
+--
+-- see: https://github.com/sol/hpack
+
+name:           visual-haskell-type-diagram
+version:        0.1.0.0
+synopsis:       Pure interactive type-universe diagrams for Visual Haskell
+description:    Projects compiler-independent type semantics into deterministic, backend-neutral HaskeLUI drawings and hit regions.
+category:       Development
+homepage:       https://github.com/aantich/haskelui#readme
+bug-reports:    https://github.com/aantich/haskelui/issues
+author:         Visual Haskell contributors
+maintainer:     Visual Haskell contributors
+copyright:      2026 Visual Haskell contributors
+license:        BSD-3-Clause
+build-type:     Simple
+
+source-repository head
+  type: git
+  location: https://github.com/aantich/haskelui
+
+library
+  exposed-modules:
+      VisualHaskell.TypeDiagram
+      VisualHaskell.TypeDiagram.Interaction
+      VisualHaskell.TypeDiagram.Layout
+      VisualHaskell.TypeDiagram.Projection
+      VisualHaskell.TypeDiagram.Render
+      VisualHaskell.TypeDiagram.Scene
+  other-modules:
+      Paths_visual_haskell_type_diagram
+  autogen-modules:
+      Paths_visual_haskell_type_diagram
+  hs-source-dirs:
+      src
+  ghc-options: -Wall -Wcompat
+  build-depends:
+      base >=4.20.2 && <4.21
+    , containers
+    , haskelui-core
+    , text
+    , visual-haskell-semantic-model
+  default-language: Haskell2010
+
+test-suite visual-haskell-type-diagram-test
+  type: exitcode-stdio-1.0
+  main-is: Spec.hs
+  other-modules:
+      Paths_visual_haskell_type_diagram
+  autogen-modules:
+      Paths_visual_haskell_type_diagram
+  hs-source-dirs:
+      test
+  ghc-options: -Wall -Wcompat
+  build-depends:
+      base >=4.20.2 && <4.21
+    , containers
+    , haskelui-core
+    , text
+    , visual-haskell-semantic-model
+    , visual-haskell-type-diagram
+  default-language: Haskell2010

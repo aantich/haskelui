@@ -99,6 +99,7 @@ main = do
   assert "hie-bios selected GHC 9.10.3" (invocation.invocationCompilerVersion == "9.10.3")
   let aPath = fixture </> "A.hs"
       bPath = fixture </> "B.hs"
+      unrelatedPath = fixture </> "Unrelated.hs"
       aSource = Text.unlines
         [ "module A where"
         , "import B (value)"
@@ -107,6 +108,8 @@ main = do
         , "type Forest a = [Tree a]"
         , "class Eq a => Renderable a where"
         , "  renderValue :: a -> String"
+        , "type TraceSink = String -> IO ()"
+        , "data DebugLogger = DebugLogger { debugLogPath :: FilePath, debugTraceSink :: TraceSink }"
         , "message :: String"
         , "message = value"
         ]
@@ -117,7 +120,18 @@ main = do
         ]
       aSnapshot = snapshot (DocumentId "A") aPath (TextRevision 1) aSource
       bSnapshot = snapshot (DocumentId "B") bPath (TextRevision 1) bSource
-      documents = Map.fromList [(DocumentId "A", aSnapshot), (DocumentId "B", bSnapshot)]
+      unrelatedSnapshot =
+        snapshot
+          (DocumentId "Unrelated")
+          unrelatedPath
+          (TextRevision 1)
+          "module Unrelated where\nunrelated = missingIdentifier\n"
+      documents =
+        Map.fromList
+          [ (DocumentId "A", aSnapshot)
+          , (DocumentId "B", bSnapshot)
+          , (DocumentId "Unrelated", unrelatedSnapshot)
+          ]
   let brokenSource = Text.unlines
         [ "module B (value) where"
         , "value :: String"
@@ -135,6 +149,7 @@ main = do
         timed (analyzeWithEngine engine documents (DocumentId "A") (WorkspaceGeneration 3))
       analyzed <- either (fail . show) pure successful
       assert "two dependent unsaved modules typecheck" (analyzed.analysisCompleteness == Typechecked)
+      assert "analyzing one target does not load an unrelated broken open module" (null analyzed.analysisDiagnostics)
       assert "GHC returns the requested top-level declaration" (any ((== "message") . declarationName) analyzed.analysisDeclarations)
       assert "GHC types normalize into the stable type table" (not (Map.null analyzed.analysisTypes))
       assert "successful unsaved analysis has no errors" (null analyzed.analysisDiagnostics)
@@ -148,6 +163,7 @@ main = do
           userIdSemantics = semanticsNamed "UserId"
           forestSemantics = semanticsNamed "Forest"
           renderableSemantics = semanticsNamed "Renderable"
+          debugLoggerSemantics = semanticsNamed "DebugLogger"
           universe =
             buildTypeUniverse
               (CurrentDocumentTypes aSnapshot.snapshotDocumentId)
@@ -174,6 +190,20 @@ main = do
             not (null constraints)
               && fmap (.typeMethodSemanticName) methods == ["renderValue"]
           _ -> False
+      let debugLoggerFieldTypes =
+            case debugLoggerSemantics of
+              [TypeDeclarationSemantics _ [] (AlgebraicTypeSemantics [constructor])] ->
+                [ Map.lookup field.typeFieldSemanticType analyzed.analysisTypes
+                | field <- constructor.typeConstructorSemanticFields
+                ]
+              _ -> []
+      unless
+        ( case debugLoggerFieldTypes of
+            [Just (TypeConstructor filePathName), Just (FunctionType _ _)] ->
+              ".FilePath" `Text.isSuffixOf` filePathName || filePathName == "FilePath"
+            _ -> False
+        )
+        (fail ("record fields preserve GHC-retained aliases and structured function shape: " <> show debugLoggerFieldTypes))
       assert "the Type Universe derives recursive type relationships" $
         any ((== RecursiveTypeReference) . (.typeRelationKind)) universe.typeUniverseRelations
       assert "the inspector debug projection exposes rich declaration semantics" $

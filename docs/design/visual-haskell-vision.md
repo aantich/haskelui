@@ -1,6 +1,6 @@
 # Visual Haskell long-term product and analysis vision
 
-Status: active roadmap; Phase 0, Phase 1A, Phase 1B, and Phase 2A are implemented
+Status: active roadmap; compiler foundation and the first interactive Types semantic surface are implemented
 
 Date: 2026-08-07
 
@@ -154,6 +154,7 @@ vh/
   packages/
     analysis-protocol/              Versioned wire DTOs
     semantic-model/                 Stable product semantic types
+    type-diagram/                   Pure type graph projection and presentation
     analysis-client/                Supervision, transport, routing
     project-files/                  Cabal, Stack, and Hpack adapters
 
@@ -172,6 +173,7 @@ Suggested package identities are:
 visual-haskell
 visual-haskell-analysis-protocol
 visual-haskell-semantic-model
+visual-haskell-type-diagram
 visual-haskell-analysis-client
 visual-haskell-project-files
 visual-haskell-analysis-ghc910
@@ -196,8 +198,9 @@ The first compiler-independent slice now exists:
 - `visual-haskell-analysis-fake-worker` exercises the real process and wire
   boundary without introducing compiler dependencies.
 - `visual-haskell-analysis-ghc910` owns `hie-bios` project discovery and the
-  isolated GHC-9.10.3 compatibility layer. It analyzes all open buffers through
-  in-memory targets and returns stable diagnostics, declarations, and types.
+  isolated GHC-9.10.3 compatibility layer. All open buffers are authoritative
+  in-memory targets, while each request loads only its module and dependency
+  closure before returning stable diagnostics, declarations, and types.
 - `VisualHaskell.Analysis.Service` adapts the supervised client to HaskeLUI's
   typed service runtime. The product model stores component/session identity
   and accepts only exact worker/workspace/session/document/revision/hash
@@ -210,6 +213,45 @@ loads this repository's real Stack component, typechecks dependent unsaved
 modules, captures revision-bound diagnostics, and recovers from a forced real
 worker crash. The production Visual Haskell runtime displays accepted compiler
 status without linking GHC into the UI process.
+
+### 5.2 Implemented Types semantic surface
+
+`visual-haskell-type-diagram` consumes only the compiler-independent
+`TypeUniverse` and generic HaskeLUI drawing/input values. Its architecture is a
+pure pipeline:
+
+```mermaid
+flowchart LR
+    U["Accepted TypeUniverse"] --> P["Semantic projection"]
+    P --> S["Typed scene graph"]
+    S --> L["SCC-aware deterministic layout"]
+    L --> R["Drawing + semantic hit tree"]
+    R --> B["Native backend"]
+    B --> I["DrawingInput"]
+    I --> X["Pure interaction reducer"]
+    X --> L
+    X --> N["Revision-checked source navigation"]
+```
+
+The scene preserves entity, constructor, field, method, edge, and recursive
+family identities. Layout condenses recursive components, assigns dependency
+ranks, routes curves from precise semantic rows, supports explicit pinned
+positions, and derives every measurement from configurable `DiagramMetrics`.
+Rendering produces one retained `Drawing` and a matching transformed/clipped
+`DrawingHitTest`. The product model owns viewport, selection, hover, collapsed
+cards, pinned cards, and drag state; no mutable graph state lives in AppKit.
+
+The surface supports light/dark themes, ADT/newtype/alias/class/family cards,
+compact external reference stubs, origin badges, typed relationship styles,
+recursive family hulls, selection, hover, collapse, card dragging, canvas pan,
+pointer-centered zoom, and double-click navigation. The textual Debug mode
+remains the accessible, exhaustive semantic fallback while the generic drawing
+API has only a flat surface accessibility label; a future semantic drawing
+accessibility tree must be designed in HaskeLUI Core.
+
+The detailed public types, invariants, interactions, and verification contract
+are documented in
+[Visual Haskell interactive Type Universe](visual-haskell-type-diagram.md).
 
 ## 6. Protocol design
 
@@ -523,7 +565,8 @@ runGhc (Just libDir) $ do
   forever $ do
     request <- receiveTypedAnalysisRequest
     setTargets (targetsWithStableRevisionTimestamps request.snapshots)
-    load LoadAllTargets
+    graph <- depanal
+    load (LoadUpTo (requestedHomeModule graph request.document))
     -- Convert module information immediately into stable VH values.
 ```
 
@@ -570,8 +613,10 @@ GHC session mutation is serialized per session. Requests may execute
 concurrently across independent worker sessions only after profiling and
 thread-safety validation.
 
-V1 may ask GHC to reload the active component after a changed snapshot. Before
-building a custom fine-grained cache, measure:
+V1 keeps every open snapshot in GHC's target graph but loads only the requested
+module and its dependency closure. This preserves unsaved imports without
+recompiling unrelated open targets or reverse dependants. Before building a
+custom fine-grained cache, continue to measure:
 
 - Time to diagnostics for the visible module
 - Reuse provided by the live GHC session
