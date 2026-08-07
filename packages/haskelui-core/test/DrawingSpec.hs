@@ -44,6 +44,9 @@ runDrawingTests = do
             , drawingSurfaceDrawing = drawing
             , drawingSurfaceIntrinsicMetrics = metrics
             , drawingSurfaceAccessibleLabel = "drawing test"
+            , drawingSurfaceInputMode = DrawingInputDisabled
+            , drawingSurfaceHitTest = NoDrawingHitTest
+            , drawingSurfaceCursor = DefaultCursor
             }
   assert "valid drawing" (null (validateDrawing drawing))
   assert "all drawing commands compile" $
@@ -63,6 +66,33 @@ runDrawingTests = do
     not (null (validateDrawing (Stroke defaultStrokeStyle red (PathGeometry (Path [LineTo (Point 1 1)])))))
   assert "non-finite and out-of-range values are rejected" $
     not (null (validateDrawing (Opacity 1.5 (Fill NonZero (Solid (RGBA (0 / 0) 0 0 1)) (Rectangle (Rect 0 0 (-1) 2))))))
+  let lower = DrawingHitRegion (DrawingHitRegionKey 1) DefaultCursor (HitFill NonZero (Rectangle (Rect 0 0 100 100)))
+      upper = DrawingHitRegion (DrawingHitRegionKey 2) PointingHandCursor (HitFill NonZero (Ellipse (Rect 25 25 50 50)))
+      hitScene =
+        DrawingHitClip
+          NonZero
+          (Rectangle (Rect 0 0 80 80))
+          (DrawingHitTransform (translation 10 20) (DrawingHitGroup [lower, upper]))
+  assert "hit testing selects the topmost transformed region" $
+    hitTestDrawing (Point 60 70) hitScene
+      == Just (DrawingHitResult (DrawingHitRegionKey 2) PointingHandCursor)
+  assert "hit testing respects nested clipping" $
+    hitTestDrawing (Point 95 70) hitScene == Nothing
+  assert "stroke hit regions accept points close to paths" $
+    hitTestDrawing
+      (Point 50 4)
+      ( DrawingHitRegion
+          (DrawingHitRegionKey 3)
+          CrosshairCursor
+          (HitStroke (defaultStrokeStyle {strokeWidth = 10}) (PathGeometry (Path [MoveTo (Point 0 0), LineTo (Point 100 0)])))
+      )
+      == Just (DrawingHitResult (DrawingHitRegionKey 3) CrosshairCursor)
+  assert "invalid hit-test geometry is rejected" $
+    not . null . validateDrawingHitTest $
+      DrawingHitRegion
+        (DrawingHitRegionKey 4)
+        DefaultCursor
+        (HitFill NonZero (Rectangle (Rect 0 0 (-1) 2)))
   putStrLn "haskelui-drawing: display-list compilation, validation, and Core surface integration passed"
 
 isFill, isStroke, isClip, isTransform, isOpacity, isText :: DrawingCommand -> Bool

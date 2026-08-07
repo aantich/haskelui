@@ -8,7 +8,8 @@
 #import <sys/file.h>
 #import <unistd.h>
 
-_Static_assert(sizeof(HaskeLUIMacTextStyle) == 120, "HaskeLUIMacTextStyle ABI must match its Haskell Storable instance");
+_Static_assert(sizeof(HaskeLUIMacTextStyle) == 152, "HaskeLUIMacTextStyle ABI must match its Haskell Storable instance");
+_Static_assert(sizeof(HaskeLUIMacDrawingInput) == 64, "HaskeLUIMacDrawingInput ABI must match its Haskell Storable instance");
 
 typedef NS_ENUM(NSInteger, HaskeLUIMacControlKind) {
   HaskeLUIMacControlKindLabel,
@@ -26,12 +27,15 @@ typedef NS_ENUM(NSInteger, HaskeLUIMacControlKind) {
 @class HaskeLUIMacSplitViewDelegate;
 
 static void HaskeLUIEmit(int32_t kind, uint64_t identity, NSString *text);
+static void HaskeLUIEmitDrawingInput(uint64_t identity, HaskeLUIMacDrawingInput input);
 static NSString *HaskeLUISystemColorScheme(void);
 static void *HaskeLUIEffectiveAppearanceContext = &HaskeLUIEffectiveAppearanceContext;
 
 @interface HaskeLUIMacApplicationState : NSObject
 @property(nonatomic, assign) HaskeLUIMacEventCallback callback;
 @property(nonatomic, assign) void *callbackContext;
+@property(nonatomic, assign) HaskeLUIMacDrawingInputCallback drawingInputCallback;
+@property(nonatomic, assign) void *drawingInputCallbackContext;
 @property(nonatomic, strong) NSMenu *fileMenu;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSMenuItem *> *commandItems;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, id> *commandTargets;
@@ -108,6 +112,20 @@ static void HaskeLUIEmit(int32_t kind, uint64_t identity, NSString *text) {
   });
 }
 
+static void HaskeLUIEmitDrawingInput(uint64_t identity, HaskeLUIMacDrawingInput input) {
+  __sync_add_and_fetch(&HaskeLUIQueuedCallbacks, 1);
+  dispatch_async(dispatch_get_main_queue(), ^{
+    HaskeLUIMacApplicationState *state = HaskeLUIState;
+    if (state != nil && state.drawingInputCallback != NULL) {
+      state.drawingInputCallback(
+          state.drawingInputCallbackContext,
+          identity,
+          &input);
+    }
+    __sync_sub_and_fetch(&HaskeLUIQueuedCallbacks, 1);
+  });
+}
+
 static NSString *HaskeLUISystemColorScheme(void) {
   NSAppearanceName match =
       [NSApplication.sharedApplication.effectiveAppearance
@@ -141,6 +159,11 @@ typedef NS_ENUM(NSInteger, HaskeLUIDrawingCommandKind) {
 };
 
 @interface HaskeLUIDrawingView : NSView
+@property(nonatomic, assign) uint64_t identity;
+@property(nonatomic, assign) BOOL drawingInputEnabled;
+@property(nonatomic, assign) NSInteger drawingCursor;
+@property(nonatomic, assign) uint64_t drawingPresentationGeneration;
+@property(nonatomic, strong) NSTrackingArea *drawingTrackingArea;
 @property(nonatomic, copy) NSArray<NSDictionary *> *drawingCommands;
 @property(nonatomic, strong) NSMutableArray<NSDictionary *> *pendingCommands;
 @property(nonatomic, strong) NSBezierPath *pendingPath;
@@ -153,6 +176,163 @@ typedef NS_ENUM(NSInteger, HaskeLUIDrawingCommandKind) {
 
 - (BOOL)isOpaque {
   return NO;
+}
+
+- (BOOL)acceptsFirstResponder {
+  return self.drawingInputEnabled;
+}
+
+- (BOOL)acceptsFirstMouse:(NSEvent *)event {
+  (void)event;
+  return self.drawingInputEnabled;
+}
+
+- (void)updateTrackingAreas {
+  [super updateTrackingAreas];
+  if (self.drawingTrackingArea != nil) {
+    [self removeTrackingArea:self.drawingTrackingArea];
+    self.drawingTrackingArea = nil;
+  }
+  if (self.drawingInputEnabled) {
+    self.drawingTrackingArea =
+        [[NSTrackingArea alloc]
+            initWithRect:NSZeroRect
+                 options:NSTrackingMouseEnteredAndExited |
+                         NSTrackingMouseMoved |
+                         NSTrackingActiveInKeyWindow |
+                         NSTrackingInVisibleRect
+                   owner:self
+                userInfo:nil];
+    [self addTrackingArea:self.drawingTrackingArea];
+  }
+}
+
+- (void)resetCursorRects {
+  [super resetCursorRects];
+  if (!self.drawingInputEnabled) {
+    return;
+  }
+  NSCursor *cursor = NSCursor.arrowCursor;
+  switch (self.drawingCursor) {
+    case 1: cursor = NSCursor.pointingHandCursor; break;
+    case 2: cursor = NSCursor.crosshairCursor; break;
+    case 3: cursor = NSCursor.openHandCursor; break;
+    case 4: cursor = NSCursor.closedHandCursor; break;
+    case 5: cursor = NSCursor.IBeamCursor; break;
+    case 6: cursor = NSCursor.resizeLeftRightCursor; break;
+    case 7: cursor = NSCursor.resizeUpDownCursor; break;
+    default: break;
+  }
+  [self addCursorRect:self.bounds cursor:cursor];
+}
+
+- (uint32_t)portableButtons {
+  NSUInteger pressed = NSEvent.pressedMouseButtons;
+  uint32_t result = 0;
+  if ((pressed & (1u << 0)) != 0) result |= 1u << 0;
+  if ((pressed & (1u << 1)) != 0) result |= 1u << 1;
+  if ((pressed & (1u << 2)) != 0) result |= 1u << 2;
+  if ((pressed & (1u << 3)) != 0) result |= 1u << 3;
+  if ((pressed & (1u << 4)) != 0) result |= 1u << 4;
+  return result;
+}
+
+- (uint32_t)portableButtonsForEvent:(NSEvent *)event {
+  uint32_t buttons = [self portableButtons];
+  switch (event.type) {
+    case NSEventTypeLeftMouseDown:
+    case NSEventTypeLeftMouseDragged: buttons |= 1u << 0; break;
+    case NSEventTypeRightMouseDown:
+    case NSEventTypeRightMouseDragged: buttons |= 1u << 1; break;
+    case NSEventTypeOtherMouseDown:
+    case NSEventTypeOtherMouseDragged:
+      if (event.buttonNumber >= 2 && event.buttonNumber <= 4) {
+        buttons |= 1u << event.buttonNumber;
+      }
+      break;
+    case NSEventTypeLeftMouseUp: buttons &= ~(1u << 0); break;
+    case NSEventTypeRightMouseUp: buttons &= ~(1u << 1); break;
+    case NSEventTypeOtherMouseUp:
+      if (event.buttonNumber >= 2 && event.buttonNumber <= 4) {
+        buttons &= ~(1u << event.buttonNumber);
+      }
+      break;
+    default: break;
+  }
+  return buttons;
+}
+
+- (uint32_t)portableModifiers:(NSEventModifierFlags)flags {
+  uint32_t result = 0;
+  if ((flags & NSEventModifierFlagShift) != 0) result |= 1u << 0;
+  if ((flags & NSEventModifierFlagControl) != 0) result |= 1u << 1;
+  if ((flags & NSEventModifierFlagOption) != 0) result |= 1u << 2;
+  if ((flags & NSEventModifierFlagCommand) != 0) result |= 1u << 3;
+  return result;
+}
+
+- (int32_t)portableButton:(NSInteger)buttonNumber {
+  return buttonNumber >= 0 && buttonNumber <= 4 ? (int32_t)buttonNumber : -1;
+}
+
+- (void)emitPointerEvent:(NSEvent *)event
+                    kind:(HaskeLUIMacDrawingInputKind)kind
+           changedButton:(int32_t)changedButton {
+  if (!self.drawingInputEnabled) {
+    return;
+  }
+  NSPoint point = [self convertPoint:event.locationInWindow fromView:nil];
+  HaskeLUIMacDrawingInput input = {
+    .kind = kind,
+    .changed_button = changedButton,
+    .pointer_identity = 1,
+    .x = point.x,
+    .y = point.y,
+    .delta_x = event.deltaX,
+    .delta_y = event.deltaY,
+    .buttons = [self portableButtonsForEvent:event],
+    .modifiers = [self portableModifiers:event.modifierFlags],
+    .click_count = (int32_t)event.clickCount,
+    .precise = 0
+  };
+  HaskeLUIEmitDrawingInput(self.identity, input);
+}
+
+- (void)mouseDown:(NSEvent *)event {
+  [self.window makeFirstResponder:self];
+  [self emitPointerEvent:event kind:HaskeLUIMacDrawingPointerDown changedButton:0];
+}
+- (void)rightMouseDown:(NSEvent *)event { [self emitPointerEvent:event kind:HaskeLUIMacDrawingPointerDown changedButton:1]; }
+- (void)otherMouseDown:(NSEvent *)event { [self emitPointerEvent:event kind:HaskeLUIMacDrawingPointerDown changedButton:[self portableButton:event.buttonNumber]]; }
+- (void)mouseDragged:(NSEvent *)event { [self emitPointerEvent:event kind:HaskeLUIMacDrawingPointerMoved changedButton:-1]; }
+- (void)rightMouseDragged:(NSEvent *)event { [self emitPointerEvent:event kind:HaskeLUIMacDrawingPointerMoved changedButton:-1]; }
+- (void)otherMouseDragged:(NSEvent *)event { [self emitPointerEvent:event kind:HaskeLUIMacDrawingPointerMoved changedButton:-1]; }
+- (void)mouseUp:(NSEvent *)event { [self emitPointerEvent:event kind:HaskeLUIMacDrawingPointerUp changedButton:0]; }
+- (void)rightMouseUp:(NSEvent *)event { [self emitPointerEvent:event kind:HaskeLUIMacDrawingPointerUp changedButton:1]; }
+- (void)otherMouseUp:(NSEvent *)event { [self emitPointerEvent:event kind:HaskeLUIMacDrawingPointerUp changedButton:[self portableButton:event.buttonNumber]]; }
+- (void)mouseMoved:(NSEvent *)event { [self emitPointerEvent:event kind:HaskeLUIMacDrawingPointerMoved changedButton:-1]; }
+- (void)mouseEntered:(NSEvent *)event { [self emitPointerEvent:event kind:HaskeLUIMacDrawingPointerEntered changedButton:-1]; }
+- (void)mouseExited:(NSEvent *)event { [self emitPointerEvent:event kind:HaskeLUIMacDrawingPointerExited changedButton:-1]; }
+
+- (void)scrollWheel:(NSEvent *)event {
+  if (!self.drawingInputEnabled) {
+    return;
+  }
+  NSPoint point = [self convertPoint:event.locationInWindow fromView:nil];
+  HaskeLUIMacDrawingInput input = {
+    .kind = HaskeLUIMacDrawingScroll,
+    .changed_button = -1,
+    .pointer_identity = 1,
+    .x = point.x,
+    .y = point.y,
+    .delta_x = event.scrollingDeltaX,
+    .delta_y = -event.scrollingDeltaY,
+    .buttons = [self portableButtons],
+    .modifiers = [self portableModifiers:event.modifierFlags],
+    .click_count = 0,
+    .precise = event.hasPreciseScrollingDeltas ? 1 : 0
+  };
+  HaskeLUIEmitDrawingInput(self.identity, input);
 }
 
 - (void)drawRect:(NSRect)dirtyRect {
@@ -1138,6 +1318,16 @@ int32_t haskelui_macos_initialize(HaskeLUIMacEventCallback callback, void *conte
   return 1;
 }
 
+void haskelui_macos_set_drawing_input_callback(
+    HaskeLUIMacDrawingInputCallback callback,
+    void *context) {
+  HaskeLUIAssertMainThread();
+  if (HaskeLUIState != nil) {
+    HaskeLUIState.drawingInputCallback = callback;
+    HaskeLUIState.drawingInputCallbackContext = context;
+  }
+}
+
 void haskelui_macos_run(void) {
   HaskeLUIAssertMainThread();
   NSApplication *application = NSApplication.sharedApplication;
@@ -1208,6 +1398,8 @@ void haskelui_macos_shutdown(void) {
   }
   HaskeLUIState.callback = NULL;
   HaskeLUIState.callbackContext = NULL;
+  HaskeLUIState.drawingInputCallback = NULL;
+  HaskeLUIState.drawingInputCallbackContext = NULL;
   NSApplication.sharedApplication.mainMenu = nil;
   HaskeLUIState = nil;
   HaskeLUIControlGalleryTestActive = NO;
@@ -1895,6 +2087,9 @@ HaskeLUIMacControlRef haskelui_macos_drawing_surface_create(
     const HaskeLUIMacRect *frame) {
   HaskeLUIAssertMainThread();
   HaskeLUIDrawingView *view = [[HaskeLUIDrawingView alloc] initWithFrame:HaskeLUIRect(frame)];
+  view.identity = identity;
+  view.drawingInputEnabled = NO;
+  view.drawingCursor = 0;
   view.drawingCommands = @[];
   view.accessibilityLabel = HaskeLUIString(utf8AccessibleLabel);
   return HaskeLUIRetainControl(
@@ -1911,6 +2106,31 @@ void haskelui_macos_drawing_set_accessible_label(
     const char *utf8AccessibleLabel) {
   HaskeLUIDrawingView *view = HaskeLUIDrawing(reference);
   view.accessibilityLabel = HaskeLUIString(utf8AccessibleLabel);
+}
+
+void haskelui_macos_drawing_set_input_enabled(
+    HaskeLUIMacControlRef reference,
+    int32_t enabled) {
+  HaskeLUIAssertMainThread();
+  HaskeLUIDrawingView *view = HaskeLUIDrawing(reference);
+  if (view == nil) {
+    return;
+  }
+  view.drawingInputEnabled = enabled != 0;
+  [view updateTrackingAreas];
+  [view.window invalidateCursorRectsForView:view];
+}
+
+void haskelui_macos_drawing_set_cursor(
+    HaskeLUIMacControlRef reference,
+    int32_t cursor) {
+  HaskeLUIAssertMainThread();
+  HaskeLUIDrawingView *view = HaskeLUIDrawing(reference);
+  if (view == nil) {
+    return;
+  }
+  view.drawingCursor = cursor;
+  [view.window invalidateCursorRectsForView:view];
 }
 
 void haskelui_macos_drawing_begin(HaskeLUIMacControlRef reference) {
@@ -2144,6 +2364,13 @@ void haskelui_macos_drawing_text(
       attributes[NSUnderlineStyleAttributeName] =
           @(HaskeLUIUnderlineStyle(style->underline_style));
     }
+    if ((style->fields & HaskeLUIMacTextStyleUnderlineColor) != 0) {
+      attributes[NSUnderlineColorAttributeName] = HaskeLUIColor(
+          style->underline_red,
+          style->underline_green,
+          style->underline_blue,
+          style->underline_alpha);
+    }
     if ((style->fields & HaskeLUIMacTextStyleStrikethrough) != 0) {
       attributes[NSStrikethroughStyleAttributeName] =
           style->strikethrough != 0 ? @(NSUnderlineStyleSingle) : @0;
@@ -2182,6 +2409,7 @@ void haskelui_macos_drawing_end(HaskeLUIMacControlRef reference) {
     view.drawingCommands = [view.pendingCommands copy];
     view.pendingCommands = nil;
     view.pendingPath = nil;
+    view.drawingPresentationGeneration += 1;
     [view setNeedsDisplay:YES];
   }
 }
@@ -3942,6 +4170,14 @@ int32_t haskelui_macos_text_editor_apply_style(
   if ((style->fields & HaskeLUIMacTextStyleUnderline) != 0) {
     attributes[NSUnderlineStyleAttributeName] = @(HaskeLUIUnderlineStyle(style->underline_style));
   }
+  if ((style->fields & HaskeLUIMacTextStyleUnderlineColor) != 0) {
+    attributes[NSUnderlineColorAttributeName] =
+        HaskeLUIColor(
+            style->underline_red,
+            style->underline_green,
+            style->underline_blue,
+            style->underline_alpha);
+  }
   if ((style->fields & HaskeLUIMacTextStyleStrikethrough) != 0) {
     attributes[NSStrikethroughStyleAttributeName] =
         style->strikethrough != 0 ? @(NSUnderlineStyleSingle) : @0;
@@ -3963,6 +4199,35 @@ int32_t haskelui_macos_text_editor_apply_style(
           addTemporaryAttributes:attributes
                 forCharacterRange:NSMakeRange(location, length)];
     }
+  }
+  return 1;
+}
+
+int32_t haskelui_macos_text_editor_navigate(
+    HaskeLUIMacControlRef reference,
+    uint64_t utf16Location,
+    uint64_t utf16Length,
+    int32_t selectRange,
+    int32_t focusEditor) {
+  HaskeLUIAssertMainThread();
+  HaskeLUIMacControlHandle *handle = HaskeLUIControl(reference);
+  if (!HaskeLUIIsTextEditorHandle(handle) ||
+      utf16Location > NSUIntegerMax || utf16Length > NSUIntegerMax) {
+    return 0;
+  }
+  NSTextView *editor = (NSTextView *)handle.focusView;
+  NSUInteger location = (NSUInteger)utf16Location;
+  NSUInteger length = (NSUInteger)utf16Length;
+  if (location > editor.string.length || length > editor.string.length - location) {
+    return 0;
+  }
+  NSRange range = NSMakeRange(location, length);
+  if (selectRange != 0) {
+    editor.selectedRange = range;
+  }
+  [editor scrollRangeToVisible:range];
+  if (focusEditor != 0 && editor.window != nil) {
+    [editor.window makeFirstResponder:editor];
   }
   return 1;
 }
@@ -5090,6 +5355,17 @@ void haskelui_macos_test_schedule_text_editor_script(
         HaskeLUITestFail(@"Unicode scalar ranges were not translated to the highlighted AppKit range");
       }
     }
+    NSRange requestedNavigation = NSMakeRange(3, 6);
+    if (!haskelui_macos_text_editor_navigate(
+            (__bridge HaskeLUIMacControlRef)editorHandle,
+            requestedNavigation.location,
+            requestedNavigation.length,
+            1,
+            1) ||
+        !NSEqualRanges(editor.selectedRange, requestedNavigation) ||
+        !HaskeLUIResponderBelongsToView(documentWindow.window.firstResponder, editor)) {
+      HaskeLUITestFail(@"native text navigation did not select, reveal, and focus the requested UTF-16 range");
+    }
 
     dispatch_block_t continueTextEditorValidation = ^{
     [tabHandle.selectButton performClick:nil];
@@ -5433,6 +5709,9 @@ void haskelui_macos_test_schedule_drawing_script(
         view.accessibilityLabel.length == 0) {
       HaskeLUITestFail(@"drawing surface accessibility metadata is incomplete");
     }
+    if (!view.drawingInputEnabled || view.drawingTrackingArea == nil) {
+      HaskeLUITestFail(@"drawing surface did not install native pointer tracking");
+    }
     [window.window makeKeyAndOrderFront:nil];
     [window.window displayIfNeeded];
     NSBitmapImageRep *bitmap = [view bitmapImageRepForCachingDisplayInRect:view.bounds];
@@ -5445,10 +5724,45 @@ void haskelui_macos_test_schedule_drawing_script(
         HaskeLUITestFail(@"drawing surface paint pass produced no bitmap data");
       }
     }
-    /* Bringing the window forward can publish an effective-appearance event.
-       Let the backend deliver that queued event before ending the native test
-       loop so the resource assertion observes the normal shutdown path. */
-    HaskeLUITestAfter(0.05, ^{
+    uint64_t initialGeneration = view.drawingPresentationGeneration;
+    NSPoint downLocation = [view convertPoint:NSMakePoint(150, 466) toView:nil];
+    NSPoint dragLocation = [view convertPoint:NSMakePoint(190, 490) toView:nil];
+    NSEvent *down = [NSEvent mouseEventWithType:NSEventTypeLeftMouseDown
+                                      location:downLocation
+                                 modifierFlags:0
+                                     timestamp:NSProcessInfo.processInfo.systemUptime
+                                  windowNumber:window.window.windowNumber
+                                       context:nil
+                                   eventNumber:1
+                                    clickCount:1
+                                      pressure:1.0];
+    NSEvent *drag = [NSEvent mouseEventWithType:NSEventTypeLeftMouseDragged
+                                      location:dragLocation
+                                 modifierFlags:0
+                                     timestamp:NSProcessInfo.processInfo.systemUptime
+                                  windowNumber:window.window.windowNumber
+                                       context:nil
+                                   eventNumber:2
+                                    clickCount:1
+                                      pressure:1.0];
+    NSEvent *up = [NSEvent mouseEventWithType:NSEventTypeLeftMouseUp
+                                    location:dragLocation
+                               modifierFlags:0
+                                   timestamp:NSProcessInfo.processInfo.systemUptime
+                                windowNumber:window.window.windowNumber
+                                     context:nil
+                                 eventNumber:3
+                                  clickCount:1
+                                    pressure:0.0];
+    [view mouseDown:down];
+    [view mouseDragged:drag];
+    [view mouseUp:up];
+    /* Let typed callbacks drain, reconcile the advanced drawing revision, and
+       then leave through the normal backend shutdown path. */
+    HaskeLUITestAfter(0.15, ^{
+      if (view.drawingPresentationGeneration <= initialGeneration) {
+        HaskeLUITestFail(@"native drawing pointer input did not update the Haskell model and display list");
+      }
       [NSApplication.sharedApplication stop:nil];
     });
   });

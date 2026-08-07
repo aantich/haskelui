@@ -1391,7 +1391,7 @@ data TextLayer = TextLayer
   }
 ```
 
-`TextStyle` is a partial portable set of foreground/background colors, font family, size, weight and slant, underline, strikethrough, letter spacing, and baseline offset. `TextRun` is the safe construction form for continuous authored styled strings; opaque `AttributedText` normalizes those runs into one character snapshot plus validated spans.
+`TextStyle` is a partial portable set of foreground/background colors, font family, size, weight and slant, underline shape and independent underline color, strikethrough, letter spacing, and baseline offset. `TextRun` is the safe construction form for continuous authored styled strings; opaque `AttributedText` normalizes those runs into one character snapshot plus validated spans.
 
 Authored rich-text spans and derived presentation layers share range and style primitives but not ownership. Authored styles participate in persistence, clipboard, dirty state, and undo. Presentation layers are revision-bound, non-authoritative overlays for syntax, diagnostics, search, spellchecking, or annotations. Ordered layers merge property-by-property, so a search background does not erase a syntax foreground. Stale layers and invalid ranges are ignored.
 

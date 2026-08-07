@@ -228,6 +228,7 @@ tabTitles view =
   | pane <- viewPanes view
   , WorkspaceItemTabGroup group <- [pane.workspacePaneItem.workspaceItemContent]
   , tab <- group.workspaceTabs
+  , tab.workspaceTabDocument /= Nothing
   ]
 
 selectedTab :: AppView -> Maybe TabKey
@@ -236,6 +237,7 @@ selectedTab view =
       [ selected
       | pane <- viewPanes view
       , WorkspaceItemTabGroup group <- [pane.workspacePaneItem.workspaceItemContent]
+      , any ((/= Nothing) . (.workspaceTabDocument)) group.workspaceTabs
       , selected <- maybe [] pure group.workspaceSelectedTab
       ] of
     selected : _ -> Just selected

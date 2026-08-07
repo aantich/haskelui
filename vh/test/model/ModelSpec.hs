@@ -19,6 +19,8 @@ import VisualHaskell.Highlighting
   ( SyntaxClass (..)
   , highlightHaskell
   )
+import qualified VisualHaskell.Diagnostics as Diagnostics
+import qualified VisualHaskell.Semantic as Semantic
 import VisualHaskell.WorkspaceState
   ( WorkspaceState (..)
   , decodeWorkspaceState
@@ -72,6 +74,68 @@ main = do
         && TextSpan (TextRange 9 4) SyntaxTypeName `elem` highlighted
         && TextSpan (TextRange 28 4) SyntaxString `elem` highlighted
         && TextSpan (TextRange 33 7) SyntaxComment `elem` highlighted
+    )
+
+  let diagnosticSource = "module Main where\nbroken =\n"
+      diagnosticRevision = TextRevision 7
+      semanticDiagnosticRevision = Semantic.TextRevision 7
+      compilerDiagnostic =
+        Semantic.Diagnostic
+          { Semantic.diagnosticId = Semantic.DiagnosticId "ghc:test"
+          , Semantic.diagnosticSeverity = Semantic.DiagnosticError
+          , Semantic.diagnosticSource = "GHC 9.10.3"
+          , Semantic.diagnosticCode = Just "GHC-00000"
+          , Semantic.diagnosticMessage = "parse error"
+          , Semantic.diagnosticRange =
+              Semantic.RevisionedSourceRange
+                semanticDiagnosticRevision
+                (Semantic.SourcePosition 1 0 Semantic.GhcColumn)
+                (Semantic.SourcePosition 1 6 Semantic.GhcColumn)
+          , Semantic.diagnosticRelated = []
+          }
+      diagnosticSnapshot =
+        Semantic.AnalysisSnapshot
+          { Semantic.analysisWorkspaceGeneration = Semantic.WorkspaceGeneration 1
+          , Semantic.analysisSession = Semantic.SessionId "test"
+          , Semantic.analysisDocument = Semantic.DocumentId "/tmp/Main.hs"
+          , Semantic.analysisRevision = semanticDiagnosticRevision
+          , Semantic.analysisContentHash = Semantic.contentHash diagnosticSource
+          , Semantic.analysisCompleteness = Semantic.PartiallyFailed
+          , Semantic.analysisFreshness = Semantic.CurrentAnalysis
+          , Semantic.analysisDiagnostics = [compilerDiagnostic]
+          , Semantic.analysisDeclarations = []
+          , Semantic.analysisTypes = mempty
+          }
+      projectedDiagnostics =
+        Diagnostics.projectCurrentDiagnostics
+          (Semantic.DocumentId "/tmp/Main.hs")
+          diagnosticRevision
+          diagnosticSource
+          diagnosticSnapshot
+  assertEqual
+    "current compiler diagnostics become Unicode-scalar editor ranges"
+    [TextRange 18 6]
+    (fmap (.projectedRange) projectedDiagnostics)
+  assert
+    "diagnostic presentation composes as a colored underline-only layer"
+    ( case Diagnostics.diagnosticTextLayer DarkColorScheme diagnosticRevision projectedDiagnostics of
+        Just layer ->
+          case layer.textLayerSpans of
+            [spanValue] ->
+              spanValue.textSpanValue.textUnderline == Just UnderlineWavy
+                && spanValue.textSpanValue.textUnderlineColor /= Nothing
+                && spanValue.textSpanValue.textForeground == Nothing
+            _ -> False
+        Nothing -> False
+    )
+  assertEqual
+    "a late diagnostic snapshot never decorates a newer text revision"
+    []
+    ( Diagnostics.projectCurrentDiagnostics
+        (Semantic.DocumentId "/tmp/Main.hs")
+        (TextRevision 8)
+        diagnosticSource
+        diagnosticSnapshot
     )
 
   let initial = application.appInitialModel
@@ -477,7 +541,14 @@ windowIsEdited :: WindowSpec -> Bool
 windowIsEdited window = window.windowKey == firstDocumentWindowKey && "Edited" `textIn` window.windowTitle
 
 windowTabKeys :: WindowSpec -> [TabKey]
-windowTabKeys window = maybe [] workspaceTabKeys (windowWorkspace window)
+windowTabKeys window =
+  [ tab.workspaceTabKey
+  | workspace <- maybe [] pure (windowWorkspace window)
+  , pane <- paneSpecs workspace.workspaceRoot
+  , WorkspaceItemTabGroup group <- [pane.workspacePaneItem.workspaceItemContent]
+  , tab <- group.workspaceTabs
+  , tab.workspaceTabDocument /= Nothing
+  ]
 
 firstWorkspaceSelectedTab :: [WindowSpec] -> Maybe TabKey
 firstWorkspaceSelectedTab windows =
@@ -487,6 +558,7 @@ firstWorkspaceSelectedTab windows =
       , workspace <- maybe [] pure (windowWorkspace window)
       , pane <- paneSpecs workspace.workspaceRoot
       , WorkspaceItemTabGroup group <- [pane.workspacePaneItem.workspaceItemContent]
+      , any ((/= Nothing) . (.workspaceTabDocument)) group.workspaceTabs
       , selected <- maybe [] pure group.workspaceSelectedTab
       ] of
     selected : _ -> Just selected

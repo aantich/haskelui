@@ -15,11 +15,14 @@ Backends also use incompatible text indices. Haskell-facing lexers naturally ope
 
 HaskeLUI Core defines generic portable primitives:
 
-- Partial `TextStyle` values for color, font family/size/weight/slant, underline, strikethrough, letter spacing, and baseline offset.
+- Partial `TextStyle` values for color, font family/size/weight/slant, underline shape and independent underline color, strikethrough, letter spacing, and baseline offset.
 - Generic `TextSpan a` values over scalar-indexed `TextRange`.
 - `TextRun` as an ergonomic continuous-string construction form.
 - Opaque, normalized `AttributedText` as one authoritative text snapshot plus styled spans.
 - Ordered, keyed, revision-bound `TextLayer` values for non-authoritative presentation.
+- Keyed, revision-bound `TextNavigationRequest` values for one-shot reveal,
+  optional selection, and focus without making every native caret movement a
+  model update.
 
 Later style layers override earlier layers one property at a time. The Core resolver rejects invalid ranges, discards stale revisions, partitions overlaps into non-overlapping styled runs, and preserves unaffected properties from earlier layers.
 

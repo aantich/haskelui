@@ -16,6 +16,7 @@ import Control.Monad
   , when
   )
 import Control.Applicative ((<|>))
+import Data.Bits (testBit)
 import qualified Data.ByteString as ByteString
 import Data.Char (ord)
 import Data.Foldable (traverse_)
@@ -96,10 +97,13 @@ openAppKit :: (UIEvent -> IO ()) -> IO BackendSession
 openAppKit dispatch = do
   scheduledActions <- newIORef []
   callback <- makeEventCallback (receiveEvent dispatch (drainScheduledActions scheduledActions))
+  drawingInputCallback <- makeDrawingInputCallback (receiveDrawingInput dispatch)
   initialized <- c_initialize callback nullPtr
   unless (initialized /= 0) $ do
     freeHaskellFunPtr callback
+    freeHaskellFunPtr drawingInputCallback
     error "HaskeLUI AppKit backend could not initialize NSApplication"
+  c_setDrawingInputCallback drawingInputCallback nullPtr
 
   stateReference <- newIORef (AppKitState Map.empty Map.empty)
   pure
@@ -110,7 +114,7 @@ openAppKit dispatch = do
       , backendRequestOpenProjectFolder = c_openProjectFolder
       , backendRun = c_run
       , backendStop = c_stop
-      , backendShutdown = shutdown stateReference callback
+      , backendShutdown = shutdown stateReference callback drawingInputCallback
       }
 
 scheduleOnUI :: IORef [IO ()] -> IO () -> IO ()
@@ -204,6 +208,77 @@ receiveEvent dispatch drainRuntime _ eventKind identity textPointer =
       forM_ (decodePaneState payload) $ \paneState ->
         dispatch (PaneStateChanged (PaneKey identity) paneState)
     _ -> pure ()
+
+receiveDrawingInput
+  :: (UIEvent -> IO ())
+  -> Ptr ()
+  -> Word64
+  -> Ptr CDrawingInput
+  -> IO ()
+receiveDrawingInput dispatch _ identity inputPointer
+  | inputPointer == nullPtr = pure ()
+  | otherwise = do
+      input <- peek inputPointer
+      let position = Point (realToFrac input.cDrawingX) (realToFrac input.cDrawingY)
+          delta = Point (realToFrac input.cDrawingDeltaX) (realToFrac input.cDrawingDeltaY)
+          modifiers =
+            DrawingModifiers
+              (testBit input.cDrawingModifiers 0)
+              (testBit input.cDrawingModifiers 1)
+              (testBit input.cDrawingModifiers 2)
+              (testBit input.cDrawingModifiers 3)
+          buttons =
+            DrawingPointerButtons
+              (testBit input.cDrawingButtons 0)
+              (testBit input.cDrawingButtons 1)
+              (testBit input.cDrawingButtons 2)
+              (testBit input.cDrawingButtons 3)
+              (testBit input.cDrawingButtons 4)
+          emit payload = dispatch (DrawingInputReceived (ElementKey identity) payload)
+      if input.cDrawingInputKind == 7
+        then
+          emit . DrawingScrollInput $
+            DrawingScrollEvent
+              { drawingScrollPosition = position
+              , drawingScrollDelta = delta
+              , drawingScrollIsPrecise = input.cDrawingPrecise /= 0
+              , drawingScrollModifiers = modifiers
+              , drawingScrollTarget = Nothing
+              }
+        else
+          traverse_
+            (\phase ->
+              emit . DrawingPointerInput $
+                DrawingPointerEvent
+                  { drawingPointerId = DrawingPointerId input.cDrawingPointerIdentity
+                  , drawingPointerPhase = phase
+                  , drawingPointerPosition = position
+                  , drawingPointerDelta = delta
+                  , drawingPointerChangedButton = decodeDrawingButton input.cDrawingChangedButton
+                  , drawingPointerButtons = buttons
+                  , drawingPointerModifiers = modifiers
+                  , drawingPointerClickCount = fromIntegral input.cDrawingClickCount
+                  , drawingPointerTarget = Nothing
+                  }
+            )
+            (decodeDrawingPhase input.cDrawingInputKind)
+
+decodeDrawingPhase :: CInt -> Maybe DrawingPointerPhase
+decodeDrawingPhase 1 = Just DrawingPointerDown
+decodeDrawingPhase 2 = Just DrawingPointerMoved
+decodeDrawingPhase 3 = Just DrawingPointerUp
+decodeDrawingPhase 4 = Just DrawingPointerCancelled
+decodeDrawingPhase 5 = Just DrawingPointerEntered
+decodeDrawingPhase 6 = Just DrawingPointerExited
+decodeDrawingPhase _ = Nothing
+
+decodeDrawingButton :: CInt -> Maybe DrawingPointerButton
+decodeDrawingButton 0 = Just PrimaryPointerButton
+decodeDrawingButton 1 = Just SecondaryPointerButton
+decodeDrawingButton 2 = Just MiddlePointerButton
+decodeDrawingButton 3 = Just BackPointerButton
+decodeDrawingButton 4 = Just ForwardPointerButton
+decodeDrawingButton _ = Nothing
 
 readText :: Read value => Text -> Maybe value
 readText = readMaybe . Text.unpack
@@ -663,11 +738,16 @@ createControl window spec = do
                 (fromIntegral (fromEnum kind + 1))
   when (handle == nullPtr) (error "HaskeLUI AppKit failed to create native control")
   case spec of
-    TextEditor editor -> applyTextEditorPresentation handle editor
+    TextEditor editor -> do
+      applyTextEditorPresentation handle editor
+      applyTextEditorNavigation handle editor
     RichTextEditor editor -> do
       configureCatalogControl handle spec
       applyTextEditorPresentation handle editor
-    DrawingSurface surface -> applyDrawingPresentation handle surface
+      applyTextEditorNavigation handle editor
+    DrawingSurface surface -> do
+      applyDrawingPresentation handle surface
+      applyDrawingInputPresentation handle surface
     _ -> when (isJust (controlCatalogKind spec)) (configureCatalogControl handle spec)
   pure (NativeControl handle spec Nothing)
 
@@ -695,6 +775,12 @@ updateControl window native desired = do
           | previous.drawingSurfaceAccessibleLabel /= surface.drawingSurfaceAccessibleLabel ->
               withText surface.drawingSurfaceAccessibleLabel (c_drawingSetAccessibleLabel native.nativeControlHandle)
         _ -> pure ()
+      case native.nativeControlSpec of
+        DrawingSurface previous
+          | previous.drawingSurfaceInputMode /= surface.drawingSurfaceInputMode
+              || previous.drawingSurfaceCursor /= surface.drawingSurfaceCursor ->
+              applyDrawingInputPresentation native.nativeControlHandle surface
+        _ -> applyDrawingInputPresentation native.nativeControlHandle surface
     _ ->
       when (catalogConfigurationChanged native.nativeControlSpec desired) $
         configureCatalogControl native.nativeControlHandle desired
@@ -702,6 +788,11 @@ updateControl window native desired = do
     case desired of
       TextEditor editor -> applyTextEditorPresentation native.nativeControlHandle editor
       RichTextEditor editor -> applyTextEditorPresentation native.nativeControlHandle editor
+      _ -> pure ()
+  when (textEditorNavigationChanged native.nativeControlSpec desired) $
+    case desired of
+      TextEditor editor -> applyTextEditorNavigation native.nativeControlHandle editor
+      RichTextEditor editor -> applyTextEditorNavigation native.nativeControlHandle editor
       _ -> pure ()
   case desired of
     Button _ _ _ _ enabled ->
@@ -1265,6 +1356,21 @@ applyDrawingPresentation handle surface =
               (Text.intercalate "; " (fmap drawingValidationMessage errors))
         )
 
+applyDrawingInputPresentation :: Ptr MacControlHandle -> DrawingSurfaceSpec -> IO ()
+applyDrawingInputPresentation handle surface = do
+  c_drawingSetInputEnabled handle (booleanInt (surface.drawingSurfaceInputMode == DrawingInputEnabled))
+  c_drawingSetCursor handle (encodeDrawingCursor surface.drawingSurfaceCursor)
+
+encodeDrawingCursor :: DrawingCursor -> CInt
+encodeDrawingCursor DefaultCursor = 0
+encodeDrawingCursor PointingHandCursor = 1
+encodeDrawingCursor CrosshairCursor = 2
+encodeDrawingCursor OpenHandCursor = 3
+encodeDrawingCursor ClosedHandCursor = 4
+encodeDrawingCursor TextCursor = 5
+encodeDrawingCursor HorizontalResizeCursor = 6
+encodeDrawingCursor VerticalResizeCursor = 7
+
 executeDrawingCommand :: Ptr MacControlHandle -> DrawingCommand -> IO ()
 executeDrawingCommand handle = \case
   PushState -> c_drawingPushState handle
@@ -1397,6 +1503,15 @@ textEditorPresentationChanged (RichTextEditor old) (RichTextEditor new) =
     || old.textEditorLayers /= new.textEditorLayers
 textEditorPresentationChanged _ _ = False
 
+textEditorNavigationChanged :: Control -> Control -> Bool
+textEditorNavigationChanged (TextEditor old) (TextEditor new) =
+  fmap (.textNavigationKey) old.textEditorNavigation
+    /= fmap (.textNavigationKey) new.textEditorNavigation
+textEditorNavigationChanged (RichTextEditor old) (RichTextEditor new) =
+  fmap (.textNavigationKey) old.textEditorNavigation
+    /= fmap (.textNavigationKey) new.textEditorNavigation
+textEditorNavigationChanged _ _ = False
+
 applyTextEditorPresentation :: Ptr MacControlHandle -> TextEditorSpec -> IO ()
 applyTextEditorPresentation handle editor = do
   c_textEditorBeginPresentation handle
@@ -1432,14 +1547,48 @@ applyTextEditorPresentation handle editor = do
     advanceUtf16 offset character =
       offset + if ord character > 0xFFFF then 2 else 1
 
-shutdown :: IORef AppKitState -> FunPtr EventCallback -> IO ()
-shutdown stateReference callback = do
+applyTextEditorNavigation :: Ptr MacControlHandle -> TextEditorSpec -> IO ()
+applyTextEditorNavigation handle editor =
+  forM_ editor.textEditorNavigation $ \request ->
+    when (request.textNavigationRevision == editor.textEditorRevision) $ do
+      let scalarLength = Text.length editor.textEditorText
+          range = request.textNavigationRange
+          start = range.textRangeStart
+      when
+        ( start >= 0
+            && range.textRangeLength >= 0
+            && start <= scalarLength
+            && range.textRangeLength <= scalarLength - start
+        ) $ do
+          let end = start + range.textRangeLength
+              offsets =
+                Map.fromDistinctAscList $
+                  zip [0 ..] (scanl advanceUtf16 0 (Text.unpack editor.textEditorText))
+          case (Map.lookup start offsets, Map.lookup end offsets) of
+            (Just utf16Start, Just utf16End) -> do
+              applied <-
+                c_textEditorNavigate
+                  handle
+                  utf16Start
+                  (utf16End - utf16Start)
+                  (booleanInt request.textNavigationSelect)
+                  (booleanInt request.textNavigationFocus)
+              unless (applied /= 0) $
+                error "HaskeLUI AppKit rejected a validated text navigation range"
+            _ -> error "HaskeLUI AppKit could not translate a validated text navigation range"
+  where
+    advanceUtf16 offset character =
+      offset + if ord character > 0xFFFF then 2 else 1
+
+shutdown :: IORef AppKitState -> FunPtr EventCallback -> FunPtr DrawingInputCallback -> IO ()
+shutdown stateReference callback drawingInputCallback = do
   state <- readIORef stateReference
   forM_ (Map.elems state.nativeWindows) destroyWindow
   forM_ (Map.keys state.nativeCommands) (c_commandRemove . unCommandId)
   writeIORef stateReference (AppKitState Map.empty Map.empty)
   c_shutdown
   freeHaskellFunPtr callback
+  freeHaskellFunPtr drawingInputCallback
 
 withText :: Text -> (CString -> IO result) -> IO result
 withText value = ByteString.useAsCString (TextEncoding.encodeUtf8 value)

@@ -20,6 +20,7 @@ module VisualHaskell
   , workspaceWindowKey
   ) where
 
+import Data.Bits (setBit, xor)
 import Data.List
   ( find
   , foldl'
@@ -30,6 +31,7 @@ import qualified Data.Map.Strict as Map
 import Data.Maybe
   ( listToMaybe
   , mapMaybe
+  , maybeToList
   )
 import Data.Set (Set)
 import qualified Data.Set as Set
@@ -50,6 +52,7 @@ import VisualHaskell.Highlighting
   ( codeEditorBaseStyle
   , haskellSyntaxLayer
   )
+import qualified VisualHaskell.Diagnostics as Diagnostics
 import VisualHaskell.TrustState
   ( TrustRegistry (..)
   , decodeTrustRegistry
@@ -95,6 +98,7 @@ data Document = Document
   , documentCloseAfterSave :: !Bool
   , documentSyntaxLayer :: !(Maybe TextLayer)
   , documentLanguage :: !(Maybe LanguageId)
+  , documentNavigation :: !(Maybe TextNavigationRequest)
   }
   deriving stock (Eq, Generic, Show)
 
@@ -123,6 +127,9 @@ data EditorModel = EditorModel
   , nextProjectEntryIdentity :: !Word64
   , navigatorState :: !PaneState
   , inspectorState :: !PaneState
+  , selectedInspectorTab :: !TabKey
+  , selectedProblem :: !(Maybe CollectionItemKey)
+  , nextNavigationIdentity :: !Word64
   , workspacePersistencePhase :: !WorkspacePersistencePhase
   , workspaceRestorePendingFiles :: !(Set FilePath)
   , workspaceRestoreActiveFile :: !(Maybe FilePath)
@@ -142,6 +149,15 @@ data EditorModel = EditorModel
   , analysisStatus :: !Text
   }
   deriving stock (Eq, Generic, Show)
+
+data EditorProblem = EditorProblem
+  { problemKey :: !CollectionItemKey
+  , problemDocumentKey :: !DocumentKey
+  , problemTabKey :: !TabKey
+  , problemPath :: !FilePath
+  , problemDiagnostic :: !Diagnostics.ProjectedDiagnostic
+  }
+  deriving stock (Eq, Show)
 
 data WorkspacePersistencePhase
   = WorkspacePersistenceReady
@@ -190,6 +206,16 @@ inspectorItemKey = WorkspaceItemKey 22
 
 editorTabGroupKey :: TabGroupKey
 editorTabGroupKey = TabGroupKey 30
+
+inspectorTabGroupKey :: TabGroupKey
+inspectorTabGroupKey = TabGroupKey 31
+
+documentInspectorTabKey, problemsInspectorTabKey :: TabKey
+documentInspectorTabKey = TabKey 9000001
+problemsInspectorTabKey = TabKey 9000002
+
+problemsListKey :: ElementKey
+problemsListKey = ElementKey 210
 
 application :: App EditorModel
 application = editorApplication initialModel
@@ -301,6 +327,9 @@ initialModel =
     , nextProjectEntryIdentity = 1
     , navigatorState = defaultNavigatorPaneState
     , inspectorState = defaultInspectorPaneState
+    , selectedInspectorTab = documentInspectorTabKey
+    , selectedProblem = Nothing
+    , nextNavigationIdentity = 1
     , workspacePersistencePhase = WorkspacePersistenceReady
     , workspaceRestorePendingFiles = Set.empty
     , workspaceRestoreActiveFile = Nothing
@@ -428,9 +457,38 @@ inspectorPane model =
     , workspacePaneItem =
         WorkspaceItemSpec
           { workspaceItemKey = inspectorItemKey
-          , workspaceItemContent = WorkspaceItemControls (inspectorControls model)
+          , workspaceItemContent =
+              WorkspaceItemTabGroup
+                WorkspaceTabGroupSpec
+                  { workspaceTabGroupKey = inspectorTabGroupKey
+                  , workspaceSelectedTab = Just model.selectedInspectorTab
+                  , workspaceTabs = inspectorTabs model
+                  }
           }
     }
+
+inspectorTabs :: EditorModel -> [WorkspaceTabSpec]
+inspectorTabs model =
+  [ WorkspaceTabSpec
+      { workspaceTabKey = documentInspectorTabKey
+      , workspaceTabDocument = Nothing
+      , workspaceTabTitle = "Document"
+      , workspaceTabModified = False
+      , workspaceTabCloseable = False
+      , workspaceTabControls = inspectorControls model
+      }
+  , WorkspaceTabSpec
+      { workspaceTabKey = problemsInspectorTabKey
+      , workspaceTabDocument = Nothing
+      , workspaceTabTitle =
+          "Problems (" <> Text.pack (show (length problems)) <> ")"
+      , workspaceTabModified = False
+      , workspaceTabCloseable = False
+      , workspaceTabControls = problemsControls model problems
+      }
+  ]
+  where
+    problems = currentProblems model
 
 documentTab :: EditorModel -> TabKey -> Maybe WorkspaceTabSpec
 documentTab model tabKey = do
@@ -452,6 +510,7 @@ documentTab model tabKey = do
                 , textEditorRevision = document.documentRevision
                 , textEditorBaseStyle = codeEditorBaseStyle
                 , textEditorLayers = documentPresentation model document
+                , textEditorNavigation = document.documentNavigation
                 , textEditorFocused = model.selectedTab == Just tabKey
                 }
           ]
@@ -542,6 +601,58 @@ inspectorControls model =
           (Rect 16 502 230 22)
           (if documentDirty document then "Modified" else "Saved")
       ]
+
+problemsControls :: EditorModel -> [EditorProblem] -> [Control]
+problemsControls model problems =
+  [ ListView
+      CollectionControlSpec
+        { collectionControlKey = problemsListKey
+        , collectionControlFrame = Rect 0 0 270 718
+        , collectionControlItems = fmap problemCollectionItem problems
+        , collectionControlSelectionMode = SingleCollectionSelection
+        , collectionControlSelection =
+            [ selected
+            | selected <- maybeToList model.selectedProblem
+            , any ((== selected) . (.problemKey)) problems
+            ]
+        , collectionControlRowSizing = ContentSizedRows
+        , collectionControlEnabled = True
+        }
+  ]
+
+problemCollectionItem :: EditorProblem -> CollectionItem
+problemCollectionItem problem =
+  CollectionItem
+    { collectionItemKey = problem.problemKey
+    , collectionItemLabel = firstMessageLine problem.problemDiagnostic.projectedMessage
+    , collectionItemDetail =
+        Text.pack (takeFileName problem.problemPath)
+          <> ":"
+          <> Text.pack (show (problem.problemDiagnostic.projectedLine + 1))
+          <> ":"
+          <> Text.pack (show (problem.problemDiagnostic.projectedColumn + 1))
+          <> " · "
+          <> problem.problemDiagnostic.projectedSource
+          <> maybe "" (" " <>) problem.problemDiagnostic.projectedCode
+    , collectionItemIcon = Just (SystemSymbol (diagnosticSymbol problem.problemDiagnostic.projectedSeverity))
+    , collectionItemDepth = 0
+    , collectionItemExpandable = False
+    , collectionItemExpanded = False
+    }
+
+firstMessageLine :: Text -> Text
+firstMessageLine message =
+  case Text.lines (Text.strip message) of
+    line : _ -> line
+    [] -> "Compiler diagnostic"
+
+diagnosticSymbol :: Semantic.DiagnosticSeverity -> Text
+diagnosticSymbol severity =
+  case severity of
+    Semantic.DiagnosticError -> "xmark.octagon.fill"
+    Semantic.DiagnosticWarning -> "exclamationmark.triangle.fill"
+    Semantic.DiagnosticInformation -> "info.circle.fill"
+    Semantic.DiagnosticHint -> "lightbulb.fill"
 
 statusControls :: EditorModel -> [Control]
 statusControls model =
@@ -1148,7 +1259,12 @@ analysisSummary snapshot =
 
 analysisFailureTransaction :: AnalysisProtocol.RequestFailure -> Transaction EditorModel
 analysisFailureTransaction failure =
-  analysisStatusTransaction ("GHC: " <> AnalysisProtocol.requestFailureMessage failure)
+  analysisStatusTransaction (prefix <> AnalysisProtocol.requestFailureMessage failure)
+  where
+    prefix
+      | failure.requestFailureCode == "incompatible-compiler" =
+          "GHC: unsupported compiler · "
+      | otherwise = "GHC: "
 
 analysisGenerationTransaction
   :: AnalysisClient.WorkerGeneration
@@ -1356,14 +1472,20 @@ handleEventWithoutPersistence event model =
         Nothing -> noTransaction
         Just document ->
           case editBinding model InputChanged (documentContentsBinding document) changedContents of
-            EditCommitted _ committed -> committed
+            EditCommitted _ committed -> markAnalysisPending document model committed
             DraftStaged _ -> noTransaction
             DraftInvalid _ _ -> noTransaction
     CollectionSelectionChanged key [selectedKey]
       | key == projectTreeKey -> selectProjectEntry selectedKey model
+      | key == problemsListKey -> selectProblem selectedKey model
     CollectionExpansionChanged key itemKey expanded
       | key == projectTreeKey -> setProjectExpansion itemKey expanded model
     TabSelected tabKey
+      | tabKey `elem` [documentInspectorTabKey, problemsInspectorTabKey] ->
+          transactionFromAction
+            "Select inspector tab"
+            NoUndo
+            (editorProperties.selectedInspectorTab .= tabKey)
       | any ((== tabKey) . (.documentTabKey)) (Map.elems model.documents) ->
           transactionFromAction
             "Select document tab"
@@ -1386,6 +1508,21 @@ handleEventWithoutPersistence event model =
     TextFileWritten writtenKey writtenPath writtenContents result ->
       handleWriteResult writtenKey writtenPath writtenContents result model
     _ -> noTransaction
+
+markAnalysisPending :: Document -> EditorModel -> Transaction EditorModel -> Transaction EditorModel
+markAnalysisPending document model update
+  | model.analysisWorkspaceTrusted
+  , model.projectRoot /= Nothing
+  , isHaskellDocument document =
+      update
+        { transactionAction =
+            batchActions
+              "Edit text and await compiler analysis"
+              [ update.transactionAction
+              , editorProperties.analysisStatus .= "GHC: analyzing current revision"
+              ]
+        }
+  | otherwise = update
 
 projectPropertyIds :: [PropertyId]
 projectPropertyIds =
@@ -1917,6 +2054,51 @@ selectProjectEntry selectedKey model =
             (not (Set.member entry.projectEntryPath model.projectExpandedFolders))
             model
 
+selectProblem :: CollectionItemKey -> EditorModel -> Transaction EditorModel
+selectProblem selectedKey model =
+  case find ((== selectedKey) . (.problemKey)) (currentProblems model) of
+    Nothing -> noTransaction
+    Just problem ->
+      transactionFromAction
+        "Reveal compiler problem"
+        NoUndo
+        ( actionWithProperties
+            "Reveal compiler problem"
+            [ propertyId editorProperties.documents
+            , propertyId editorProperties.selectedTab
+            , propertyId editorProperties.selectedInspectorTab
+            , propertyId editorProperties.selectedProblem
+            , propertyId editorProperties.nextNavigationIdentity
+            ]
+            (reveal problem)
+        )
+  where
+    reveal :: EditorProblem -> EditorModel -> EditorModel
+    reveal problem current =
+      current
+        { documents =
+            Map.adjust
+              ( \document ->
+                  document
+                    { documentNavigation =
+                        Just
+                          TextNavigationRequest
+                            { textNavigationKey = TextNavigationKey current.nextNavigationIdentity
+                            , textNavigationRevision = document.documentRevision
+                            , textNavigationRange = problem.problemDiagnostic.projectedRange
+                            , textNavigationSelect = True
+                            , textNavigationFocus = True
+                            }
+                    }
+              )
+              problem.problemDocumentKey
+              current.documents
+        , selectedTab = Just problem.problemTabKey
+        , selectedInspectorTab = problemsInspectorTabKey
+        , selectedProblem = Just problem.problemKey
+        , nextNavigationIdentity = current.nextNavigationIdentity + 1
+        }
+
 setProjectExpansion :: CollectionItemKey -> Bool -> EditorModel -> Transaction EditorModel
 setProjectExpansion itemKey expanded model =
   case findProjectEntryByKey itemKey model of
@@ -2182,15 +2364,85 @@ insertDocument documentPath initialContents model =
         , documentCloseAfterSave = False
         , documentSyntaxLayer = Nothing
         , documentLanguage = Nothing
+        , documentNavigation = Nothing
         }
 
 documentPresentation :: EditorModel -> Document -> [TextLayer]
-documentPresentation model document
-  | Just layer <- document.documentSyntaxLayer
-  , layer.textLayerRevision == document.documentRevision = [layer]
-  | isHaskellPath document.documentPath =
-      [haskellSyntaxLayer model.systemColorScheme document.documentRevision document.documentContents]
-  | otherwise = []
+documentPresentation model document = syntaxLayers <> maybeToList diagnosticLayer
+  where
+    syntaxLayers
+      | Just layer <- document.documentSyntaxLayer
+      , layer.textLayerRevision == document.documentRevision = [layer]
+      | isHaskellPath document.documentPath =
+          [haskellSyntaxLayer model.systemColorScheme document.documentRevision document.documentContents]
+      | otherwise = []
+    diagnosticLayer =
+      Diagnostics.diagnosticTextLayer
+        model.systemColorScheme
+        document.documentRevision
+        (documentProblems model document)
+
+currentProblems :: EditorModel -> [EditorProblem]
+currentProblems model = sortOn problemSortKey (concatMap (problemsForDocument model) (Map.elems model.documents))
+
+problemsForDocument :: EditorModel -> Document -> [EditorProblem]
+problemsForDocument model document =
+  case Map.lookup (analysisDocumentId document) model.analysisSnapshots of
+    Nothing -> []
+    Just snapshot ->
+      [ EditorProblem
+          { problemKey = diagnosticCollectionKey document diagnostic
+          , problemDocumentKey = document.documentKey
+          , problemTabKey = document.documentTabKey
+          , problemPath = document.documentPath
+          , problemDiagnostic = diagnostic
+          }
+      | diagnostic <-
+          Diagnostics.projectCurrentDiagnostics
+            (analysisDocumentId document)
+            document.documentRevision
+            document.documentContents
+            snapshot
+      ]
+
+documentProblems :: EditorModel -> Document -> [Diagnostics.ProjectedDiagnostic]
+documentProblems model document = fmap (.problemDiagnostic) (problemsForDocument model document)
+
+problemSortKey :: EditorProblem -> (Int, FilePath, Int, Int, Text)
+problemSortKey problem =
+  ( severityRank problem.problemDiagnostic.projectedSeverity
+  , problem.problemPath
+  , problem.problemDiagnostic.projectedLine
+  , problem.problemDiagnostic.projectedColumn
+  , problem.problemDiagnostic.projectedMessage
+  )
+
+severityRank :: Semantic.DiagnosticSeverity -> Int
+severityRank severity =
+  case severity of
+    Semantic.DiagnosticError -> 0
+    Semantic.DiagnosticWarning -> 1
+    Semantic.DiagnosticInformation -> 2
+    Semantic.DiagnosticHint -> 3
+
+diagnosticCollectionKey :: Document -> Diagnostics.ProjectedDiagnostic -> CollectionItemKey
+diagnosticCollectionKey document diagnostic =
+  CollectionItemKey
+    ( setBit
+        ( stableTextIdentity
+            ( Text.pack document.documentPath
+                <> "\NUL"
+                <> diagnostic.projectedDiagnosticId.unDiagnosticId
+            )
+        )
+        63
+    )
+
+stableTextIdentity :: Text -> Word64
+stableTextIdentity = Text.foldl' step 14695981039346656037
+  where
+    step hash character = (hash `xorWord64` fromIntegral (fromEnum character)) * 1099511628211
+    xorWord64 left right = left `xor` right
 
 nextTextRevision :: TextRevision -> TextRevision
 nextTextRevision (TextRevision revision) = TextRevision (revision + 1)

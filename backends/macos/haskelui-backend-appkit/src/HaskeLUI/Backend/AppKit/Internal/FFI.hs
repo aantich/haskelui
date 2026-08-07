@@ -5,9 +5,11 @@
 
 module HaskeLUI.Backend.AppKit.Internal.FFI
   ( CDebugCounters (..)
+  , CDrawingInput (..)
   , CMacRect (..)
   , CTextStyle
   , EventCallback
+  , DrawingInputCallback
   , MacControlHandle
   , MacWindowHandle
   , c_commandRemove
@@ -40,6 +42,7 @@ module HaskeLUI.Backend.AppKit.Internal.FFI
   , c_textEditorApplyStyle
   , c_textEditorBeginPresentation
   , c_textEditorEndPresentation
+  , c_textEditorNavigate
   , c_textEditorSetBaseStyle
   , c_createButton
   , c_createLabel
@@ -47,6 +50,8 @@ module HaskeLUI.Backend.AppKit.Internal.FFI
   , c_createTextEditor
   , c_createDrawingSurface
   , c_drawingSetAccessibleLabel
+  , c_drawingSetCursor
+  , c_drawingSetInputEnabled
   , c_drawingBegin
   , c_drawingPushState
   , c_drawingPopState
@@ -70,6 +75,7 @@ module HaskeLUI.Backend.AppKit.Internal.FFI
   , c_createWindow
   , c_debugCounters
   , c_initialize
+  , c_setDrawingInputCallback
   , c_openProjectFolder
   , c_openTextFiles
   , c_run
@@ -97,6 +103,7 @@ module HaskeLUI.Backend.AppKit.Internal.FFI
   , c_workspaceTabGroupSet
   , c_workspaceTabSet
   , makeEventCallback
+  , makeDrawingInputCallback
   , withCTextStyle
   , withMacRect
   ) where
@@ -168,6 +175,50 @@ data CMacRect = CMacRect
   !CDouble
   deriving stock (Eq, Show)
 
+data CDrawingInput = CDrawingInput
+  { cDrawingInputKind :: !CInt
+  , cDrawingChangedButton :: !CInt
+  , cDrawingPointerIdentity :: !Word64
+  , cDrawingX :: !CDouble
+  , cDrawingY :: !CDouble
+  , cDrawingDeltaX :: !CDouble
+  , cDrawingDeltaY :: !CDouble
+  , cDrawingButtons :: !Word32
+  , cDrawingModifiers :: !Word32
+  , cDrawingClickCount :: !CInt
+  , cDrawingPrecise :: !CInt
+  }
+  deriving stock (Eq, Show)
+
+instance Storable CDrawingInput where
+  sizeOf _ = 64
+  alignment _ = alignment (undefined :: Ptr ())
+  peek pointer =
+    CDrawingInput
+      <$> peekByteOff pointer 0
+      <*> peekByteOff pointer 4
+      <*> peekByteOff pointer 8
+      <*> peekByteOff pointer 16
+      <*> peekByteOff pointer 24
+      <*> peekByteOff pointer 32
+      <*> peekByteOff pointer 40
+      <*> peekByteOff pointer 48
+      <*> peekByteOff pointer 52
+      <*> peekByteOff pointer 56
+      <*> peekByteOff pointer 60
+  poke pointer input = do
+    pokeByteOff pointer 0 input.cDrawingInputKind
+    pokeByteOff pointer 4 input.cDrawingChangedButton
+    pokeByteOff pointer 8 input.cDrawingPointerIdentity
+    pokeByteOff pointer 16 input.cDrawingX
+    pokeByteOff pointer 24 input.cDrawingY
+    pokeByteOff pointer 32 input.cDrawingDeltaX
+    pokeByteOff pointer 40 input.cDrawingDeltaY
+    pokeByteOff pointer 48 input.cDrawingButtons
+    pokeByteOff pointer 52 input.cDrawingModifiers
+    pokeByteOff pointer 56 input.cDrawingClickCount
+    pokeByteOff pointer 60 input.cDrawingPrecise
+
 instance Storable CMacRect where
   sizeOf _ = 32
   alignment _ = alignment (undefined :: CDouble)
@@ -198,6 +249,10 @@ data CTextStyle = CTextStyle
   , cStyleBackgroundGreen :: !CDouble
   , cStyleBackgroundBlue :: !CDouble
   , cStyleBackgroundAlpha :: !CDouble
+  , cStyleUnderlineRed :: !CDouble
+  , cStyleUnderlineGreen :: !CDouble
+  , cStyleUnderlineBlue :: !CDouble
+  , cStyleUnderlineAlpha :: !CDouble
   , cStyleFontSize :: !CDouble
   , cStyleLetterSpacing :: !CDouble
   , cStyleBaselineOffset :: !CDouble
@@ -205,7 +260,7 @@ data CTextStyle = CTextStyle
   }
 
 instance Storable CTextStyle where
-  sizeOf _ = 120
+  sizeOf _ = 152
   alignment _ = alignment (undefined :: Ptr ())
   peek pointer =
     CTextStyle
@@ -227,6 +282,10 @@ instance Storable CTextStyle where
       <*> peekByteOff pointer 96
       <*> peekByteOff pointer 104
       <*> peekByteOff pointer 112
+      <*> peekByteOff pointer 120
+      <*> peekByteOff pointer 128
+      <*> peekByteOff pointer 136
+      <*> peekByteOff pointer 144
   poke pointer style = do
     pokeByteOff pointer 0 style.cStyleFields
     pokeByteOff pointer 4 style.cStyleFamilyKind
@@ -242,10 +301,14 @@ instance Storable CTextStyle where
     pokeByteOff pointer 64 style.cStyleBackgroundGreen
     pokeByteOff pointer 72 style.cStyleBackgroundBlue
     pokeByteOff pointer 80 style.cStyleBackgroundAlpha
-    pokeByteOff pointer 88 style.cStyleFontSize
-    pokeByteOff pointer 96 style.cStyleLetterSpacing
-    pokeByteOff pointer 104 style.cStyleBaselineOffset
-    pokeByteOff pointer 112 style.cStyleFamilyName
+    pokeByteOff pointer 88 style.cStyleUnderlineRed
+    pokeByteOff pointer 96 style.cStyleUnderlineGreen
+    pokeByteOff pointer 104 style.cStyleUnderlineBlue
+    pokeByteOff pointer 112 style.cStyleUnderlineAlpha
+    pokeByteOff pointer 120 style.cStyleFontSize
+    pokeByteOff pointer 128 style.cStyleLetterSpacing
+    pokeByteOff pointer 136 style.cStyleBaselineOffset
+    pokeByteOff pointer 144 style.cStyleFamilyName
 
 withCTextStyle :: TextStyle -> (Ptr CTextStyle -> IO result) -> IO result
 withCTextStyle style use =
@@ -268,6 +331,7 @@ encodeTextStyle familyPointer style =
           .|. optionalField 0x080 style.textStrikethrough
           .|. optionalField 0x100 style.textLetterSpacing
           .|. optionalField 0x200 style.textBaselineOffset
+          .|. optionalField 0x400 style.textUnderlineColor
     , cStyleFamilyKind = maybe 0 encodeFontFamily style.textFontFamily
     , cStyleWeight = maybe 0 encodeFontWeight style.textFontWeight
     , cStyleSlant = maybe 0 encodeFontSlant style.textFontSlant
@@ -281,6 +345,10 @@ encodeTextStyle familyPointer style =
     , cStyleBackgroundGreen = realToFrac background.colorGreen
     , cStyleBackgroundBlue = realToFrac background.colorBlue
     , cStyleBackgroundAlpha = realToFrac background.colorAlpha
+    , cStyleUnderlineRed = realToFrac underline.colorRed
+    , cStyleUnderlineGreen = realToFrac underline.colorGreen
+    , cStyleUnderlineBlue = realToFrac underline.colorBlue
+    , cStyleUnderlineAlpha = realToFrac underline.colorAlpha
     , cStyleFontSize = realToFrac (fromMaybe 0 style.textFontSize)
     , cStyleLetterSpacing = realToFrac (fromMaybe 0 style.textLetterSpacing)
     , cStyleBaselineOffset = realToFrac (fromMaybe 0 style.textBaselineOffset)
@@ -289,6 +357,7 @@ encodeTextStyle familyPointer style =
   where
     foreground = fromMaybe transparent style.textForeground
     background = fromMaybe transparent style.textBackground
+    underline = fromMaybe transparent style.textUnderlineColor
     transparent = RGBA 0 0 0 0
 
 familyName :: TextStyle -> Text
@@ -342,11 +411,19 @@ withMacRect (Rect x y width height) use =
 
 type EventCallback = Ptr () -> CInt -> Word64 -> CString -> IO ()
 
+type DrawingInputCallback = Ptr () -> Word64 -> Ptr CDrawingInput -> IO ()
+
 foreign import ccall "wrapper"
   makeEventCallback :: EventCallback -> IO (FunPtr EventCallback)
 
+foreign import ccall "wrapper"
+  makeDrawingInputCallback :: DrawingInputCallback -> IO (FunPtr DrawingInputCallback)
+
 foreign import ccall unsafe "haskelui_macos_initialize"
   c_initialize :: FunPtr EventCallback -> Ptr () -> IO CInt
+
+foreign import ccall unsafe "haskelui_macos_set_drawing_input_callback"
+  c_setDrawingInputCallback :: FunPtr DrawingInputCallback -> Ptr () -> IO ()
 
 foreign import ccall safe "haskelui_macos_run"
   c_run :: IO ()
@@ -425,6 +502,12 @@ foreign import ccall unsafe "haskelui_macos_drawing_surface_create"
 
 foreign import ccall unsafe "haskelui_macos_drawing_set_accessible_label"
   c_drawingSetAccessibleLabel :: Ptr MacControlHandle -> CString -> IO ()
+
+foreign import ccall unsafe "haskelui_macos_drawing_set_input_enabled"
+  c_drawingSetInputEnabled :: Ptr MacControlHandle -> CInt -> IO ()
+
+foreign import ccall unsafe "haskelui_macos_drawing_set_cursor"
+  c_drawingSetCursor :: Ptr MacControlHandle -> CInt -> IO ()
 
 foreign import ccall unsafe "haskelui_macos_drawing_begin"
   c_drawingBegin :: Ptr MacControlHandle -> IO ()
@@ -560,6 +643,9 @@ foreign import ccall unsafe "haskelui_macos_text_editor_apply_style"
 
 foreign import ccall unsafe "haskelui_macos_text_editor_end_presentation"
   c_textEditorEndPresentation :: Ptr MacControlHandle -> IO ()
+
+foreign import ccall unsafe "haskelui_macos_text_editor_navigate"
+  c_textEditorNavigate :: Ptr MacControlHandle -> Word64 -> Word64 -> CInt -> CInt -> IO CInt
 
 foreign import ccall unsafe "haskelui_macos_control_set_frame"
   c_controlSetFrame :: Ptr MacControlHandle -> Ptr CMacRect -> IO ()

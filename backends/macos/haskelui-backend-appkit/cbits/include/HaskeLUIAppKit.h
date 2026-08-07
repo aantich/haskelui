@@ -95,6 +95,35 @@ typedef void (*HaskeLUIMacEventCallback)(
     uint64_t identity,
     const char *utf8_text);
 
+typedef enum HaskeLUIMacDrawingInputKind {
+  HaskeLUIMacDrawingPointerDown = 1,
+  HaskeLUIMacDrawingPointerMoved = 2,
+  HaskeLUIMacDrawingPointerUp = 3,
+  HaskeLUIMacDrawingPointerCancelled = 4,
+  HaskeLUIMacDrawingPointerEntered = 5,
+  HaskeLUIMacDrawingPointerExited = 6,
+  HaskeLUIMacDrawingScroll = 7
+} HaskeLUIMacDrawingInputKind;
+
+typedef struct HaskeLUIMacDrawingInput {
+  int32_t kind;
+  int32_t changed_button;
+  uint64_t pointer_identity;
+  double x;
+  double y;
+  double delta_x;
+  double delta_y;
+  uint32_t buttons;
+  uint32_t modifiers;
+  int32_t click_count;
+  int32_t precise;
+} HaskeLUIMacDrawingInput;
+
+typedef void (*HaskeLUIMacDrawingInputCallback)(
+    void *context,
+    uint64_t identity,
+    const HaskeLUIMacDrawingInput *input);
+
 typedef struct HaskeLUIMacRect {
   double x;
   double y;
@@ -112,7 +141,8 @@ typedef enum HaskeLUIMacTextStyleField {
   HaskeLUIMacTextStyleUnderline = 1u << 6,
   HaskeLUIMacTextStyleStrikethrough = 1u << 7,
   HaskeLUIMacTextStyleLetterSpacing = 1u << 8,
-  HaskeLUIMacTextStyleBaselineOffset = 1u << 9
+  HaskeLUIMacTextStyleBaselineOffset = 1u << 9,
+  HaskeLUIMacTextStyleUnderlineColor = 1u << 10
 } HaskeLUIMacTextStyleField;
 
 typedef struct HaskeLUIMacTextStyle {
@@ -130,6 +160,10 @@ typedef struct HaskeLUIMacTextStyle {
   double background_green;
   double background_blue;
   double background_alpha;
+  double underline_red;
+  double underline_green;
+  double underline_blue;
+  double underline_alpha;
   double font_size;
   double letter_spacing;
   double baseline_offset;
@@ -146,6 +180,9 @@ typedef struct HaskeLUIMacDebugCounters {
 } HaskeLUIMacDebugCounters;
 
 int32_t haskelui_macos_initialize(HaskeLUIMacEventCallback callback, void *context);
+void haskelui_macos_set_drawing_input_callback(
+    HaskeLUIMacDrawingInputCallback callback,
+    void *context);
 void haskelui_macos_run(void);
 void haskelui_macos_stop(void);
 void haskelui_macos_shutdown(void);
@@ -227,6 +264,12 @@ HaskeLUIMacControlRef haskelui_macos_drawing_surface_create(
 void haskelui_macos_drawing_set_accessible_label(
     HaskeLUIMacControlRef control,
     const char *utf8_accessible_label);
+void haskelui_macos_drawing_set_input_enabled(
+    HaskeLUIMacControlRef control,
+    int32_t enabled);
+void haskelui_macos_drawing_set_cursor(
+    HaskeLUIMacControlRef control,
+    int32_t cursor);
 void haskelui_macos_drawing_begin(HaskeLUIMacControlRef control);
 void haskelui_macos_drawing_push_state(HaskeLUIMacControlRef control);
 void haskelui_macos_drawing_pop_state(HaskeLUIMacControlRef control);
@@ -359,6 +402,12 @@ int32_t haskelui_macos_text_editor_apply_style(
     uint64_t utf16_location,
     uint64_t utf16_length,
     const HaskeLUIMacTextStyle *style);
+int32_t haskelui_macos_text_editor_navigate(
+    HaskeLUIMacControlRef control,
+    uint64_t utf16_location,
+    uint64_t utf16_length,
+    int32_t select_range,
+    int32_t focus_editor);
 void haskelui_macos_text_editor_end_presentation(HaskeLUIMacControlRef control);
 void haskelui_macos_control_measure(
     HaskeLUIMacControlRef control,

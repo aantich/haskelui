@@ -1,14 +1,14 @@
 # Visual Haskell analysis spine
 
-Status: Phase 1A and Phase 1B implemented; connected to Visual Haskell
+Status: Phase 1A, Phase 1B, and diagnostic presentation slice implemented
 
-Date: 2026-08-06
+Date: 2026-08-07
 
 This document describes the implemented boundary between the Visual Haskell
 product and compiler-specific workers. It is narrower than the
-[long-term vision](visual-haskell-vision.md): semantic editor overlays and
-queries are Phase 2, but direct GHC analysis and strict product acceptance are
-now live.
+[long-term vision](visual-haskell-vision.md): current diagnostic overlays,
+Problems UI, and keyed navigation are live; declaration presentation and
+position queries remain the next Phase 2 work.
 
 ## 1. Dependency direction
 
@@ -235,17 +235,26 @@ stack test visual-haskell-semantic-model \
 tests/visual-haskell/validate-analysis-self-host.sh
 ```
 
-## 9. Next slice: native semantic editor
+## 9. Native semantic editor slices
 
-1. Present accepted diagnostics as a generic revision-bound text layer plus a
-   document/summary list; do not alter text, selection, IME, or undo state.
-2. Surface top-level declarations and normalized signatures in the inspector
+Implemented diagnostics slice:
+
+1. Present accepted diagnostics as a generic revision-bound colored-underline
+   text layer plus a Problems inspector list.
+2. Selecting a problem activates the owning tab and sends one keyed,
+   revision-bound reveal/select request; normal native caret motion remains
+   backend-local.
+3. Suppress stale document/revision/hash/freshness/range projections entirely.
+
+Next slice:
+
+1. Surface top-level declarations and normalized signatures in the inspector
    and provide source navigation using the existing stable ranges.
-3. Add typed hover and definition-at-position protocol messages with concrete
+2. Add typed hover and definition-at-position protocol messages with concrete
    GHC fixtures and exact stale-result acceptance tests.
-4. Expose discovered components and explicit selection when more than one
+3. Expose discovered components and explicit selection when more than one
    component owns a file.
-5. Watch cradle/configuration dependencies and request explicit reloads for
+4. Watch cradle/configuration dependencies and request explicit reloads for
    trusted workspaces.
 
 Cancellation, concurrent scheduling, incremental invalidation, HIE indexing,

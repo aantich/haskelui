@@ -98,6 +98,8 @@ module HaskeLUI.Core
   , TextEditorSpec (..)
   , TextLayer (..)
   , TextLayerKey (..)
+  , TextNavigationKey (..)
+  , TextNavigationRequest (..)
   , TextRange (..)
   , TextRevision (..)
   , TextRun (..)
@@ -277,6 +279,9 @@ newtype TextRevision = TextRevision {unTextRevision :: Word64}
 newtype TextLayerKey = TextLayerKey {unTextLayerKey :: Word64}
   deriving stock (Eq, Ord, Show)
 
+newtype TextNavigationKey = TextNavigationKey {unTextNavigationKey :: Word64}
+  deriving stock (Eq, Ord, Show)
+
 newtype ChoiceKey = ChoiceKey {unChoiceKey :: Word64}
   deriving stock (Eq, Ord, Show)
 
@@ -376,6 +381,19 @@ data TextLayer = TextLayer
   }
   deriving stock (Eq, Show)
 
+-- | A revision-bound, one-shot request to reveal a text range. The stable key
+-- lets retained backends apply the request only once even when unrelated model
+-- updates reconcile the editor again. Applications advance the key when the
+-- same logical destination should be revealed a second time.
+data TextNavigationRequest = TextNavigationRequest
+  { textNavigationKey :: !TextNavigationKey
+  , textNavigationRevision :: !TextRevision
+  , textNavigationRange :: !TextRange
+  , textNavigationSelect :: !Bool
+  , textNavigationFocus :: !Bool
+  }
+  deriving stock (Eq, Show)
+
 data TextEditorSpec = TextEditorSpec
   { textEditorKey :: !ElementKey
   , textEditorFrame :: !Rect
@@ -383,6 +401,7 @@ data TextEditorSpec = TextEditorSpec
   , textEditorRevision :: !TextRevision
   , textEditorBaseStyle :: !TextStyle
   , textEditorLayers :: ![TextLayer]
+  , textEditorNavigation :: !(Maybe TextNavigationRequest)
   , textEditorFocused :: !Bool
   }
   deriving stock (Eq, Show)
@@ -580,6 +599,9 @@ data DrawingSurfaceSpec = DrawingSurfaceSpec
   , drawingSurfaceDrawing :: !Drawing
   , drawingSurfaceIntrinsicMetrics :: !IntrinsicMetrics
   , drawingSurfaceAccessibleLabel :: !Text
+  , drawingSurfaceInputMode :: !DrawingInputMode
+  , drawingSurfaceHitTest :: !DrawingHitTest
+  , drawingSurfaceCursor :: !DrawingCursor
   }
   deriving stock (Eq, Show)
 
@@ -1497,6 +1519,12 @@ validateControl control =
             <> drawingValidationMessage drawingError
         | drawingError <- validateDrawing spec.drawingSurfaceDrawing
         ]
+          <> [ "Invalid drawing surface interaction "
+                <> Text.pack (show spec.drawingSurfaceKey)
+                <> ": "
+                <> drawingValidationMessage drawingError
+             | drawingError <- validateDrawingHitTest spec.drawingSurfaceHitTest
+             ]
       Container spec -> validateContainer spec
       LayoutContainer spec -> validateLayoutContainer spec
       _ -> []
@@ -1725,6 +1753,7 @@ data UIEvent
   | WindowCloseRequested !WindowKey
   | WindowActivated !WindowKey
   | SystemColorSchemeChanged !ColorScheme
+  | DrawingInputReceived !ElementKey !DrawingInput
   | TextFileChosen !FilePath
   | ProjectFolderChosen !FilePath
   | DirectoryRead !FilePath !(Either Text [FileSystemEntry])

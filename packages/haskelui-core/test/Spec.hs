@@ -70,6 +70,16 @@ main = do
           && textFontFamily style == Just MonospaceFont
           && textStrikethrough style == Nothing
       _ -> False
+  let diagnosticStyle =
+        mempty
+          { textUnderline = Just UnderlineWavy
+          , textUnderlineColor = Just red
+          }
+      composedStyle = base <> diagnosticStyle
+  assert "diagnostic decoration composes independently from text color" $
+    textForeground composedStyle == Just black
+      && textUnderline composedStyle == Just UnderlineWavy
+      && textUnderlineColor composedStyle == Just red
   let authoredRuns =
         [ TextRun "plain " mempty
         , TextRun "large" (mempty {textFontSize = Just 24})

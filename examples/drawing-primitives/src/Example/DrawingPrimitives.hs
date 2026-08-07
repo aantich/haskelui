@@ -1,8 +1,13 @@
+{-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Example.DrawingPrimitives
   ( application
+  , GalleryModel (..)
+  , initialGalleryModel
   , galleryDrawing
+  , galleryDrawingFor
+  , galleryHitTest
   , gallerySurfaceKey
   , galleryWindowKey
   ) where
@@ -16,20 +21,42 @@ gallerySurfaceKey = ElementKey 7001
 galleryWindowKey :: WindowKey
 galleryWindowKey = WindowKey 7000
 
-application :: App ()
+application :: App GalleryModel
 application =
   App
-    { appInitialModel = ()
+    { appInitialModel = initialGalleryModel
     , appInitialEffects = []
     , appInitialCommands = []
     , appServices = []
     , appSubscriptions = const []
-    , appView = const galleryView
-    , appHandleEvent = \_ _ -> noTransaction
+    , appView = galleryView
+    , appHandleEvent = handleGalleryEvent
     }
 
-galleryView :: AppView
-galleryView =
+data GalleryModel = GalleryModel
+  { galleryRevision :: !DrawingRevision
+  , galleryDragOffset :: !Point
+  , galleryDragAnchor :: !(Maybe Point)
+  , galleryHoveredRegion :: !(Maybe DrawingHitRegionKey)
+  , gallerySelectedRegion :: !(Maybe DrawingHitRegionKey)
+  , galleryCardScale :: !Double
+  , galleryStatus :: !Text
+  }
+  deriving (Eq, Show)
+
+initialGalleryModel :: GalleryModel
+initialGalleryModel =
+  GalleryModel
+    (DrawingRevision 1)
+    (Point 0 0)
+    Nothing
+    Nothing
+    Nothing
+    1
+    "Click a primitive · drag or scroll the rotated card"
+
+galleryView :: GalleryModel -> AppView
+galleryView model =
   AppView
     [ WindowSpec
         galleryWindowKey
@@ -39,8 +66,8 @@ galleryView =
             DrawingSurfaceSpec
               { drawingSurfaceKey = gallerySurfaceKey
               , drawingSurfaceFrame = Rect 20 20 1060 740
-              , drawingSurfaceRevision = DrawingRevision 1
-              , drawingSurfaceDrawing = galleryDrawing
+              , drawingSurfaceRevision = model.galleryRevision
+              , drawingSurfaceDrawing = galleryDrawingFor model
               , drawingSurfaceIntrinsicMetrics =
                   IntrinsicMetrics
                     (Size 640 420)
@@ -49,18 +76,24 @@ galleryView =
                     Nothing
                     Nothing
               , drawingSurfaceAccessibleLabel =
-                  "Gallery of portable rectangles, paths, strokes, transforms, clipping, opacity, and text"
+                  "Interactive gallery of portable rectangles, paths, strokes, transforms, clipping, opacity, and text"
+              , drawingSurfaceInputMode = DrawingInputEnabled
+              , drawingSurfaceHitTest = galleryHitTest model
+              , drawingSurfaceCursor = galleryCursor model
               }
         ]
     ]
     []
 
 galleryDrawing :: Drawing
-galleryDrawing =
+galleryDrawing = galleryDrawingFor initialGalleryModel
+
+galleryDrawingFor :: GalleryModel -> Drawing
+galleryDrawingFor model =
   Group
     [ Fill NonZero (paintRGBA 0.965 0.97 0.985 1) (Rectangle (Rect 0 0 1060 740))
     , title "Portable retained 2D drawing" (Rect 28 20 720 38) 28 TextStart
-    , caption "Logical units · top-left origin · immutable display list · Core Graphics executor" (Rect 30 58 900 24)
+    , caption model.galleryStatus (Rect 30 58 900 24)
     , sectionFrame (Rect 24 96 318 250)
     , sectionTitle "Geometry + fill rules" (Rect 40 108 280 24)
     , Fill NonZero (Solid coral) (Rectangle (Rect 44 150 72 58))
@@ -87,15 +120,7 @@ galleryDrawing =
     , caption "square" (Rect 636 306 70 18)
     , sectionFrame (Rect 24 366 498 166)
     , sectionTitle "Transforms + opacity" (Rect 40 378 280 24)
-    , Transform
-        (translation 150 466)
-        ( Transform
-            (rotation (-0.28))
-            (Group
-              [ Fill NonZero (Solid blue) (RoundedRectangle (Rect (-58) (-34) 116 68) 12 12)
-              , title "rotate" (Rect (-48) (-13) 96 26) 16 TextCenter
-              ])
-        )
+    , Transform (cardTransform model) (cardDrawing model)
     , Transform
         (translation 312 430)
         (Transform (scaling 1.35 0.75) (Fill NonZero (Solid mint) (Ellipse (Rect 0 0 92 82))))
@@ -123,6 +148,142 @@ galleryDrawing =
     , textCard TextEnd TextBottom CharacterWrap "End aligned · character wrapping" (Rect 724 606 292 82)
     , Empty
     ]
+
+rectangleRegion, roundedRegion, ellipseRegion, curveRegion, cardRegion :: DrawingHitRegionKey
+rectangleRegion = DrawingHitRegionKey 1
+roundedRegion = DrawingHitRegionKey 2
+ellipseRegion = DrawingHitRegionKey 3
+curveRegion = DrawingHitRegionKey 4
+cardRegion = DrawingHitRegionKey 5
+
+galleryHitTest :: GalleryModel -> DrawingHitTest
+galleryHitTest model =
+  DrawingHitGroup
+    [ DrawingHitRegion rectangleRegion PointingHandCursor (HitFill NonZero (Rectangle (Rect 44 150 72 58)))
+    , DrawingHitRegion roundedRegion PointingHandCursor (HitFill NonZero (RoundedRectangle (Rect 132 150 82 58) 14 14))
+    , DrawingHitRegion ellipseRegion CrosshairCursor (HitFill NonZero (Ellipse (Rect 232 150 76 58)))
+    , DrawingHitRegion curveRegion CrosshairCursor (HitStroke (stroke 14 RoundCap RoundJoin [] 0) (PathGeometry curvePath))
+    , DrawingHitTransform
+        (cardTransform model)
+        ( DrawingHitRegion
+            cardRegion
+            (if model.galleryDragAnchor == Nothing then OpenHandCursor else ClosedHandCursor)
+            (HitFill NonZero (RoundedRectangle (Rect (-58) (-34) 116 68) 12 12))
+        )
+    ]
+
+cardTransform :: GalleryModel -> Affine2
+cardTransform model =
+  composeAffine
+    (translation (150 + model.galleryDragOffset.pointX) (466 + model.galleryDragOffset.pointY))
+    (composeAffine (rotation (-0.28)) (scaling model.galleryCardScale model.galleryCardScale))
+
+cardDrawing :: GalleryModel -> Drawing
+cardDrawing model =
+  Group
+    [ Fill NonZero (Solid blue) (RoundedRectangle (Rect (-58) (-34) 116 68) 12 12)
+    , title "drag me" (Rect (-48) (-13) 96 26) 16 TextCenter
+    , if model.gallerySelectedRegion == Just cardRegion
+        then Stroke (stroke 3 RoundCap RoundJoin [5, 3] 0) (Solid ink) (RoundedRectangle (Rect (-62) (-38) 124 76) 15 15)
+        else Empty
+    ]
+
+galleryCursor :: GalleryModel -> DrawingCursor
+galleryCursor model
+  | model.galleryDragAnchor /= Nothing = ClosedHandCursor
+  | model.galleryHoveredRegion == Just cardRegion = OpenHandCursor
+  | model.galleryHoveredRegion == Just ellipseRegion || model.galleryHoveredRegion == Just curveRegion = CrosshairCursor
+  | model.galleryHoveredRegion /= Nothing = PointingHandCursor
+  | otherwise = DefaultCursor
+
+handleGalleryEvent :: UIEvent -> GalleryModel -> Transaction GalleryModel
+handleGalleryEvent event model =
+  case event of
+    DrawingInputReceived key (DrawingPointerInput pointer)
+      | key == gallerySurfaceKey -> handlePointer pointer model
+    DrawingInputReceived key (DrawingScrollInput scroll)
+      | key == gallerySurfaceKey -> handleScroll scroll
+    _ -> noTransaction
+
+handlePointer :: DrawingPointerEvent -> GalleryModel -> Transaction GalleryModel
+handlePointer pointer model =
+  case pointer.drawingPointerPhase of
+    DrawingPointerDown ->
+      case targetKey pointer.drawingPointerTarget of
+        Just key
+          | key == cardRegion ->
+              transaction "Begin drawing drag" NoUndo $ \current ->
+                current
+                  { galleryDragAnchor = Just (subtractPoint pointer.drawingPointerPosition current.galleryDragOffset)
+                  , gallerySelectedRegion = Just key
+                  , galleryStatus = "Dragging the transformed card (capture stays active outside it)"
+                  , galleryRevision = nextRevision current.galleryRevision
+                  }
+        Just key ->
+          transaction "Select drawing primitive" NoUndo $ \current ->
+            current
+              { gallerySelectedRegion = Just key
+              , galleryStatus = "Selected " <> regionName key
+              , galleryRevision = nextRevision current.galleryRevision
+              }
+        Nothing -> noTransaction
+    DrawingPointerMoved ->
+      case model.galleryDragAnchor of
+        Just anchor
+          | primaryPointerButtonPressed pointer.drawingPointerButtons ->
+              transaction "Drag drawing primitive" NoUndo $ \current ->
+                current
+                  { galleryDragOffset = subtractPoint pointer.drawingPointerPosition anchor
+                  , galleryHoveredRegion = targetKey pointer.drawingPointerTarget
+                  , galleryRevision = nextRevision current.galleryRevision
+                  }
+        _ ->
+          transaction "Hover drawing primitive" NoUndo $ \current ->
+            current {galleryHoveredRegion = targetKey pointer.drawingPointerTarget}
+    DrawingPointerUp ->
+      transaction "End drawing drag" NoUndo $ \current ->
+        current
+          { galleryDragAnchor = Nothing
+          , galleryHoveredRegion = targetKey pointer.drawingPointerTarget
+          , galleryStatus = if model.galleryDragAnchor == Nothing then current.galleryStatus else "Card moved; scroll over it to resize"
+          , galleryRevision = if model.galleryDragAnchor == Nothing then current.galleryRevision else nextRevision current.galleryRevision
+          }
+    DrawingPointerCancelled ->
+      transaction "Cancel drawing drag" NoUndo $ \current -> current {galleryDragAnchor = Nothing}
+    DrawingPointerExited ->
+      transaction "Leave drawing surface" NoUndo $ \current -> current {galleryHoveredRegion = Nothing}
+    DrawingPointerEntered -> noTransaction
+
+handleScroll :: DrawingScrollEvent -> Transaction GalleryModel
+handleScroll scroll
+  | targetKey scroll.drawingScrollTarget == Just cardRegion =
+      transaction "Scale drawing primitive" NoUndo $ \current ->
+        let requested = current.galleryCardScale - scroll.drawingScrollDelta.pointY * 0.01
+         in current
+              { galleryCardScale = max 0.6 (min 1.5 requested)
+              , gallerySelectedRegion = Just cardRegion
+              , galleryRevision = nextRevision current.galleryRevision
+              , galleryStatus = "Scaled the card with a surface-local scroll event"
+              }
+  | otherwise = noTransaction
+
+targetKey :: Maybe DrawingHitResult -> Maybe DrawingHitRegionKey
+targetKey = fmap drawingHitResultKey
+
+subtractPoint :: Point -> Point -> Point
+subtractPoint left right = Point (left.pointX - right.pointX) (left.pointY - right.pointY)
+
+nextRevision :: DrawingRevision -> DrawingRevision
+nextRevision (DrawingRevision revision) = DrawingRevision (revision + 1)
+
+regionName :: DrawingHitRegionKey -> Text
+regionName key
+  | key == rectangleRegion = "rectangle"
+  | key == roundedRegion = "rounded rectangle"
+  | key == ellipseRegion = "ellipse"
+  | key == curveRegion = "stroked curve"
+  | key == cardRegion = "transformed card"
+  | otherwise = "unknown region"
 
 sectionFrame :: Rect -> Drawing
 sectionFrame rect =

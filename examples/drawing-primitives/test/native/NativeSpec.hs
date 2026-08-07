@@ -27,4 +27,4 @@ main = do
     error ("drawing-primitives: native validation failed: " <> show failure)
   unless (appKitResourcesReleased counters) $
     error ("drawing-primitives: native resources survived shutdown: " <> show counters)
-  putStrLn "drawing-primitives: AppKit retained display list and native paint pass validated"
+  putStrLn "drawing-primitives: AppKit retained display list, native paint pass, and pointer bridge validated"

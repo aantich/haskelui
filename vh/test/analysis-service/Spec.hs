@@ -24,7 +24,10 @@ import System.Directory
   )
 import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
-import VisualHaskell (applicationWithEnvironment)
+import VisualHaskell
+  ( applicationWithEnvironment
+  , firstDocumentEditorKey
+  )
 import VisualHaskell.TextMate (defaultTextMateConfiguration)
 
 main :: IO ()
@@ -45,7 +48,17 @@ main =
           dispatch (TextFileRead sourcePath (Right sourceText))
           analyzed <- waitForCompilerAnalysis latestView 150
           if analyzed
-            then dispatch (WindowCloseRequested (WindowKey 10))
+            then do
+              dispatch (TextChanged firstDocumentEditorKey brokenSourceText)
+              problem <- waitForCompilerProblem latestView 150
+              case problem of
+                Just (listKey, itemKey) -> do
+                  dispatch (CollectionSelectionChanged listKey [itemKey])
+                  navigated <- waitForProblemNavigation latestView 50
+                  if navigated
+                    then dispatch (WindowCloseRequested (WindowKey 10))
+                    else error "Visual Haskell did not reveal the selected compiler problem"
+                Nothing -> error "Visual Haskell did not render the current compiler problem"
             else do
               currentView <- readIORef latestView
               error
@@ -57,6 +70,7 @@ main =
     putStrLn "Visual Haskell typed service accepted a current direct-GHC result"
   where
     sourceText = "module Fixture where\nvalue :: Int\nvalue = 42\n"
+    brokenSourceText = "module Fixture where\nvalue :: Int\nvalue = missingName\n"
 
 waitForCompilerAnalysis :: IORef AppView -> Int -> IO Bool
 waitForCompilerAnalysis _ 0 = pure False
@@ -65,6 +79,44 @@ waitForCompilerAnalysis latestView attempts = do
   if any (Text.isInfixOf "GHC: clean") (labelTexts view)
     then pure True
     else threadDelay 100000 >> waitForCompilerAnalysis latestView (attempts - 1)
+
+waitForCompilerProblem :: IORef AppView -> Int -> IO (Maybe (ElementKey, CollectionItemKey))
+waitForCompilerProblem _ 0 = pure Nothing
+waitForCompilerProblem latestView attempts = do
+  view <- readIORef latestView
+  case
+      [ (collection.collectionControlKey, item.collectionItemKey)
+      | window <- view.appWindows
+      , ListView collection <- windowLeafControls window
+      , item <- collection.collectionControlItems
+      ] of
+    problem : _
+      | hasDiagnosticUnderline view -> pure (Just problem)
+    _ -> threadDelay 100000 >> waitForCompilerProblem latestView (attempts - 1)
+
+waitForProblemNavigation :: IORef AppView -> Int -> IO Bool
+waitForProblemNavigation _ 0 = pure False
+waitForProblemNavigation latestView attempts = do
+  view <- readIORef latestView
+  if
+      or
+        [ editor.textEditorNavigation /= Nothing
+        | window <- view.appWindows
+        , TextEditor editor <- windowLeafControls window
+        ]
+    then pure True
+    else threadDelay 100000 >> waitForProblemNavigation latestView (attempts - 1)
+
+hasDiagnosticUnderline :: AppView -> Bool
+hasDiagnosticUnderline view =
+  or
+    [ spanValue.textSpanValue.textUnderline /= Nothing
+        && spanValue.textSpanValue.textUnderlineColor /= Nothing
+    | window <- view.appWindows
+    , TextEditor editor <- windowLeafControls window
+    , layer <- editor.textEditorLayers
+    , spanValue <- layer.textLayerSpans
+    ]
 
 labelTexts :: AppView -> [Text.Text]
 labelTexts view =

@@ -85,6 +85,7 @@ data TextStyle = TextStyle
   , textFontWeight :: !(Maybe FontWeight)
   , textFontSlant :: !(Maybe FontSlant)
   , textUnderline :: !(Maybe UnderlineStyle)
+  , textUnderlineColor :: !(Maybe Color)
   , textStrikethrough :: !(Maybe Bool)
   , textLetterSpacing :: !(Maybe Double)
   , textBaselineOffset :: !(Maybe Double)
@@ -102,6 +103,7 @@ instance Semigroup TextStyle where
       , textFontWeight = later.textFontWeight <|> earlier.textFontWeight
       , textFontSlant = later.textFontSlant <|> earlier.textFontSlant
       , textUnderline = later.textUnderline <|> earlier.textUnderline
+      , textUnderlineColor = later.textUnderlineColor <|> earlier.textUnderlineColor
       , textStrikethrough = later.textStrikethrough <|> earlier.textStrikethrough
       , textLetterSpacing = later.textLetterSpacing <|> earlier.textLetterSpacing
       , textBaselineOffset = later.textBaselineOffset <|> earlier.textBaselineOffset
@@ -117,6 +119,7 @@ instance Monoid TextStyle where
       , textFontWeight = Nothing
       , textFontSlant = Nothing
       , textUnderline = Nothing
+      , textUnderlineColor = Nothing
       , textStrikethrough = Nothing
       , textLetterSpacing = Nothing
       , textBaselineOffset = Nothing

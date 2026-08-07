@@ -52,6 +52,7 @@ main = do
     testDirectoryRead path
     testInitialOptionalReadAndAtomicWrite path
   testMicroBatchOrdering
+  testDrawingInteraction
   testTaskUsesCurrentModel
   testReplacedTaskIsRejected
   testClosedLifetimeRejectsTask
@@ -60,7 +61,7 @@ main = do
   testServiceCommandCoalescing
   testServiceRestart
   testSubscriptionLifecycle
-  putStrLn "haskelui-runtime: serialized events, tasks, services, subscriptions, restart, effects, and micro-batching passed"
+  putStrLn "haskelui-runtime: serialized events, drawing capture/coalescing, tasks, services, subscriptions, restart, effects, and micro-batching passed"
 
 testRenderDispatch :: IO ()
 testRenderDispatch = do
@@ -319,6 +320,121 @@ testMicroBatchOrdering = do
   runWithTimeout "micro-batch" backend application
   renderCount <- readIORef renders
   assertEqual "micro-batch renders initial and final views once" 2 renderCount
+
+data DrawingInteractionModel = DrawingInteractionModel
+  { drawingInteractionEvents :: ![DrawingPointerEvent]
+  , drawingInteractionOpen :: !Bool
+  }
+  deriving stock (Eq, Show)
+
+testDrawingInteraction :: IO ()
+testDrawingInteraction = do
+  observed <- newIORef ([] :: [DrawingPointerEvent])
+  backend <-
+    queuedBackend
+      (const (pure ()))
+      (\dispatch -> do
+        dispatchPointer dispatch DrawingPointerDown (Point 10 10) (Point 0 0) (Just PrimaryPointerButton) pressedButtons
+        dispatchPointer dispatch DrawingPointerMoved (Point 35 10) (Point 8 0) Nothing pressedButtons
+        dispatchPointer dispatch DrawingPointerMoved (Point 48 10) (Point 13 0) Nothing pressedButtons
+        dispatchPointer dispatch DrawingPointerUp (Point 48 10) (Point 0 0) (Just PrimaryPointerButton) noDrawingPointerButtons
+      )
+  let surfaceKey = ElementKey 210
+      regionKey = DrawingHitRegionKey 211
+      closeTask =
+        startTask
+          (TaskKey "test.drawing-input.close")
+          ApplicationScope
+          ReplaceRunning
+          "Close drawing-input fixture"
+          (const (threadDelay 10000))
+          (const (externalEvent "Close drawing-input fixture" $ \_ -> transaction "Close" NoUndo (\model -> model {drawingInteractionOpen = False})))
+      application =
+        App
+          { appInitialModel = DrawingInteractionModel [] True
+          , appInitialEffects = []
+          , appInitialCommands = []
+          , appServices = []
+          , appSubscriptions = const []
+          , appView = \model ->
+              AppView
+                [ WindowSpec
+                    (WindowKey 21)
+                    "drawing-input"
+                    (Rect 0 0 100 100)
+                    [ DrawingSurface
+                        DrawingSurfaceSpec
+                          { drawingSurfaceKey = surfaceKey
+                          , drawingSurfaceFrame = Rect 0 0 100 100
+                          , drawingSurfaceRevision = DrawingRevision 1
+                          , drawingSurfaceDrawing = Empty
+                          , drawingSurfaceIntrinsicMetrics = IntrinsicMetrics (Size 100 100) (Size 100 100) (Size 100 100) Nothing Nothing
+                          , drawingSurfaceAccessibleLabel = "Interactive test surface"
+                          , drawingSurfaceInputMode = DrawingInputEnabled
+                          , drawingSurfaceHitTest =
+                              DrawingHitRegion regionKey PointingHandCursor (HitFill NonZero (Rectangle (Rect 0 0 20 20)))
+                          , drawingSurfaceCursor = DefaultCursor
+                          }
+                    ]
+                | model.drawingInteractionOpen
+                ]
+                []
+          , appHandleEvent = \event _ ->
+              case event of
+                DrawingInputReceived key (DrawingPointerInput pointer)
+                  | key == surfaceKey ->
+                      transactionWithCommands
+                        "Record drawing input"
+                        NoUndo
+                        [closeTask | pointer.drawingPointerPhase == DrawingPointerUp]
+                        (\model -> model {drawingInteractionEvents = model.drawingInteractionEvents <> [pointer]})
+                _ -> noTransaction
+          }
+  -- Capture the accepted sequence from a runtime command; rendering is
+  -- deliberately irrelevant to this ordering test.
+  let recordingApplication =
+        application
+          { appHandleEvent = \event model ->
+              let update = appHandleEvent application event model
+                  change = applyAction update.transactionAction
+               in update
+                    { transactionCommands =
+                        transactionCommands update
+                          <> [ startTask
+                                (TaskKey "test.drawing-input.observe")
+                                ApplicationScope
+                                ReplaceRunning
+                                "Observe drawing input"
+                                (const (writeIORef observed (drawingInteractionEvents (change model))))
+                                (const (externalEvent "Drawing observation complete" $ \_ -> noTransaction))
+                             | case event of
+                                 DrawingInputReceived _ (DrawingPointerInput pointer) -> pointer.drawingPointerPhase == DrawingPointerUp
+                                 _ -> False
+                             ]
+                    }
+          }
+  runWithTimeout "drawing interaction" backend recordingApplication
+  events <- readIORef observed
+  assertEqual "drawing movement is coalesced" [DrawingPointerDown, DrawingPointerMoved, DrawingPointerUp] (fmap (.drawingPointerPhase) events)
+  assertEqual "drawing capture preserves the down target through drag and release" (replicate 3 (Just (DrawingHitResult regionKey PointingHandCursor))) (fmap (.drawingPointerTarget) events)
+  case events of
+    [_, moved, _] -> assertEqual "coalesced drawing movement accumulates deltas" (Point 21 0) moved.drawingPointerDelta
+    _ -> error ("haskelui-runtime: unexpected drawing event sequence " <> show events)
+  where
+    pressedButtons = noDrawingPointerButtons {primaryPointerButtonPressed = True}
+    dispatchPointer dispatch phase position delta changed buttons =
+      dispatch . DrawingInputReceived (ElementKey 210) . DrawingPointerInput $
+        DrawingPointerEvent
+          { drawingPointerId = DrawingPointerId 1
+          , drawingPointerPhase = phase
+          , drawingPointerPosition = position
+          , drawingPointerDelta = delta
+          , drawingPointerChangedButton = changed
+          , drawingPointerButtons = buttons
+          , drawingPointerModifiers = noDrawingModifiers
+          , drawingPointerClickCount = 1
+          , drawingPointerTarget = Nothing
+          }
 
 data TaskModel = TaskModel
   { taskValue :: !Int

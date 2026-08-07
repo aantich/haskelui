@@ -39,6 +39,11 @@ preserved rather than overwritten.
 - Follow the live operating-system light/dark appearance in the editor base
   palette and select the matching bundled TextMate theme without changing
   document state, selection, or undo history.
+- Show accepted current-revision GHC diagnostics as independently colored
+  underlines without replacing syntax foregrounds.
+- List compiler problems in a native inspector tab. Selecting one activates
+  its existing document tab, selects the exact range, scrolls it into view,
+  and focuses the editor.
 - Keep pane hosts and movable workspace items as distinct identities so content can later move between pane locations without losing retained state.
 - Route text changes into the pure Haskell document model.
 - Route native tab selection and close requests into the pure Haskell workspace model.
@@ -157,6 +162,15 @@ requires a trusted workspace, and keeps every direct `ghc` import inside its
 GHC-9.10 compatibility namespace. The UI process never links GHC. This
 repository includes an explicit multi-component `hie.yaml`, which avoids
 ambiguous `stack repl` selection in the self-hosting workspace.
+
+The current worker supports exactly GHC 9.10.3. `hie-bios`, rather than a VH
+Cabal/Stack parser, remains the authority for the actual cradle, flags, package
+databases, targets, `libdir`, and compiler selection. If the project selects a
+different GHC, VH reports **unsupported compiler** and keeps the editor,
+project tree, persistence, and TextMate highlighting available; it does not
+attempt unsound best-effort analysis with the 9.10.3 API. Future releases will
+select an exact version-specific worker and may coordinate installation of a
+missing toolchain/worker.
 
 Reviewed trust now survives launches. `.vihs` records the requested editor
 state, while the user-owned canonical-workspace registry is the independent

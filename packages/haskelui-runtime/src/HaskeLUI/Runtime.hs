@@ -74,7 +74,7 @@ import Data.IORef
 import Data.List (sortOn)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (catMaybes, isJust)
+import Data.Maybe (catMaybes, isJust, listToMaybe)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import qualified Data.Text as Text
@@ -164,6 +164,13 @@ data EventSource
   | TaskSource !TaskKey !RuntimeGeneration !TaskScope
   | ServiceSource !ServiceKey !RuntimeGeneration
   | SubscriptionSource !SubscriptionKey !RuntimeGeneration
+  deriving stock (Eq, Ord, Show)
+
+data LatestEnvelopeKey
+  = ExternalLatest !EventSource !EventCoalescingKey
+  | DrawingPointerLatest !ElementKey !DrawingPointerId
+  | DrawingScrollLatest !ElementKey
+  deriving stock (Eq, Ord, Show)
 
 data RuntimeEnvelope model
   = BackendEnvelope !UIEvent
@@ -173,7 +180,7 @@ data RuntimeEnvelope model
 
 data QueuedEnvelope model
   = QueuedDirect !(RuntimeEnvelope model)
-  | QueuedLatest !EventCoalescingKey
+  | QueuedLatest !LatestEnvelopeKey
 
 data AliveScopes = AliveScopes
   { aliveWindows :: !(Set WindowKey)
@@ -222,7 +229,7 @@ data Runtime model = Runtime
   , runtimeDesiredView :: !(IORef AppView)
   , runtimeSession :: !(IORef (Maybe BackendSession))
   , runtimeInbox :: !(TQueue (QueuedEnvelope model))
-  , runtimeLatestEvents :: !(TVar (Map EventCoalescingKey (RuntimeEnvelope model)))
+  , runtimeLatestEvents :: !(TVar (Map LatestEnvelopeKey (RuntimeEnvelope model)))
   , runtimeDrainScheduled :: !(TVar Bool)
   , runtimeDraining :: !(TVar Bool)
   , runtimeGenerationCounter :: !(IORef Word64)
@@ -232,6 +239,7 @@ data Runtime model = Runtime
   , runtimeSubscriptions :: !(IORef (Map SubscriptionKey ActiveSubscription))
   , runtimeOpenLifetimes :: !(IORef (Set LifetimeKey))
   , runtimeAliveScopes :: !(IORef AliveScopes)
+  , runtimeDrawingCaptures :: !(IORef (Map (ElementKey, DrawingPointerId) (Maybe DrawingHitResult)))
   , runtimePendingEffects :: !(IORef [Effect])
   , runtimeShuttingDown :: !(IORef Bool)
   }
@@ -288,6 +296,7 @@ newRuntime options application initialView = do
   subscriptions <- newIORef Map.empty
   lifetimes <- newIORef Set.empty
   aliveScopes <- newIORef (scopesFromView initialView)
+  drawingCaptures <- newIORef Map.empty
   pendingEffects <- newIORef []
   shuttingDown <- newIORef False
   pure
@@ -308,18 +317,35 @@ newRuntime options application initialView = do
       , runtimeSubscriptions = subscriptions
       , runtimeOpenLifetimes = lifetimes
       , runtimeAliveScopes = aliveScopes
+      , runtimeDrawingCaptures = drawingCaptures
       , runtimePendingEffects = pendingEffects
       , runtimeShuttingDown = shuttingDown
       }
 
 postBackendEvent :: Runtime model -> UIEvent -> IO ()
-postBackendEvent runtime = enqueueEnvelope runtime . QueuedDirect . BackendEnvelope
+postBackendEvent runtime event =
+  case event of
+    DrawingInputReceived key (DrawingPointerInput pointer)
+      | pointer.drawingPointerPhase == DrawingPointerMoved ->
+          postLatestEnvelopeWith
+            runtime
+            (DrawingPointerLatest key pointer.drawingPointerId)
+            mergeDrawingMovement
+            (BackendEnvelope event)
+    DrawingInputReceived key (DrawingScrollInput _) ->
+      postLatestEnvelopeWith
+        runtime
+        (DrawingScrollLatest key)
+        mergeDrawingMovement
+        (BackendEnvelope event)
+    _ -> enqueueEnvelope runtime (QueuedDirect (BackendEnvelope event))
 
 postExternalEvent :: Runtime model -> EventSource -> ExternalEvent model -> IO ()
 postExternalEvent runtime source event =
   case externalEventDelivery event of
     DeliverEvery -> enqueueEnvelope runtime (QueuedDirect (ExternalEnvelope source event))
-    KeepLatest key -> postLatestEnvelope runtime key (ExternalEnvelope source event)
+    KeepLatest key ->
+      postLatestEnvelope runtime (ExternalLatest source key) (ExternalEnvelope source event)
 
 postLatestExternalEvent
   :: Runtime model
@@ -328,23 +354,54 @@ postLatestExternalEvent
   -> ExternalEvent model
   -> IO ()
 postLatestExternalEvent runtime source key event =
-  postLatestEnvelope runtime key (ExternalEnvelope source event)
+  postLatestEnvelope runtime (ExternalLatest source key) (ExternalEnvelope source event)
 
 postLatestEnvelope
   :: Runtime model
-  -> EventCoalescingKey
+  -> LatestEnvelopeKey
   -> RuntimeEnvelope model
   -> IO ()
-postLatestEnvelope runtime key envelope = do
+postLatestEnvelope runtime key = postLatestEnvelopeWith runtime key const
+
+postLatestEnvelopeWith
+  :: Runtime model
+  -> LatestEnvelopeKey
+  -> (RuntimeEnvelope model -> RuntimeEnvelope model -> RuntimeEnvelope model)
+  -> RuntimeEnvelope model
+  -> IO ()
+postLatestEnvelopeWith runtime key combine envelope = do
   shuttingDown <- readIORef runtime.runtimeShuttingDown
   unless shuttingDown $ do
     shouldWake <- atomically $ do
       pending <- readTVar runtime.runtimeLatestEvents
       let firstForKey = Map.notMember key pending
-      writeTVar runtime.runtimeLatestEvents (Map.insert key envelope pending)
+      let combined = maybe envelope (combine envelope) (Map.lookup key pending)
+      writeTVar runtime.runtimeLatestEvents (Map.insert key combined pending)
       when firstForKey (writeTQueue runtime.runtimeInbox (QueuedLatest key))
       requestDrain runtime
     when shouldWake (scheduleDrain runtime)
+
+mergeDrawingMovement :: RuntimeEnvelope model -> RuntimeEnvelope model -> RuntimeEnvelope model
+mergeDrawingMovement newest older =
+  case (newest, older) of
+    ( BackendEnvelope (DrawingInputReceived key (DrawingPointerInput newPointer))
+      , BackendEnvelope (DrawingInputReceived _ (DrawingPointerInput oldPointer))
+      ) ->
+        BackendEnvelope . DrawingInputReceived key . DrawingPointerInput $
+          newPointer
+            { drawingPointerDelta = addPoints oldPointer.drawingPointerDelta newPointer.drawingPointerDelta
+            }
+    ( BackendEnvelope (DrawingInputReceived key (DrawingScrollInput newScroll))
+      , BackendEnvelope (DrawingInputReceived _ (DrawingScrollInput oldScroll))
+      ) ->
+        BackendEnvelope . DrawingInputReceived key . DrawingScrollInput $
+          newScroll
+            { drawingScrollDelta = addPoints oldScroll.drawingScrollDelta newScroll.drawingScrollDelta
+            }
+    _ -> newest
+  where
+    addPoints :: Point -> Point -> Point
+    addPoints left right = Point (left.pointX + right.pointX) (left.pointY + right.pointY)
 
 enqueueEnvelope :: Runtime model -> QueuedEnvelope model -> IO ()
 enqueueEnvelope runtime envelope = do
@@ -432,10 +489,14 @@ takeOneEnvelope runtime = do
 processEnvelope :: Runtime model -> RuntimeEnvelope model -> IO Bool
 processEnvelope runtime = \case
   BackendEnvelope event -> do
-    traceRuntime runtime TraceDebug "event.backend" (uiEventTraceFields event)
-    model <- readIORef runtime.runtimeModel
-    commitTransaction runtime (runtime.runtimeApplication.appHandleEvent event model)
-    pure True
+    resolved <- resolveDrawingInput runtime event
+    case resolved of
+      Nothing -> pure False
+      Just acceptedEvent -> do
+        traceRuntime runtime TraceDebug "event.backend" (uiEventTraceFields acceptedEvent)
+        model <- readIORef runtime.runtimeModel
+        commitTransaction runtime (runtime.runtimeApplication.appHandleEvent acceptedEvent model)
+        pure True
   ExternalEnvelope source event -> do
     accepted <- acceptExternalSource runtime source
     traceRuntime runtime (if accepted then TraceDebug else TraceWarning) "event.external"
@@ -531,11 +592,80 @@ synchronizeViewOwnership :: Runtime model -> AppView -> IO ()
 synchronizeViewOwnership runtime desired = do
   let currentScopes = scopesFromView desired
   writeIORef runtime.runtimeAliveScopes currentScopes
+  captures <- readIORef runtime.runtimeDrawingCaptures
+  let interactiveSurfaces =
+        Set.fromList
+          [ surface.drawingSurfaceKey
+          | window <- desired.appWindows
+          , DrawingSurface surface <- windowLeafControls window
+          , surface.drawingSurfaceInputMode == DrawingInputEnabled
+          ]
+  writeIORef
+    runtime.runtimeDrawingCaptures
+    (Map.filterWithKey (\(element, _) _ -> Set.member element interactiveSurfaces) captures)
   tasks <- readIORef runtime.runtimeTasks
   let (dead, live) = Map.partition (not . scopeInView currentScopes . (.activeTaskScope)) tasks
   writeIORef runtime.runtimeTasks live
   traverse_ invalidateActiveTask dead
   synchronizeSubscriptions runtime
+
+resolveDrawingInput :: Runtime model -> UIEvent -> IO (Maybe UIEvent)
+resolveDrawingInput runtime event =
+  case event of
+    DrawingInputReceived element input -> do
+      desired <- readIORef runtime.runtimeDesiredView
+      case findDrawingSurface element desired of
+        Just surface | surface.drawingSurfaceInputMode == DrawingInputEnabled -> do
+          resolved <- resolve surface input
+          pure (Just (DrawingInputReceived element resolved))
+        _ -> pure Nothing
+    _ -> pure (Just event)
+  where
+    resolve surface (DrawingScrollInput scroll) =
+      pure . DrawingScrollInput $
+        scroll
+          { drawingScrollTarget =
+              hitTestDrawing scroll.drawingScrollPosition surface.drawingSurfaceHitTest
+          }
+    resolve surface (DrawingPointerInput pointer) = do
+      captures <- readIORef runtime.runtimeDrawingCaptures
+      let captureKey = (surface.drawingSurfaceKey, pointer.drawingPointerId)
+          freshTarget = hitTestDrawing pointer.drawingPointerPosition surface.drawingSurfaceHitTest
+          capturedTarget = Map.lookup captureKey captures
+          hasButtons = drawingButtonsPressed pointer.drawingPointerButtons
+          useTarget =
+            case pointer.drawingPointerPhase of
+              DrawingPointerExited -> Nothing
+              DrawingPointerMoved | hasButtons -> maybe freshTarget id capturedTarget
+              DrawingPointerUp -> maybe freshTarget id capturedTarget
+              DrawingPointerCancelled -> maybe freshTarget id capturedTarget
+              _ -> freshTarget
+      case pointer.drawingPointerPhase of
+        DrawingPointerDown ->
+          writeIORef runtime.runtimeDrawingCaptures (Map.insert captureKey freshTarget captures)
+        DrawingPointerUp ->
+          writeIORef runtime.runtimeDrawingCaptures (Map.delete captureKey captures)
+        DrawingPointerCancelled ->
+          writeIORef runtime.runtimeDrawingCaptures (Map.delete captureKey captures)
+        _ -> pure ()
+      pure . DrawingPointerInput $ pointer {drawingPointerTarget = useTarget}
+
+findDrawingSurface :: ElementKey -> AppView -> Maybe DrawingSurfaceSpec
+findDrawingSurface key view =
+  listToMaybe
+    [ surface
+    | window <- view.appWindows
+    , DrawingSurface surface <- windowLeafControls window
+    , surface.drawingSurfaceKey == key
+    ]
+
+drawingButtonsPressed :: DrawingPointerButtons -> Bool
+drawingButtonsPressed buttons =
+  buttons.primaryPointerButtonPressed
+    || buttons.secondaryPointerButtonPressed
+    || buttons.middlePointerButtonPressed
+    || buttons.backPointerButtonPressed
+    || buttons.forwardPointerButtonPressed
 
 scopesFromView :: AppView -> AliveScopes
 scopesFromView view =
@@ -1140,6 +1270,9 @@ uiEventTraceFields event =
       WindowCloseRequested key -> [("window", Text.pack (show key.unWindowKey))]
       WindowActivated key -> [("window", Text.pack (show key.unWindowKey))]
       SystemColorSchemeChanged scheme -> [("scheme", Text.pack (show scheme))]
+      DrawingInputReceived key input ->
+        keyFields key
+          <> [("input", Text.pack (show input))]
       TextFileChosen path -> [("path", Text.pack path)]
       ProjectFolderChosen path -> [("path", Text.pack path)]
       DirectoryRead path result ->
@@ -1185,6 +1318,7 @@ uiEventKind event =
     WindowCloseRequested {} -> "window-close-requested"
     WindowActivated {} -> "window-activated"
     SystemColorSchemeChanged {} -> "system-color-scheme-changed"
+    DrawingInputReceived {} -> "drawing-input"
     TextFileChosen {} -> "text-file-chosen"
     ProjectFolderChosen {} -> "project-folder-chosen"
     DirectoryRead {} -> "directory-read"

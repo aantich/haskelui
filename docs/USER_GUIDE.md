@@ -1053,6 +1053,9 @@ chartSurface revision drawing =
       , drawingSurfaceIntrinsicMetrics = chartMetrics
       , drawingSurfaceAccessibleLabel =
           "Build duration chart for the last thirty runs"
+      , drawingSurfaceInputMode = DrawingInputDisabled
+      , drawingSurfaceHitTest = NoDrawingHitTest
+      , drawingSurfaceCursor = DefaultCursor
       }
 ```
 
@@ -1066,9 +1069,87 @@ are local to the surface:
   Retina or monitor scale.
 
 The accessibility label describes the visualization as a whole. Prefer a
-useful summary over labels such as “canvas” or “custom view.” A future semantic
-subtree can expose individual nodes or data points; the current API exposes one
-native accessibility image element.
+useful summary over labels such as “canvas” or “custom view.” Hit regions are
+interaction semantics, not accessibility nodes; the current API exposes one
+native accessibility image element for the surface.
+
+### Pointer, drag, hover, and scroll input
+
+Enable input explicitly and provide a semantic hit-test tree alongside the
+drawing:
+
+```haskell
+nodeKey :: DrawingHitRegionKey
+nodeKey = DrawingHitRegionKey 1
+
+nodeHitTest :: Point -> DrawingHitTest
+nodeHitTest offset =
+  DrawingHitTransform
+    (translation offset.pointX offset.pointY)
+    ( DrawingHitRegion
+        nodeKey
+        OpenHandCursor
+        (HitFill NonZero (RoundedRectangle (Rect 0 0 120 64) 10 10))
+    )
+
+nodeSurface model =
+  DrawingSurface
+    DrawingSurfaceSpec
+      { -- key, frame, drawing, revision, metrics, and label omitted
+        drawingSurfaceInputMode = DrawingInputEnabled
+      , drawingSurfaceHitTest = nodeHitTest model.nodePosition
+      , drawingSurfaceCursor = model.nodeCursor
+      }
+```
+
+`DrawingHitTest` is a separate semantic tree so visual paint changes do not
+silently change interaction. Its structure mirrors drawing state:
+
+- `DrawingHitGroup` tests children front-to-back; the last matching child wins.
+- `DrawingHitTransform` applies the same affine transform as the visual.
+- `DrawingHitClip` prevents hits outside a clip geometry.
+- `DrawingHitRegion` associates a stable key and cursor with a `HitFill` or
+  `HitStroke` shape.
+
+The runtime performs hit testing, not the native backend. Every platform
+therefore gets the same transformed, clipped, topmost-target behavior. A
+pointer down captures its resolved target until up or cancellation, so a drag
+continues when the pointer leaves the shape. Capture is released automatically
+if the surface disappears or disables input.
+
+Handle normalized input in `appHandleEvent`:
+
+```haskell
+handleEvent event model =
+  case event of
+    DrawingInputReceived surfaceKey (DrawingPointerInput pointer)
+      | pointer.drawingPointerPhase == DrawingPointerMoved
+      , primaryPointerButtonPressed pointer.drawingPointerButtons
+      , Just target <- pointer.drawingPointerTarget
+      , target.drawingHitResultKey == nodeKey ->
+          transaction "Drag node" NoUndo $ \current ->
+            current
+              { nodePosition = pointer.drawingPointerPosition
+              , nodeRevision = nextRevision current.nodeRevision
+              }
+    DrawingInputReceived surfaceKey (DrawingScrollInput scroll) ->
+      -- scroll position and delta are surface-local logical units
+      handleSurfaceScroll scroll model
+    _ -> noTransaction
+```
+
+Pointer events include phase, stable pointer ID, surface-local position and
+delta, changed button, current button set, Shift/Control/Alt/Meta modifiers,
+click count, and the resolved hit result. Scroll events include position,
+delta, precision, modifiers, and target. High-frequency pointer moves are
+coalesced per surface and pointer; scroll deltas are likewise accumulated per
+surface before a runtime drain. Down, up, enter, exit, and cancellation events
+retain their exact ordering.
+
+`drawingSurfaceCursor` controls the native cursor for the whole surface. Set it
+from the current hover or drag state; the cursor stored on a hit region is
+returned in `DrawingHitResult` to make that update straightforward. Disabled
+surfaces install neither tracking nor cursor handling.
 
 ### Drawing composition
 
@@ -1208,15 +1289,18 @@ frame or intrinsic metrics does not require a drawing revision.
 Build expensive chart layout, graph routing, or data decimation in an
 element-scoped task, then commit the resulting pure `Drawing` and a new revision
 to the model. Live data feeds normally belong in a bounded service. Pointer
-motion and animation are not task or service workloads; retained interactive
-surface input and a presentation frame clock are not part of the current API.
+motion is delivered as coalesced `DrawingInput` and should update the model in
+normal transactions; it is not task or service work. A presentation frame
+clock is not yet part of the API.
 
 ### Validation and headless tests
 
 `validateDrawing` checks finite coordinates and transforms, color and opacity
 ranges, nonnegative geometry and stroke values, dash patterns, font sizes, and
 path sequencing. `validateControlCatalog` automatically includes these errors
-for every `DrawingSurface` in a control tree.
+for every `DrawingSurface` in a control tree. `validateDrawingHitTest` applies
+the corresponding geometry, path, stroke, and transform checks to interaction
+regions. `hitTestDrawing` is pure and can be tested without a backend.
 
 The headless backend exposes normalized drawing commands without rasterizing
 platform-dependent pixels:
@@ -1243,9 +1327,10 @@ stack test haskelui-example-drawing-primitives
 ```
 
 It demonstrates every currently supported geometry, fill rule, path segment,
-stroke cap/join/dash, transform, clipping, opacity, and text-layout option. The
-native test forces the AppKit view through an offscreen bitmap paint pass and
-then verifies complete resource cleanup.
+stroke cap/join/dash, transform, clipping, opacity, and text-layout option, plus
+hover, selection, pointer capture, dragging, cursor changes, and scroll-driven
+scaling. The native test forces the AppKit view through an offscreen bitmap
+paint pass and then verifies complete resource cleanup.
 
 ## 9. Portable layout
 
@@ -1482,6 +1567,7 @@ inside the snapshot.
 - A monotonically changing `TextRevision`.
 - A base `TextStyle`.
 - Ordered, revision-bound `TextLayer` values.
+- An optional keyed, revision-bound `TextNavigationRequest`.
 - Desired focus.
 
 ```haskell
@@ -1493,6 +1579,7 @@ TextEditor
     , textEditorRevision = document.revision
     , textEditorBaseStyle = mempty {textFontFamily = Just MonospaceFont}
     , textEditorLayers = syntaxAndDiagnostics document
+    , textEditorNavigation = document.pendingNavigation
     , textEditorFocused = model.selectedDocument == Just document.key
     }
 ```
@@ -1518,7 +1605,32 @@ color. Stale revisions and invalid ranges are ignored by the pure resolver.
 Applying layers does not change document characters or make the document dirty.
 
 `TextStyle` supports foreground/background color, font family and size, weight,
-slant, underline, strikethrough, letter spacing, and baseline offset.
+slant, underline shape, an independently selectable underline color,
+strikethrough, letter spacing, and baseline offset. This lets a diagnostic add
+a red or amber underline without replacing the syntax foreground.
+
+### Programmatic text navigation
+
+Use `TextNavigationRequest` to reveal a search result, diagnostic, declaration,
+or definition:
+
+```haskell
+TextNavigationRequest
+  { textNavigationKey = TextNavigationKey nextRequestIdentity
+  , textNavigationRevision = document.revision
+  , textNavigationRange = TextRange start length
+  , textNavigationSelect = True
+  , textNavigationFocus = True
+  }
+```
+
+Advance the key for every logical navigation, including a repeated jump to the
+same range. A retained backend compares keys and applies each request once.
+The revision must match the editor snapshot; stale requests are ignored.
+Ordinary user selection and caret movement stay native and do not become
+continuous Haskell model updates merely because programmatic navigation is
+available. `TextRange` is still expressed in Unicode scalar offsets; AppKit
+translates it to UTF-16 before selecting and scrolling.
 
 Visual Haskell now uses the VH-owned `visual-haskell-textmate` package in
 production. Its bounded typed service loads declarative VS Code/TextMate
@@ -1858,9 +1970,13 @@ application framework. Plan around these current boundaries:
   service adapter, and strict model acceptance are implemented. They
   deliberately remain VH-owned rather than HaskeLUI APIs. Current compiler
   analysis uses conservative full snapshots and rechecks every open Haskell
-  module after an edit; cancellation, incremental invalidation, semantic
-  editor overlays, hover, navigation, and component-selection UI are the next
-  product layers.
+  module after an edit. Current-revision compiler diagnostics, colored
+  underline layers, the Problems inspector, and keyed source navigation are
+  implemented. Cancellation, incremental invalidation, declaration outline,
+  hover/definition queries, and component-selection UI are the next product
+  layers. The current worker accepts exactly GHC 9.10.3; a different
+  cradle-selected compiler produces an explicit unsupported-compiler state
+  while ordinary editing and lexical highlighting continue.
 - Transaction undo policies are represented, but a complete application undo
   interpreter is not.
 - Compatibility file effects are synchronous and UTF-8-only; new background
@@ -1873,11 +1989,11 @@ application framework. Plan around these current boundaries:
 - Live automatic relayout from public window-resize events is incomplete.
 - Authored rich-text persistence and editing operations are not complete;
   derived text presentation layers are implemented.
-- Portable retained drawing surfaces, validation, headless display-list
-  capture, and the AppKit executor are implemented. Paints are currently solid
-  colors; images, gradients, portable text measurement, retained pointer input,
-  partial damage, animation clocks, and Windows/SDL executors remain future
-  work.
+- Portable retained drawing surfaces, pure semantic hit testing, captured and
+  coalesced pointer/scroll input, headless display-list capture, and the AppKit
+  executor are implemented. Paints are currently solid colors; images,
+  gradients, portable text measurement, partial damage, animation clocks, and
+  Windows/SDL executors remain future work.
 - Animations and transitions are outside the current layout contract.
 
 These boundaries are deliberately kept visible. Application code should not

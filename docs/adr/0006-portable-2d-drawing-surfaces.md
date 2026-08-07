@@ -1,6 +1,6 @@
 # ADR 0006: Portable 2D drawing surfaces and display lists
 
-Status: Proposed  
+Status: Accepted
 Date: 2026-08-06
 
 ## Context
@@ -75,15 +75,15 @@ The compiled control IR gains a leaf equivalent to:
 
 ```haskell
 data DrawingSurfaceSpec = DrawingSurfaceSpec
-  { drawingSurfaceKey               :: ElementKey
-  , drawingSurfaceFrame             :: Rect
-  , drawingSurfaceContentRevision   :: DrawingRevision
-  , drawingSurfaceContent           :: Drawing
-  , drawingSurfaceSemanticsRevision :: SemanticsRevision
-  , drawingSurfaceSemantics         :: DrawingSemantics
-  , drawingSurfaceMeasure           :: DrawingMeasure
-  , drawingSurfaceFocusable         :: Bool
-  , drawingSurfaceEnabled           :: Bool
+  { drawingSurfaceKey              :: ElementKey
+  , drawingSurfaceFrame            :: Rect
+  , drawingSurfaceRevision         :: DrawingRevision
+  , drawingSurfaceDrawing          :: Drawing
+  , drawingSurfaceIntrinsicMetrics :: IntrinsicMetrics
+  , drawingSurfaceAccessibleLabel  :: Text
+  , drawingSurfaceInputMode        :: DrawingInputMode
+  , drawingSurfaceHitTest          :: DrawingHitTest
+  , drawingSurfaceCursor           :: DrawingCursor
   }
 ```
 
@@ -98,8 +98,8 @@ optional aspect ratio. The surface is one rectangular custom-rendered island,
 always clipped to its arranged bounds. Focus and enabled state are explicit;
 cursor selection and input capabilities belong to its interaction contract.
 
-The eventual opaque `View model` facade accepts callbacks separately from the
-drawing value:
+An eventual opaque `View model` facade may add element-local state and accepts
+callbacks separately from the drawing value:
 
 ```haskell
 drawingSurface
@@ -120,10 +120,12 @@ surface syntax may reuse the framework's eventual `ElementProperty` and
 `StateSource` APIs, but this lifecycle is required before the interactive graph
 slice. Callbacks and state are not embedded in the display list.
 
-The current concrete `Control` IR may first carry only a pre-resolved static
-`Drawing` and emit no input. That is an implementation slice, not the final
-custom-element contract. Pointer events must not be routed through the current
-whole-application rerender loop and described as retained local interaction.
+The current concrete `Control` IR carries a pre-resolved `Drawing`, a separate
+semantic hit-test tree, and typed pointer/scroll input. Input is delivered to
+the serialized application reducer as `DrawingInputReceived`; high-frequency
+movement is coalesced before the reducer drain. This intentionally supports
+model-owned graph and chart interaction now without claiming the future
+element-local reducer lifecycle.
 
 ### Drawing model
 
@@ -236,16 +238,20 @@ the same immutable resource snapshot as graphical executors.
 
 ### Input, hit testing, and accessibility
 
-Painting is not the interaction model. Backends normalize pointer, scroll,
-keyboard, focus, and capture events into surface-local logical coordinates.
-The drawing API provides affine inversion and geometric containment utilities,
-but does not infer semantic targets from pixels.
+Painting is not the interaction model. Backends normalize pointer and scroll
+events into surface-local logical coordinates. Core provides a separate
+`DrawingHitTest` tree with affine transforms, clips, fill/stroke shapes, stable
+region keys, and cursor hints. The runtime resolves the topmost target using
+this portable tree rather than asking a native renderer to infer semantics
+from pixels.
 
-Graph and chart layers retain their own stable item identities and spatial
-indexes. They map an input location to a node, edge, port, data mark, or empty
-space and then produce semantic actions. High-frequency hover, drag previews,
-autoscroll, and pointer capture are retained element state; durable selections
-and graph edits remain application-model state.
+Graph and chart layers assign stable region identities to nodes, edges, ports,
+data marks, or empty space and then produce model actions. Pointer down captures
+the resolved target until up/cancellation; captures are removed with the
+surface. Motion is coalesced per surface and pointer, and scroll deltas per
+surface. Durable selections and graph edits remain application-model state.
+Element-local hover/drag state and spatial-index hit-test nodes remain a future
+optimization for very large scenes.
 
 Accessibility is a parallel tree, not a flat list. Each node has identity unique
 within its surface, ordered children, role, label, value, state, logical bounds,
@@ -330,8 +336,10 @@ not reduced to SDL's line and rectangle operations.
    fills, strokes, transforms, clips, and simple text.
 4. Add gradients, the text measurement/cache prepass, independent revisions,
    and full-surface invalidation.
-5. Add the retained local-state lifecycle, normalized pointer/scroll events,
-   capture, semantic nodes, and an interactive graph example.
+5. Add normalized pointer/scroll events, portable hit regions, capture,
+   coalescing, cursor updates, and an interactive drawing example. (Complete.)
+   Retained element-local reducers and accessibility semantic subtrees remain
+   follow-up work.
 6. Implement a second executor, preferably Direct2D or SDL3, and only then
    freeze or publish the normalized display-list representation.
 7. Define the resource registry/lifetime contract, then add images, resource

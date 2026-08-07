@@ -903,6 +903,7 @@ editorSpec key frame model focused =
             | not (Text.null model.galleryText)
             ]
         ]
+    , textEditorNavigation = Nothing
     , textEditorFocused = focused
     }
 

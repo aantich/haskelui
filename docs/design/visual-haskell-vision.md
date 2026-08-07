@@ -1,8 +1,8 @@
 # Visual Haskell long-term product and analysis vision
 
-Status: active roadmap; Phase 0, Phase 1A, and Phase 1B are implemented
+Status: active roadmap; Phase 0, Phase 1A, Phase 1B, and Phase 2A are implemented
 
-Date: 2026-08-06
+Date: 2026-08-07
 
 Audience: Visual Haskell contributors, HaskeLUI runtime contributors, compiler
 integration authors, and product designers
@@ -363,6 +363,30 @@ construct GHC sessions.
 
 Project-file parsing for display/editing is a separate feature and never
 becomes the compiler-configuration authority.
+
+#### 7.2.1 Current single-compiler policy
+
+The shipped worker is compiled against exactly GHC 9.10.3. `hie-bios` still
+runs the workspace's real cradle (Stack, Cabal, direct, or custom) and returns
+its flags, package databases, targets, `libdir`, and selected compiler version.
+The worker verifies that version before creating a GHC session.
+
+If the cradle selects any other GHC version, the worker returns the
+non-recoverable `incompatible-compiler` failure. Visual Haskell displays
+**unsupported compiler** with the selected and required versions. Ordinary
+editing, TextMate highlighting, project navigation, tabs, and persistence
+remain available; compiler diagnostics and semantic features do not.
+
+The worker must never attempt best-effort analysis by feeding another GHC
+version's flags or package database into its linked 9.10.3 API. GHC API/ABI,
+package database, wired-in package, extension, and interface-format differences
+make such results unsound even when a module appears to parse.
+
+Future multi-version support keeps this policy and changes only worker
+selection: detect the cradle compiler, choose an exact compatible worker, and
+offer toolchain/worker installation when one is missing. Cabal/Stack/Hpack
+parsers used by project-file editors remain presentation/editing providers, not
+session configuration fallbacks.
 
 ### 7.3 Session identity
 
@@ -867,7 +891,7 @@ prevents opening the workspace; it causes eviction and rebuilding.
 V1 bundles one worker:
 
 ```text
-vh-analysis-ghc-9.10.3
+visual-haskell-analysis-ghc910
 ```
 
 One worker process serves one workspace and compiler version, with one or more
@@ -1035,6 +1059,26 @@ Gate:
   prove that semantic layers never change characters, selection, IME state, or
   undo history.
 
+#### Phase 2A: Current diagnostics and navigation — implemented
+
+- Accepted current-revision diagnostics are projected purely from GHC display
+  columns to HaskeLUI Unicode-scalar ranges.
+- A generic, revision-bound diagnostic `TextLayer` contributes only underline
+  shape and independently themed underline color, preserving TextMate syntax
+  foregrounds.
+- The native inspector contains a Problems tab with severity, message,
+  document, line/column, source, and diagnostic code.
+- Selecting a problem activates its existing document tab and emits a keyed,
+  revision-bound reveal/select request. Retained backends apply each request
+  once without making ordinary native caret movement authoritative Haskell
+  model state.
+- Any document/revision/hash/freshness/range mismatch suppresses both the list
+  item and decoration.
+
+Phase 2B is declaration outline and normalized signatures. Hover and
+definition-at-position follow after their typed position-query protocol is
+specified and tested against real GHC fixtures.
+
 ### Phase 3: Incrementality and workspace index
 
 - Profile direct GHC reload behavior.
@@ -1182,20 +1226,20 @@ and dependency presentation first. Add narrow edit actions such as adding a
 dependency only after source-of-truth detection and format-preservation
 fixtures pass.
 
-## 23. Next concrete experiment
+## 23. Next concrete implementation
 
-The first compiler milestone is deliberately narrow:
+Phase 2B is a native declaration outline:
 
-> Start a supervised GHC 9.10.3 worker, load the HaskeLUI workspace through
-> `hie-bios`, analyze two dependent unsaved document revisions, and return
-> correctly mapped diagnostics, declarations, and structured types. Then force
-> the worker to crash, restart it, replay authoritative snapshots, and prove
-> that no stale pre-crash event reaches the current model.
+> Project the already accepted declaration/signature data into a keyed
+> inspector collection, navigate to its exact selection range, distinguish
+> parse-only/partial results visibly, and preserve selection across fresh
+> snapshots when a stable declaration identity survives.
 
-The process boundary, protocol, Unicode coordinate layer, and restart/replay
-model have already passed independently with the fake worker. Success now
-validates the remaining direct-GHC approach, project loading, source overlays,
-and runtime-to-editor acceptance rules in one vertical slice.
+This reuses the completed diagnostic projection and keyed navigation path. It
+does not yet add a cursor-query protocol. After the outline is proven, add
+typed hover and definition-at-position requests with document revision/content
+hash and request identity, then reject late answers by the same rules used for
+analysis snapshots.
 
 ## 24. External technical references
 
