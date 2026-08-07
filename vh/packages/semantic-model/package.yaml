@@ -25,6 +25,7 @@ library:
   exposed-modules:
     - VisualHaskell.Semantic
     - VisualHaskell.Semantic.Coordinates
+    - VisualHaskell.Semantic.TypeUniverse
     - VisualHaskell.Semantic.Types
 
 tests:

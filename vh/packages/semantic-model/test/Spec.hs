@@ -5,6 +5,8 @@ module Main (main) where
 
 import Control.Monad (unless)
 import Data.Aeson (decode, encode)
+import qualified Data.Map.Strict as Map
+import qualified Data.Text as Text
 import VisualHaskell.Semantic
 
 main :: IO ()
@@ -34,7 +36,141 @@ main = do
           (DocumentId "doc") "Main.hs" revision
           (contentHash "main = pure ()") "main = pure ()" LF
   assertEqual "document snapshot JSON round trip" (Just snapshot) (decode (encode snapshot))
+
+  let boxType = TypeId "type:Box"
+      boxConstructorType = TypeId "constructor:Box"
+      kindType = TypeId "kind:Type"
+      valueType = TypeId "type:Int-to-Box"
+      boxDeclaration =
+        Declaration
+          { declarationId = DeclarationId "decl:Box"
+          , declarationName = "Box"
+          , declarationKind = TypeDeclaration
+          , declarationRange = (10 :: Int)
+          , declarationSelectionRange = 11
+          , declarationType = Just boxType
+          , declarationSignatureText = Just "Type"
+          , declarationTypeSemantics =
+              Just
+                TypeDeclarationSemantics
+                  { typeDeclarationSemanticConstructor = boxConstructorType
+                  , typeDeclarationSemanticParameters =
+                      [TypeParameterSemantics "a" (Just kindType)]
+                  , typeDeclarationSemanticDefinition =
+                      AlgebraicTypeSemantics
+                        [ TypeConstructorSemantics
+                            { typeConstructorSemanticId = "constructor:MkBox"
+                            , typeConstructorSemanticName = "MkBox"
+                            , typeConstructorSemanticExistentials = []
+                            , typeConstructorSemanticConstraints = []
+                            , typeConstructorSemanticArguments = [boxConstructorType]
+                            , typeConstructorSemanticFields =
+                                [ TypeFieldSemantics
+                                    { typeFieldSemanticId = "field:next"
+                                    , typeFieldSemanticName = "next"
+                                    , typeFieldSemanticType = boxConstructorType
+                                    , typeFieldSemanticRange = Just 12
+                                    }
+                                ]
+                            , typeConstructorSemanticResult = Just boxConstructorType
+                            , typeConstructorSemanticRange = Just 13
+                            }
+                        ]
+                  }
+          }
+      valueDeclaration =
+        Declaration
+          { declarationId = DeclarationId "decl:box"
+          , declarationName = "box"
+          , declarationKind = ValueDeclaration
+          , declarationRange = 20
+          , declarationSelectionRange = 21
+          , declarationType = Just valueType
+          , declarationSignatureText = Just "Int -> Box"
+          , declarationTypeSemantics = Nothing
+          }
+      firstAnalysis =
+        AnalysisSnapshot
+          { analysisWorkspaceGeneration = WorkspaceGeneration 3
+          , analysisSession = SessionId "session"
+          , analysisDocument = DocumentId "/project/A.hs"
+          , analysisRevision = TextRevision 4
+          , analysisContentHash = contentHash "data Box = Box Int"
+          , analysisCompleteness = Typechecked
+          , analysisFreshness = CurrentAnalysis
+          , analysisDiagnostics = []
+          , analysisDeclarations = [boxDeclaration, valueDeclaration]
+          , analysisTypes =
+              Map.fromList
+                [ (boxType, TypeConstructor "Type")
+                , (boxConstructorType, TypeConstructor "A.Box")
+                , (kindType, TypeConstructor "GHC.Types.Type")
+                , (valueType, UnsupportedType "Int -> Box")
+                ]
+          }
+      secondAnalysis =
+        firstAnalysis
+          { analysisDocument = DocumentId "/project/B.hs"
+          , analysisDeclarations =
+              [ boxDeclaration
+                  { declarationId = DeclarationId "decl:Other"
+                  , declarationName = "Other"
+                  , declarationTypeSemantics = Nothing
+                  }
+              ]
+          }
+      currentUniverse =
+        buildTypeUniverse
+          (CurrentDocumentTypes (DocumentId "/project/A.hs"))
+          [firstAnalysis, secondAnalysis]
+      projectUniverse =
+        buildTypeUniverse
+          (ProjectTypes (WorkspaceId "/project") (Just (DocumentId "/project/A.hs")))
+          [firstAnalysis, secondAnalysis]
+      debugProjection = renderTypeUniverseDebug (Text.pack . show) currentUniverse
+  assertEqual "current-file universe filters its sources" 1 (length currentUniverse.typeUniverseSources)
+  assertEqual
+    "current-file universe reports exact document coverage"
+    (ExactDocumentCoverage (DocumentId "/project/A.hs"))
+    currentUniverse.typeUniverseCoverage
+  assertEqual "type declarations become stable universe entities" 1 (Map.size currentUniverse.typeUniverseEntities)
+  assertEqual "all declaration type attachments remain available" 2 (length currentUniverse.typeUniverseUsages)
+  assertEqual "recursive definitions produce a reference and a recursion marker" 2 (length currentUniverse.typeUniverseRelations)
+  assertEqual "project universe combines accepted document snapshots" 2 (Map.size projectUniverse.typeUniverseEntities)
+  assert
+    "project origin distinguishes focused and workspace documents"
+    ( let origins = map (.typeEntityOrigin) (Map.elems projectUniverse.typeUniverseEntities)
+       in CurrentDocumentOrigin (DocumentId "/project/A.hs") `elem` origins
+            && WorkspaceDocumentOrigin (DocumentId "/project/B.hs") `elem` origins
+    )
+  assert
+    "debug mode exposes the exact semantic projection"
+    ( all
+        (`Text.isInfixOf` debugProjection)
+        [ "type-universe/v1"
+        , "scope: current-document /project/A.hs"
+        , "coverage: exact-document /project/A.hs"
+        , "name: Box"
+        , "name: box"
+        , "type-constructor: constructor:Box"
+        , "parameters: [a :: kind:Type]"
+        , "definition: algebraic (1 constructors)"
+        , "constructor-id: constructor:MkBox"
+        , "name: next"
+        , "result: constructor:Box"
+        , "structured-types: 4"
+        , "relations: 2"
+        , "--recursive-reference-->"
+        ]
+    )
+  assertEqual
+    "analysis JSON preserves rich declared-type semantics"
+    (Just firstAnalysis)
+    (decode (encode firstAnalysis))
   putStrLn "Visual Haskell semantic model tests passed"
+
+assert :: String -> Bool -> IO ()
+assert message condition = unless condition (fail message)
 
 assertEqual :: (Eq value, Show value) => String -> value -> value -> IO ()
 assertEqual message expected actual =

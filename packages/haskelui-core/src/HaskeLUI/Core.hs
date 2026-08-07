@@ -61,6 +61,9 @@ module HaskeLUI.Core
   , PaneState (..)
   , PaneTree (..)
   , PaneVisibility (..)
+  , PresentationActionId (..)
+  , PresentationActionRole (..)
+  , PresentationActionSpec (..)
   , PresentationKind (..)
   , PresentationResult (..)
   , PresentationSpec (..)
@@ -149,8 +152,10 @@ module HaskeLUI.Core
   , controlIntrinsicMetrics
   , setControlFrame
   , resolveControlLayouts
+  , resolveControlLayoutsWithAllocations
   , resolveAppViewLayouts
   , resolveAppViewLayoutsWith
+  , resolveAppViewLayoutsWithAllocations
   , flattenControls
   , noTransaction
   , cancelScope
@@ -677,8 +682,29 @@ data PresentationKind
   | PopoverPresentation !ElementKey
   deriving stock (Eq, Show)
 
+newtype PresentationActionId = PresentationActionId {unPresentationActionId :: Word64}
+  deriving stock (Eq, Ord, Show)
+
+-- | Semantic button roles let each backend use its platform conventions for
+-- ordering, keyboard equivalents, emphasis, and destructive styling.
+data PresentationActionRole
+  = DefaultPresentationAction
+  | CancelPresentationAction
+  | DestructivePresentationAction
+  | AuxiliaryPresentationAction
+  deriving stock (Eq, Ord, Show)
+
+data PresentationActionSpec = PresentationActionSpec
+  { presentationActionId :: !PresentationActionId
+  , presentationActionTitle :: !Text
+  , presentationActionRole :: !PresentationActionRole
+  , presentationActionEnabled :: !Bool
+  }
+  deriving stock (Eq, Show)
+
 data PresentationResult
-  = PresentationAccepted
+  = PresentationActionSelected !PresentationActionId
+  | PresentationAccepted
   | PresentationCancelled
   | PresentationDismissed
   deriving stock (Eq, Ord, Show)
@@ -689,6 +715,7 @@ data PresentationSpec = PresentationSpec
   , presentationKind :: !PresentationKind
   , presentationTitle :: !Text
   , presentationMessage :: !Text
+  , presentationActions :: ![PresentationActionSpec]
   , presentationVisible :: !Bool
   }
   deriving stock (Eq, Show)
@@ -1075,14 +1102,35 @@ resolveControlLayouts
   :: Map ElementKey IntrinsicMetrics
   -> [Control]
   -> ([Control], [LayoutDiagnostic ElementKey])
-resolveControlLayouts supplied controls =
+resolveControlLayouts supplied =
+  resolveControlLayoutsWithAllocations supplied Map.empty
+
+-- | Solve portable layout roots using the space actually allocated by the
+-- host backend.  An allocation replaces only the width and height of the
+-- declared container frame; its origin remains an application-level placement
+-- concern.  Backends should call this whenever a retained native layout host
+-- changes size, rather than exposing resize bookkeeping to application models.
+resolveControlLayoutsWithAllocations
+  :: Map ElementKey IntrinsicMetrics
+  -> Map ElementKey Size
+  -> [Control]
+  -> ([Control], [LayoutDiagnostic ElementKey])
+resolveControlLayoutsWithAllocations supplied allocations controls =
   let resolved = fmap resolveOne controls
    in (fmap fst resolved, foldMap snd resolved)
   where
     resolveOne :: Control -> (Control, [LayoutDiagnostic ElementKey])
     resolveOne = \case
       LayoutContainer spec ->
-        let frame = spec.layoutContainerFrame
+        let declaredFrame = spec.layoutContainerFrame
+            frame =
+              case Map.lookup spec.layoutContainerKey allocations of
+                Nothing -> declaredFrame
+                Just allocated ->
+                  declaredFrame
+                    { rectWidth = max 0 (unDp allocated.sizeWidth)
+                    , rectHeight = max 0 (unDp allocated.sizeHeight)
+                    }
             headerHeight =
               case spec.layoutContainerPresentation of
                 GroupLayoutContainer _ -> 30
@@ -1126,7 +1174,8 @@ resolveControlLayouts supplied controls =
             updated =
               LayoutContainer
                 spec
-                  { layoutContainerChildren = fmap fst children
+                  { layoutContainerFrame = frame
+                  , layoutContainerChildren = fmap fst children
                   }
          in (updated, plan.layoutDiagnostics <> foldMap snd children)
       Container spec ->
@@ -1512,6 +1561,9 @@ validateControl control =
             }
       ProgressBar spec -> validateProgress spec
       Meter spec -> validateProgress spec
+      Dialog spec -> validatePresentation spec
+      Alert spec -> validatePresentation spec
+      Popover spec -> validatePresentation spec
       DrawingSurface spec ->
         [ "Invalid drawing surface "
             <> Text.pack (show spec.drawingSurfaceKey)
@@ -1528,6 +1580,31 @@ validateControl control =
       Container spec -> validateContainer spec
       LayoutContainer spec -> validateLayoutContainer spec
       _ -> []
+
+validatePresentation :: PresentationSpec -> [Text]
+validatePresentation spec =
+  duplicateDiagnostics
+    "presentation action"
+    (fmap (show . unPresentationActionId . presentationActionId) spec.presentationActions)
+    <> [ "Presentation has more than one default action: "
+          <> Text.pack (show spec.presentationKey)
+       | actionCount DefaultPresentationAction > 1
+       ]
+    <> [ "Presentation has more than one cancel action: "
+          <> Text.pack (show spec.presentationKey)
+       | actionCount CancelPresentationAction > 1
+       ]
+    <> [ "Presentation action titles must not be empty: "
+          <> Text.pack (show spec.presentationKey)
+       | any (Text.null . Text.strip . presentationActionTitle) spec.presentationActions
+       ]
+  where
+    actionCount role =
+      length
+        [ ()
+        | presentationAction <- spec.presentationActions
+        , presentationAction.presentationActionRole == role
+        ]
 
 validateFrame :: ElementKey -> Rect -> [Text]
 validateFrame key frame =
@@ -1681,17 +1758,30 @@ resolveAppViewLayoutsWith
   :: Map ElementKey IntrinsicMetrics
   -> AppView
   -> (AppView, [LayoutDiagnostic ElementKey])
-resolveAppViewLayoutsWith measurements desiredView =
+resolveAppViewLayoutsWith measurements =
+  resolveAppViewLayoutsWithAllocations measurements Map.empty
+
+-- | Resolve all portable layouts in an application snapshot against native
+-- host allocations.  This is the backend-facing counterpart of
+-- 'resolveControlLayoutsWithAllocations'.
+resolveAppViewLayoutsWithAllocations
+  :: Map ElementKey IntrinsicMetrics
+  -> Map ElementKey Size
+  -> AppView
+  -> (AppView, [LayoutDiagnostic ElementKey])
+resolveAppViewLayoutsWithAllocations measurements allocations desiredView =
   let windows = fmap resolveWindow desiredView.appWindows
    in (desiredView {appWindows = fmap fst windows}, foldMap snd windows)
   where
     resolveWindow :: WindowSpec -> (WindowSpec, [LayoutDiagnostic ElementKey])
     resolveWindow window@WindowSpec {windowControls = controls} =
-      let (resolved, diagnostics) = resolveControlLayouts measurements controls
+      let (resolved, diagnostics) =
+            resolveControlLayoutsWithAllocations measurements allocations controls
        in (window {windowControls = resolved}, diagnostics)
     resolveWindow window@WorkspaceWindowSpec {windowWorkspaceSpec = workspace} =
       let (root, rootDiagnostics) = resolvePaneTree workspace.workspaceRoot
-          (status, statusDiagnostics) = resolveControlLayouts measurements workspace.workspaceStatusControls
+          (status, statusDiagnostics) =
+            resolveControlLayoutsWithAllocations measurements allocations workspace.workspaceStatusControls
        in ( window
               { windowWorkspaceSpec =
                   workspace
@@ -1719,11 +1809,13 @@ resolveAppViewLayoutsWith measurements desiredView =
     resolveItem item =
       case item.workspaceItemContent of
         WorkspaceItemControls controls ->
-          let (resolved, diagnostics) = resolveControlLayouts measurements controls
+          let (resolved, diagnostics) =
+                resolveControlLayoutsWithAllocations measurements allocations controls
            in (item {workspaceItemContent = WorkspaceItemControls resolved}, diagnostics)
         WorkspaceItemTabGroup groupSpec ->
           let resolveTab tab =
-                let (resolved, diagnostics) = resolveControlLayouts measurements tab.workspaceTabControls
+                let (resolved, diagnostics) =
+                      resolveControlLayoutsWithAllocations measurements allocations tab.workspaceTabControls
                  in (tab {workspaceTabControls = resolved}, diagnostics)
               tabs = fmap resolveTab groupSpec.workspaceTabs
            in ( item

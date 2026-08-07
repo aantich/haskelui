@@ -152,6 +152,92 @@ main = do
     openFolderRequest.transactionEffects
   assert "editor starts with one workspace window" (length initialView.appWindows == 1)
   assert "empty workspace validates" (all (null . validateWindowWorkspace) initialView.appWindows)
+  assertEqual
+    "the inspector exposes document, problems, types, and functions tabs"
+    ["Document", "Problems (0)", "Types", "Functions"]
+    (inspectorTabTitles initialView.appWindows)
+  assert
+    "every inspector tab has one shared portable layout root"
+    ( case inspectorTabControlForests initialView.appWindows of
+        [ [LayoutContainer {}]
+          , [LayoutContainer {}]
+          , [LayoutContainer {}]
+          , [LayoutContainer {}]
+          ] -> True
+        _ -> False
+    )
+  let initialTypesControls = inspectorTabControls "Types" initialView.appWindows
+      initialFunctionsControls = inspectorTabControls "Functions" initialView.appWindows
+      typesDebugToggle = onlyToggle "Types debug toggle" initialTypesControls
+      typesScopeChoice = onlyChoice "Types scope selector" initialTypesControls
+      functionsDebugToggle = onlyToggle "Functions debug toggle" initialFunctionsControls
+  assertEqual "Types inspector starts in rich mode" ToggleOff typesDebugToggle.toggleControlValue
+  assertEqual
+    "Types inspector starts with current-file scope"
+    (Just (ChoiceKey 1))
+    typesScopeChoice.choiceControlSelected
+  assertEqual "Functions inspector owns an independent debug mode" ToggleOff functionsDebugToggle.toggleControlValue
+
+  let typesDebugUpdate =
+        application.appHandleEvent
+          (ToggleChanged typesDebugToggle.toggleControlKey ToggleOn)
+          initial
+      typesDebugModel = applyTransaction typesDebugUpdate initial
+      typesDebugControls =
+        inspectorTabControls "Types" (application.appView typesDebugModel).appWindows
+      typesDebugProjection = onlyRichText "Types debug projection" typesDebugControls
+  assert
+    "Types debug mode renders the semantic contract rather than placeholder data"
+    ( all
+        (`Text.isInfixOf` attributedTextValue typesDebugProjection.richTextValue)
+        [ "type-universe/v1"
+        , "scope: current-document visual-haskell:no-document"
+        , "coverage: none"
+        , "sources: 0"
+        , "entities: 0"
+        , "structured-types: 0"
+        ]
+    )
+  assert
+    "Types debug presentation keeps the workspace valid"
+    (all (null . validateWindowWorkspace) (application.appView typesDebugModel).appWindows)
+
+  let functionsDebugUpdate =
+        application.appHandleEvent
+          (ToggleChanged functionsDebugToggle.toggleControlKey ToggleOn)
+          initial
+      functionsDebugModel = applyTransaction functionsDebugUpdate initial
+      functionsDebugProjection =
+        onlyRichText
+          "Functions debug projection"
+          (inspectorTabControls "Functions" (application.appView functionsDebugModel).appWindows)
+  assert
+    "Functions pane debug mode is independent and exposes its honest preview contract"
+    ( "function-universe/preview"
+        `Text.isInfixOf` attributedTextValue functionsDebugProjection.richTextValue
+        && null
+          [ richText
+          | RichText richText <-
+              inspectorTabControls
+                "Types"
+                (application.appView functionsDebugModel).appWindows
+          ]
+    )
+
+  let projectScopeUpdate =
+        application.appHandleEvent
+          (ChoiceChanged typesScopeChoice.choiceControlKey (Just (ChoiceKey 2)))
+          typesDebugModel
+      projectScopeModel = applyTransaction projectScopeUpdate typesDebugModel
+      projectScopeProjection =
+        onlyRichText
+          "project Types debug projection"
+          (inspectorTabControls "Types" (application.appView projectScopeModel).appWindows)
+  assert
+    "Types scope selector rebuilds the same contract at project scope"
+    ( "scope: project visual-haskell:no-workspace (focused: none)"
+        `Text.isInfixOf` attributedTextValue projectScopeProjection.richTextValue
+    )
 
   let persistedApplication = applicationWithWorkspaceRegistry "/tmp/visual-haskell/last-workspace"
   assertEqual
@@ -517,11 +603,57 @@ main = do
   let reopened = applyEvent (TextFileRead "/tmp/example.hs" (Right "module Old where\n")) initial
       dirtyAgain = applyEvent (TextChanged firstDocumentEditorKey "changed again") reopened
       closeDeferred = applyEvent (TabCloseRequested firstDocumentTabKey) dirtyAgain
-  assert "dirty tab close is vetoed" $
+      closePrompt = visiblePresentation (application.appView closeDeferred).appWindows
+  assert "dirty tab remains open while close confirmation is visible" $
     firstDocumentTabKey `elem` concatMap windowTabKeys (application.appView closeDeferred).appWindows
+  assertEqual
+    "dirty close confirmation exposes native semantic actions"
+    [ ("Save", DefaultPresentationAction)
+    , ("Cancel", CancelPresentationAction)
+    , ("Don’t Save", DestructivePresentationAction)
+    ]
+    [ (actionSpec.presentationActionTitle, actionSpec.presentationActionRole)
+    | actionSpec <- closePrompt.presentationActions
+    ]
 
-  let closeSaveRequest = application.appHandleEvent (CommandInvoked saveCommand) closeDeferred
-      closeSaving = applyTransaction closeSaveRequest closeDeferred
+  let cancelled =
+        applyEvent
+          ( PresentationClosed
+              closePrompt.presentationKey
+              (PresentationActionSelected (presentationActionWithRole CancelPresentationAction closePrompt))
+          )
+          closeDeferred
+  assert "Cancel keeps the dirty document open" $
+    firstDocumentTabKey `elem` concatMap windowTabKeys (application.appView cancelled).appWindows
+  assert "Cancel hides the close confirmation" $
+    null (visiblePresentations (application.appView cancelled).appWindows)
+
+  let discardRequested = applyEvent (TabCloseRequested firstDocumentTabKey) cancelled
+      discardPrompt = visiblePresentation (application.appView discardRequested).appWindows
+      discarded =
+        applyEvent
+          ( PresentationClosed
+              discardPrompt.presentationKey
+              (PresentationActionSelected (presentationActionWithRole DestructivePresentationAction discardPrompt))
+          )
+          discardRequested
+  assert "Don’t Save closes the dirty document without writing it" $
+    null (concatMap windowTabKeys (application.appView discarded).appWindows)
+
+  let saveCandidate = applyEvent (TabCloseRequested firstDocumentTabKey) dirtyAgain
+      savePrompt = visiblePresentation (application.appView saveCandidate).appWindows
+      closeSaveRequest =
+        application.appHandleEvent
+          ( PresentationClosed
+              savePrompt.presentationKey
+              (PresentationActionSelected (presentationActionWithRole DefaultPresentationAction savePrompt))
+          )
+          saveCandidate
+  assertEqual
+    "Save from the close confirmation writes the targeted document"
+    [WriteTextFile (EffectKey 1000) "/tmp/example.hs" "changed again"]
+    closeSaveRequest.transactionEffects
+  let closeSaving = applyTransaction closeSaveRequest saveCandidate
       closed =
         applyEvent
           (TextFileWritten (EffectKey 1000) "/tmp/example.hs" "changed again" (Right ()))
@@ -529,6 +661,24 @@ main = do
   assert "save after dirty tab close removes the tab but retains workspace" $
     null (concatMap windowTabKeys (application.appView closed).appWindows)
       && length (application.appView closed).appWindows == 1
+
+  let failingCandidate = applyEvent (TabCloseRequested firstDocumentTabKey) dirtyAgain
+      failingPrompt = visiblePresentation (application.appView failingCandidate).appWindows
+      failingSaveRequest =
+        application.appHandleEvent
+          ( PresentationClosed
+              failingPrompt.presentationKey
+              (PresentationActionSelected (presentationActionWithRole DefaultPresentationAction failingPrompt))
+          )
+          failingCandidate
+      failingSave = applyTransaction failingSaveRequest failingCandidate
+      saveFailed =
+        applyEvent
+          (TextFileWritten (EffectKey 1000) "/tmp/example.hs" "changed again" (Left "disk full"))
+          failingSave
+  assert "a failed Save keeps the dirty document open" $
+    firstDocumentTabKey `elem` concatMap windowTabKeys (application.appView saveFailed).appWindows
+      && null (visiblePresentations (application.appView saveFailed).appWindows)
 
   let workspaceClosed = applyEvent (WindowCloseRequested firstDocumentWindowKey) closed
   assert "clean workspace close removes the OS window" (null (application.appView workspaceClosed).appWindows)
@@ -621,6 +771,59 @@ firstWorkspaceSelectedTab windows =
     selected : _ -> Just selected
     [] -> Nothing
 
+inspectorTabTitles :: [WindowSpec] -> [Text.Text]
+inspectorTabTitles windows =
+  [ tab.workspaceTabTitle
+  | window <- windows
+  , workspace <- maybe [] pure (windowWorkspace window)
+  , pane <- paneSpecs workspace.workspaceRoot
+  , pane.workspacePaneRole == InspectorPane
+  , WorkspaceItemTabGroup group <- [pane.workspacePaneItem.workspaceItemContent]
+  , tab <- group.workspaceTabs
+  ]
+
+inspectorTabControls :: Text.Text -> [WindowSpec] -> [Control]
+inspectorTabControls title windows =
+  concat
+    [ flattenControls tab.workspaceTabControls
+    | window <- windows
+    , workspace <- maybe [] pure (windowWorkspace window)
+    , pane <- paneSpecs workspace.workspaceRoot
+    , pane.workspacePaneRole == InspectorPane
+    , WorkspaceItemTabGroup group <- [pane.workspacePaneItem.workspaceItemContent]
+    , tab <- group.workspaceTabs
+    , tab.workspaceTabTitle == title
+    ]
+
+inspectorTabControlForests :: [WindowSpec] -> [[Control]]
+inspectorTabControlForests windows =
+  [ tab.workspaceTabControls
+  | window <- windows
+  , workspace <- maybe [] pure (windowWorkspace window)
+  , pane <- paneSpecs workspace.workspaceRoot
+  , pane.workspacePaneRole == InspectorPane
+  , WorkspaceItemTabGroup group <- [pane.workspacePaneItem.workspaceItemContent]
+  , tab <- group.workspaceTabs
+  ]
+
+onlyToggle :: String -> [Control] -> ToggleControlSpec
+onlyToggle label controls =
+  case [spec | Switch spec <- controls] of
+    [spec] -> spec
+    matches -> error (label <> ": expected one switch, got " <> show (length matches))
+
+onlyChoice :: String -> [Control] -> ChoiceControlSpec
+onlyChoice label controls =
+  case [spec | SegmentedChoice spec <- controls] of
+    [spec] -> spec
+    matches -> error (label <> ": expected one segmented choice, got " <> show (length matches))
+
+onlyRichText :: String -> [Control] -> RichTextSpec
+onlyRichText label controls =
+  case [spec | RichText spec <- controls] of
+    [spec] -> spec
+    matches -> error (label <> ": expected one rich text control, got " <> show (length matches))
+
 sidebarAndInspectorStates :: [WindowSpec] -> [PaneState]
 sidebarAndInspectorStates windows =
   [ pane.workspacePaneState
@@ -682,6 +885,35 @@ assertWorkspaceWrite label expectedPath effects predicate =
         Right state -> assert label (predicate state)
         Left message -> error (label <> ": invalid workspace JSON: " <> Text.unpack message)
     matches -> error (label <> ": expected one atomic workspace write, got " <> show matches)
+
+visiblePresentations :: [WindowSpec] -> [PresentationSpec]
+visiblePresentations windows =
+  [ spec
+  | window <- windows
+  , control <- windowLeafControls window
+  , spec <- case control of
+      Dialog value -> [value]
+      Alert value -> [value]
+      Popover value -> [value]
+      _ -> []
+  , spec.presentationVisible
+  ]
+
+visiblePresentation :: [WindowSpec] -> PresentationSpec
+visiblePresentation windows =
+  case visiblePresentations windows of
+    [spec] -> spec
+    specs -> error ("expected one visible presentation, got " <> show specs)
+
+presentationActionWithRole :: PresentationActionRole -> PresentationSpec -> PresentationActionId
+presentationActionWithRole role spec =
+  case
+      [ presentationAction.presentationActionId
+      | presentationAction <- spec.presentationActions
+      , presentationAction.presentationActionRole == role
+      ] of
+    [actionId] -> actionId
+    actionIds -> error ("expected one presentation action for " <> show role <> ", got " <> show actionIds)
 
 textIn :: String -> Text.Text -> Bool
 textIn needle = Text.isInfixOf (Text.pack needle)

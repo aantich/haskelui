@@ -156,6 +156,60 @@ result only if worker generation, workspace generation, component session,
 document identity, revision, and content hash still match the current pure
 model.
 
+## Semantic universe inspectors
+
+The inspector includes independent **Types** and **Functions** tabs. Each tab
+owns a **Debug mode** switch: the switch changes only that pane and never
+changes compiler or document state. The Types tab also selects **Current File**
+or **Project** scope.
+
+Types Debug mode renders the exact `TypeUniverse` value constructed from
+accepted analysis snapshots. Its monospaced, selectable, scrollable text shows:
+
+- Scope and focused-document identity
+- Overall coverage, explicitly distinguishing no data, one exact document,
+  accepted snapshot coverage, and a future fully indexed project
+- Every contributing document's generation, session, revision, content hash,
+  completeness, and freshness
+- Stable type-entity and declaration identities
+- Current-file, workspace, package, built-in, or unknown origin
+- Source editability, declared-type identity, parameters/kinds, signature,
+  semantic type, and source ranges
+- Algebraic/newtype constructors, including existential variables, GADT
+  constraints and result types, positional arguments, record fields, and
+  source ranges
+- Type-alias right-hand sides, superclass constraints, and class methods
+- All declaration-to-type usages, including function signatures
+- The normalized structured-type table and typed reference, alias,
+  constraint, superclass, and recursive-SCC relationship edges
+
+The eventual diagram consumes this same immutable contract; Debug mode is not
+a parallel representation that can drift from it. `TypeUniverse` already
+models ADTs, newtypes, aliases, classes, constructors, record fields, methods,
+origins, and recursive/reference relations. The GHC 9.10 worker projects those
+shapes directly from GHC's typed `TyCon`, `DataCon`, and `Class` values; the
+universe never guesses structure from pretty-printed text. Compiler symbol
+identity uses unit, module, namespace, and occurrence rather than session-local
+GHC `Unique` values or context-dependent pretty-printer qualification.
+
+Project scope remains deliberately honest: today it combines accepted open-
+document snapshots, which the coverage field reports as
+`accepted-snapshots`; it is not yet a persistent whole-workspace or dependency
+index. Referenced package and built-in constructors remain present in the
+structured type table, while materializing them as full external entities with
+package metadata/source navigation belongs to the indexing phase. Type-family
+declarations are identified, but family equations are deferred until the
+semantic contract can represent open families, closed ordered equations, and
+imported instances without conflating them.
+
+Functions Debug mode is presently a preview over the same universe's value
+declaration type usages. A dedicated function-universe contract will replace
+that preview when work begins on the Functions visual surface.
+
+To inspect the live contract, open and trust a Haskell workspace, wait for a
+current GHC result, select **Types**, enable **Debug mode**, and switch between
+the two scopes.
+
 The GHC worker is a sibling executable and the `vh` build target includes it
 automatically. It uses `hie-bios` 0.18 for explicit or implicit project flags,
 requires a trusted workspace, and keeps every direct `ghc` import inside its

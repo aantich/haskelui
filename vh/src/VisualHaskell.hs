@@ -117,6 +117,7 @@ data EditorModel = EditorModel
   { documents :: !(Map DocumentKey Document)
   , tabOrder :: ![TabKey]
   , selectedTab :: !(Maybe TabKey)
+  , pendingDocumentClose :: !(Maybe DocumentKey)
   , nextDocumentIdentity :: !Word64
   , workspaceOpen :: !Bool
   , workspaceMessage :: !Text
@@ -129,6 +130,9 @@ data EditorModel = EditorModel
   , navigatorState :: !PaneState
   , inspectorState :: !PaneState
   , selectedInspectorTab :: !TabKey
+  , typesInspectorDebug :: !Bool
+  , typesInspectorScope :: !TypeInspectorScope
+  , functionsInspectorDebug :: !Bool
   , selectedProblem :: !(Maybe CollectionItemKey)
   , nextNavigationIdentity :: !Word64
   , workspacePersistencePhase :: !WorkspacePersistencePhase
@@ -149,6 +153,11 @@ data EditorModel = EditorModel
   , analysisSnapshots :: !(Map Semantic.DocumentId (Semantic.AnalysisSnapshot Semantic.RevisionedSourceRange))
   , analysisStatus :: !Text
   }
+  deriving stock (Eq, Generic, Show)
+
+data TypeInspectorScope
+  = CurrentFileTypeScope
+  | ProjectTypeScope
   deriving stock (Eq, Generic, Show)
 
 data EditorProblem = EditorProblem
@@ -211,12 +220,37 @@ editorTabGroupKey = TabGroupKey 30
 inspectorTabGroupKey :: TabGroupKey
 inspectorTabGroupKey = TabGroupKey 31
 
-documentInspectorTabKey, problemsInspectorTabKey :: TabKey
+documentInspectorTabKey, problemsInspectorTabKey, typesInspectorTabKey, functionsInspectorTabKey :: TabKey
 documentInspectorTabKey = TabKey 9000001
 problemsInspectorTabKey = TabKey 9000002
+typesInspectorTabKey = TabKey 9000003
+functionsInspectorTabKey = TabKey 9000004
 
 problemsListKey :: ElementKey
 problemsListKey = ElementKey 210
+
+documentInspectorRootKey, problemsInspectorRootKey, typesInspectorRootKey, functionsInspectorRootKey :: ElementKey
+documentInspectorRootKey = ElementKey 190
+problemsInspectorRootKey = ElementKey 209
+typesInspectorRootKey = ElementKey 219
+functionsInspectorRootKey = ElementKey 229
+
+typesInspectorDebugKey, typesInspectorScopeKey, functionsInspectorDebugKey :: ElementKey
+typesInspectorDebugKey = ElementKey 222
+typesInspectorScopeKey = ElementKey 223
+functionsInspectorDebugKey = ElementKey 232
+
+currentFileTypeScopeKey, projectTypeScopeKey :: ChoiceKey
+currentFileTypeScopeKey = ChoiceKey 1
+projectTypeScopeKey = ChoiceKey 2
+
+closeDocumentPresentationKey :: ElementKey
+closeDocumentPresentationKey = ElementKey 9000010
+
+saveCloseActionId, cancelCloseActionId, discardCloseActionId :: PresentationActionId
+saveCloseActionId = PresentationActionId 1
+cancelCloseActionId = PresentationActionId 2
+discardCloseActionId = PresentationActionId 3
 
 application :: App EditorModel
 application = editorApplication initialModel
@@ -317,6 +351,7 @@ initialModel =
     { documents = Map.empty
     , tabOrder = []
     , selectedTab = Nothing
+    , pendingDocumentClose = Nothing
     , nextDocumentIdentity = 1000
     , workspaceOpen = True
     , workspaceMessage = "Open a folder or one or more UTF-8 text files."
@@ -329,6 +364,9 @@ initialModel =
     , navigatorState = defaultNavigatorPaneState
     , inspectorState = defaultInspectorPaneState
     , selectedInspectorTab = documentInspectorTabKey
+    , typesInspectorDebug = False
+    , typesInspectorScope = CurrentFileTypeScope
+    , functionsInspectorDebug = False
     , selectedProblem = Nothing
     , nextNavigationIdentity = 1
     , workspacePersistencePhase = WorkspacePersistenceReady
@@ -476,7 +514,8 @@ inspectorTabs model =
       , workspaceTabTitle = "Document"
       , workspaceTabModified = False
       , workspaceTabCloseable = False
-      , workspaceTabControls = inspectorControls model
+      , workspaceTabControls =
+          inspectorTabRoot documentInspectorRootKey (inspectorItems model)
       }
   , WorkspaceTabSpec
       { workspaceTabKey = problemsInspectorTabKey
@@ -485,7 +524,26 @@ inspectorTabs model =
           "Problems (" <> Text.pack (show (length problems)) <> ")"
       , workspaceTabModified = False
       , workspaceTabCloseable = False
-      , workspaceTabControls = problemsControls model problems
+      , workspaceTabControls =
+          inspectorTabRoot problemsInspectorRootKey (problemsItems model problems)
+      }
+  , WorkspaceTabSpec
+      { workspaceTabKey = typesInspectorTabKey
+      , workspaceTabDocument = Nothing
+      , workspaceTabTitle = "Types"
+      , workspaceTabModified = False
+      , workspaceTabCloseable = False
+      , workspaceTabControls =
+          inspectorTabRoot typesInspectorRootKey (typesInspectorItems model)
+      }
+  , WorkspaceTabSpec
+      { workspaceTabKey = functionsInspectorTabKey
+      , workspaceTabDocument = Nothing
+      , workspaceTabTitle = "Functions"
+      , workspaceTabModified = False
+      , workspaceTabCloseable = False
+      , workspaceTabControls =
+          inspectorTabRoot functionsInspectorRootKey (functionsInspectorItems model)
       }
   ]
   where
@@ -581,45 +639,322 @@ displayPathName path =
   let name = takeFileName path
    in Text.pack (if null name then path else name)
 
-inspectorControls :: EditorModel -> [Control]
-inspectorControls model =
-  case selectedDocument model of
-    Nothing ->
-      [ Label (ElementKey 200) (Rect 16 690 230 22) "INSPECTOR"
-      , Label (ElementKey 201) (Rect 16 650 230 44) "Select or open a document"
-      ]
-    Just document ->
-      [ Label (ElementKey 200) (Rect 16 690 230 22) "DOCUMENT"
-      , Label (ElementKey 201) (Rect 16 650 230 22) (Text.pack (takeFileName document.documentPath))
-      , Label (ElementKey 202) (Rect 16 612 230 44) (Text.pack document.documentPath)
-      , Label (ElementKey 203) (Rect 16 570 230 22) (languageDescription document)
-      , Label
-          (ElementKey 204)
-          (Rect 16 536 230 22)
-          (Text.pack (show (Text.length document.documentContents)) <> " characters")
-      , Label
-          (ElementKey 205)
-          (Rect 16 502 230 22)
-          (if documentDirty document then "Modified" else "Saved")
-      ]
+data InspectorTabItem = InspectorTabItem
+  { inspectorTabItemAnchor :: !Anchor
+  , inspectorTabItemInsets :: !Insets
+  , inspectorTabItemLayout :: !(Layout ElementKey)
+  , inspectorTabItemControl :: !Control
+  }
 
-problemsControls :: EditorModel -> [EditorProblem] -> [Control]
-problemsControls model problems =
-  [ ListView
-      CollectionControlSpec
-        { collectionControlKey = problemsListKey
-        , collectionControlFrame = Rect 0 0 270 718
-        , collectionControlItems = fmap problemCollectionItem problems
-        , collectionControlSelectionMode = SingleCollectionSelection
-        , collectionControlSelection =
-            [ selected
-            | selected <- maybeToList model.selectedProblem
-            , any ((== selected) . (.problemKey)) problems
-            ]
-        , collectionControlRowSizing = ContentSizedRows
-        , collectionControlEnabled = True
+-- Every inspector tab has exactly one portable root. The backend fills that
+-- root into the tab host and re-runs Core's pure layout solver whenever its
+-- native allocation changes, so every tab shares the same responsive path.
+inspectorTabRoot :: ElementKey -> [InspectorTabItem] -> [Control]
+inspectorTabRoot rootKey items =
+  [ LayoutContainer
+      LayoutContainerSpec
+        { layoutContainerKey = rootKey
+        , layoutContainerFrame = Rect 0 0 270 718
+        , layoutContainerPresentation = PlainLayoutContainer
+        , layoutContainerEnvironment = defaultLayoutEnvironment
+        , layoutContainerLayout =
+            LayoutOverlay
+              defaultOverlay {overlayClip = True}
+              [ OverlayItem
+                  item.inspectorTabItemAnchor
+                  item.inspectorTabItemInsets
+                  0
+                  0
+                  item.inspectorTabItemLayout
+              | item <- items
+              ]
+        , layoutContainerChildren = fmap (.inspectorTabItemControl) items
         }
   ]
+
+fixedInspectorItem :: Double -> Double -> Control -> InspectorTabItem
+fixedInspectorItem start top control =
+  InspectorTabItem
+    { inspectorTabItemAnchor = Anchor AnchorStart AnchorStart
+    , inspectorTabItemInsets = Insets (Dp top) 0 0 (Dp start)
+    , inspectorTabItemLayout =
+        LayoutBox
+          defaultBoxSpec
+            { boxWidth = exactAxis (Dp frame.rectWidth)
+            , boxHeight = exactAxis (Dp frame.rectHeight)
+            }
+          (LayoutLeaf (controlKey control))
+    , inspectorTabItemControl = control
+    }
+  where
+    frame = controlFrame control
+
+topStretchInspectorItem
+  :: Double
+  -> Double
+  -> Double
+  -> Control
+  -> InspectorTabItem
+topStretchInspectorItem top start end control =
+  InspectorTabItem
+    { inspectorTabItemAnchor = Anchor AnchorStretch AnchorStart
+    , inspectorTabItemInsets = Insets (Dp top) (Dp end) 0 (Dp start)
+    , inspectorTabItemLayout =
+        LayoutBox
+          defaultBoxSpec {boxHeight = exactAxis (Dp frame.rectHeight)}
+          (LayoutLeaf (controlKey control))
+    , inspectorTabItemControl = control
+    }
+  where
+    frame = controlFrame control
+
+fillInspectorItem :: Double -> Double -> Double -> Double -> Control -> InspectorTabItem
+fillInspectorItem top end bottom start control =
+  InspectorTabItem
+    { inspectorTabItemAnchor = Anchor AnchorStretch AnchorStretch
+    , inspectorTabItemInsets = Insets (Dp top) (Dp end) (Dp bottom) (Dp start)
+    , inspectorTabItemLayout = LayoutLeaf (controlKey control)
+    , inspectorTabItemControl = control
+    }
+
+inspectorItems :: EditorModel -> [InspectorTabItem]
+inspectorItems model =
+  case selectedDocument model of
+    Nothing ->
+      [ topStretchInspectorItem 16 16 16
+          (Label (ElementKey 200) (Rect 0 0 230 22) "INSPECTOR")
+      , topStretchInspectorItem 50 16 16
+          (Label (ElementKey 201) (Rect 0 0 230 44) "Select or open a document")
+      ]
+    Just document ->
+      [ topStretchInspectorItem 16 16 16
+          (Label (ElementKey 200) (Rect 0 0 230 22) "DOCUMENT")
+      , topStretchInspectorItem 50 16 16
+          (Label (ElementKey 201) (Rect 0 0 230 22) (Text.pack (takeFileName document.documentPath)))
+      , topStretchInspectorItem 82 16 16
+          (Label (ElementKey 202) (Rect 0 0 230 44) (Text.pack document.documentPath))
+      , topStretchInspectorItem 136 16 16
+          (Label (ElementKey 203) (Rect 0 0 230 22) (languageDescription document))
+      , topStretchInspectorItem 170 16 16
+          ( Label
+              (ElementKey 204)
+              (Rect 0 0 230 22)
+              (Text.pack (show (Text.length document.documentContents)) <> " characters")
+          )
+      , topStretchInspectorItem 204 16 16
+          ( Label
+              (ElementKey 205)
+              (Rect 0 0 230 22)
+              (if documentDirty document then "Modified" else "Saved")
+          )
+      ]
+
+problemsItems :: EditorModel -> [EditorProblem] -> [InspectorTabItem]
+problemsItems model problems =
+  [ fillInspectorItem 0 0 0 0
+      ( ListView
+          CollectionControlSpec
+            { collectionControlKey = problemsListKey
+            , collectionControlFrame = Rect 0 0 270 718
+            , collectionControlItems = fmap problemCollectionItem problems
+            , collectionControlSelectionMode = SingleCollectionSelection
+            , collectionControlSelection =
+                [ selected
+                | selected <- maybeToList model.selectedProblem
+                , any ((== selected) . (.problemKey)) problems
+                ]
+            , collectionControlRowSizing = ContentSizedRows
+            , collectionControlEnabled = True
+            }
+      )
+  ]
+
+typesInspectorItems :: EditorModel -> [InspectorTabItem]
+typesInspectorItems model =
+  universeHeaderItems 220 "square.3.layers.3d" "TYPE UNIVERSE"
+    <> [ topStretchInspectorItem 78 16 16
+          ( Switch
+              ToggleControlSpec
+                { toggleControlKey = typesInspectorDebugKey
+                , toggleControlFrame = Rect 0 0 238 30
+                , toggleControlLabel = ControlLabel "Debug mode" Nothing
+                , toggleControlValue = boolToggle model.typesInspectorDebug
+                , toggleControlEnabled = True
+                }
+          )
+       , topStretchInspectorItem 122 16 16
+          ( SegmentedChoice
+              ChoiceControlSpec
+                { choiceControlKey = typesInspectorScopeKey
+                , choiceControlFrame = Rect 0 0 238 30
+                , choiceControlItems =
+                    [ ChoiceItem
+                        currentFileTypeScopeKey
+                        (ControlLabel "Current File" Nothing)
+                        True
+                    , ChoiceItem
+                        projectTypeScopeKey
+                        (ControlLabel "Project" Nothing)
+                        True
+                    ]
+                , choiceControlSelected =
+                    Just
+                      ( case model.typesInspectorScope of
+                          CurrentFileTypeScope -> currentFileTypeScopeKey
+                          ProjectTypeScope -> projectTypeScopeKey
+                      )
+                , choiceControlEnabled = True
+                }
+          )
+       ]
+    <> if model.typesInspectorDebug
+      then
+        [ fillInspectorItem 168 16 16 16
+            (debugTextControl 225 (typesInspectorDebugText model))
+        ]
+      else
+        [ topStretchInspectorItem 168 16 16
+            ( InlineNotice
+                MessageControlSpec
+                  { messageControlKey = ElementKey 224
+                  , messageControlFrame = Rect 0 0 238 104
+                  , messageControlTitle = "Visual inspector"
+                  , messageControlMessage =
+                      "The visual type map will consume the same semantic universe exposed by Debug mode."
+                  }
+            )
+        ]
+
+functionsInspectorItems :: EditorModel -> [InspectorTabItem]
+functionsInspectorItems model =
+  universeHeaderItems 230 "function" "FUNCTION UNIVERSE"
+    <> [ topStretchInspectorItem 78 16 16
+          ( Switch
+              ToggleControlSpec
+                { toggleControlKey = functionsInspectorDebugKey
+                , toggleControlFrame = Rect 0 0 238 30
+                , toggleControlLabel = ControlLabel "Debug mode" Nothing
+                , toggleControlValue = boolToggle model.functionsInspectorDebug
+                , toggleControlEnabled = True
+                }
+          )
+       ]
+    <> if model.functionsInspectorDebug
+      then
+        [ fillInspectorItem 122 16 16 16
+            (debugTextControl 235 (functionsInspectorDebugText model))
+        ]
+      else
+        [ topStretchInspectorItem 122 16 16
+            ( InlineNotice
+                MessageControlSpec
+                  { messageControlKey = ElementKey 234
+                  , messageControlFrame = Rect 0 0 238 112
+                  , messageControlTitle = "Visual inspector"
+                  , messageControlMessage =
+                      "A visual map of function signatures, composition, calls, and data flow will appear here."
+                  }
+            )
+        ]
+
+universeHeaderItems :: Word64 -> Text -> Text -> [InspectorTabItem]
+universeHeaderItems identity symbol title =
+  [ fixedInspectorItem 16 16
+      ( Icon
+          ImageControlSpec
+            { imageControlKey = ElementKey identity
+            , imageControlFrame = Rect 0 0 36 36
+            , imageControlSource = SystemSymbol symbol
+            , imageControlDescription = title
+            }
+      )
+  , topStretchInspectorItem 23 62 16
+      (Label (ElementKey (identity + 1)) (Rect 0 0 190 22) title)
+  ]
+
+debugTextControl :: Word64 -> Text -> Control
+debugTextControl identity debugText =
+  RichText
+    RichTextSpec
+      { richTextKey = ElementKey identity
+      , richTextFrame = Rect 0 0 238 530
+      , richTextValue =
+          attributedTextFromRuns
+            [ TextRun
+                debugText
+                ( mempty
+                    { textFontFamily = Just MonospaceFont
+                    , textFontSize = Just 10
+                    }
+                )
+            ]
+      }
+
+boolToggle :: Bool -> ToggleValue
+boolToggle True = ToggleOn
+boolToggle False = ToggleOff
+
+typesInspectorDebugText :: EditorModel -> Text
+typesInspectorDebugText model =
+  Semantic.renderTypeUniverseDebug renderSemanticRange (typeUniverseFor model)
+
+functionsInspectorDebugText :: EditorModel -> Text
+functionsInspectorDebugText model =
+  Text.unlines
+    ( [ "function-universe/preview"
+      , "source: TypeUniverse.type-usages"
+      , "functions: " <> Text.pack (show (length functions))
+      ]
+        <> concatMap renderFunction functions
+    )
+  where
+    universe = typeUniverseFor model
+    functions =
+      filter
+        ((== Semantic.ValueDeclaration) . (.typeUsageDeclarationKind))
+        universe.typeUniverseUsages
+    renderFunction
+      :: Semantic.TypeUsage Semantic.RevisionedSourceRange
+      -> [Text]
+    renderFunction usage =
+      [ "  - name: " <> usage.typeUsageName
+      , "    declaration: " <> usage.typeUsageDeclaration.unDeclarationId
+      , "    document: " <> usage.typeUsageDocument.unDocumentId
+      , "    signature: "
+          <> maybe "none" (Text.unwords . Text.lines) usage.typeUsageSignatureText
+      ]
+
+typeUniverseFor
+  :: EditorModel
+  -> Semantic.TypeUniverse Semantic.RevisionedSourceRange
+typeUniverseFor model =
+  Semantic.buildTypeUniverse scope (Map.elems model.analysisSnapshots)
+  where
+    focused = analysisDocumentId <$> selectedDocument model
+    scope =
+      case model.typesInspectorScope of
+        CurrentFileTypeScope ->
+          Semantic.CurrentDocumentTypes
+            (maybe (Semantic.DocumentId "visual-haskell:no-document") id focused)
+        ProjectTypeScope ->
+          Semantic.ProjectTypes (analysisWorkspaceId model) focused
+
+renderSemanticRange :: Semantic.RevisionedSourceRange -> Text
+renderSemanticRange range =
+  "revision "
+    <> Text.pack (show range.sourceRangeRevision.unTextRevision)
+    <> " "
+    <> renderPosition range.sourceRangeStart
+    <> "–"
+    <> renderPosition range.sourceRangeEnd
+  where
+    renderPosition :: Semantic.SourcePosition -> Text
+    renderPosition position =
+      Text.pack (show (position.sourceLine + 1))
+        <> ":"
+        <> Text.pack (show (position.sourceColumn + 1))
+        <> " "
+        <> Text.pack (show position.sourceSpace)
 
 problemCollectionItem :: EditorProblem -> CollectionItem
 problemCollectionItem problem =
@@ -659,6 +994,7 @@ statusControls :: EditorModel -> [Control]
 statusControls model =
   [ Label (ElementKey 300) (Rect 12 4 530 20) status
   , Label (ElementKey 301) (Rect 550 4 600 20) summary
+  , closeDocumentAlert model
   ]
   where
     status = maybe model.workspaceMessage (.documentStatus) (selectedDocument model)
@@ -669,6 +1005,44 @@ statusControls model =
         <> model.textMateStatus
         <> " · "
         <> model.analysisStatus
+
+closeDocumentAlert :: EditorModel -> Control
+closeDocumentAlert model =
+  Alert
+    PresentationSpec
+      { presentationKey = closeDocumentPresentationKey
+      , presentationFrame = Rect 0 0 0 0
+      , presentationKind = AlertPresentation
+      , presentationTitle =
+          case pendingDocument of
+            Just document ->
+              "Save changes to “" <> Text.pack (takeFileName document.documentPath) <> "”?"
+            Nothing -> "Save changes?"
+      , presentationMessage = "Your changes will be lost if you don’t save them."
+      , presentationActions =
+          [ PresentationActionSpec
+              { presentationActionId = saveCloseActionId
+              , presentationActionTitle = "Save"
+              , presentationActionRole = DefaultPresentationAction
+              , presentationActionEnabled = True
+              }
+          , PresentationActionSpec
+              { presentationActionId = cancelCloseActionId
+              , presentationActionTitle = "Cancel"
+              , presentationActionRole = CancelPresentationAction
+              , presentationActionEnabled = True
+              }
+          , PresentationActionSpec
+              { presentationActionId = discardCloseActionId
+              , presentationActionTitle = "Don’t Save"
+              , presentationActionRole = DestructivePresentationAction
+              , presentationActionEnabled = True
+              }
+          ]
+      , presentationVisible = maybe False documentDirty pendingDocument
+      }
+  where
+    pendingDocument = model.pendingDocumentClose >>= (`Map.lookup` model.documents)
 
 languageDescription :: Document -> Text
 languageDescription document
@@ -765,6 +1139,7 @@ removeDocumentAction key =
     [ propertyId editorProperties.documents
     , propertyId editorProperties.tabOrder
     , propertyId editorProperties.selectedTab
+    , propertyId editorProperties.pendingDocumentClose
     , propertyId editorProperties.workspaceMessage
     ]
     (removeDocument key)
@@ -1553,13 +1928,36 @@ handleEventWithoutPersistence event model =
             EditCommitted _ committed -> markAnalysisPending document model committed
             DraftStaged _ -> noTransaction
             DraftInvalid _ _ -> noTransaction
+    ToggleChanged key value
+      | key == typesInspectorDebugKey ->
+          transactionFromAction
+            "Set Types inspector debug mode"
+            NoUndo
+            (editorProperties.typesInspectorDebug .= (value == ToggleOn))
+      | key == functionsInspectorDebugKey ->
+          transactionFromAction
+            "Set Functions inspector debug mode"
+            NoUndo
+            (editorProperties.functionsInspectorDebug .= (value == ToggleOn))
+    ChoiceChanged key selected
+      | key == typesInspectorScopeKey ->
+          case selected of
+            Just choice
+              | choice == currentFileTypeScopeKey -> setTypeInspectorScope CurrentFileTypeScope
+              | choice == projectTypeScopeKey -> setTypeInspectorScope ProjectTypeScope
+            _ -> noTransaction
     CollectionSelectionChanged key [selectedKey]
       | key == projectTreeKey -> selectProjectEntry selectedKey model
       | key == problemsListKey -> selectProblem selectedKey model
     CollectionExpansionChanged key itemKey expanded
       | key == projectTreeKey -> setProjectExpansion itemKey expanded model
     TabSelected tabKey
-      | tabKey `elem` [documentInspectorTabKey, problemsInspectorTabKey] ->
+      | tabKey
+          `elem` [ documentInspectorTabKey
+                 , problemsInspectorTabKey
+                 , typesInspectorTabKey
+                 , functionsInspectorTabKey
+                 ] ->
           transactionFromAction
             "Select inspector tab"
             NoUndo
@@ -1570,6 +1968,9 @@ handleEventWithoutPersistence event model =
             NoUndo
             (editorProperties.selectedTab .= Just tabKey)
     TabCloseRequested tabKey -> closeTabRequested tabKey model
+    PresentationClosed key result
+      | key == closeDocumentPresentationKey ->
+          handleDocumentClosePresentation result model
     PaneStateChanged paneKey paneState
       | paneKey == navigatorPaneKey ->
           transactionFromAction
@@ -1586,6 +1987,12 @@ handleEventWithoutPersistence event model =
     TextFileWritten writtenKey writtenPath writtenContents result ->
       handleWriteResult writtenKey writtenPath writtenContents result model
     _ -> noTransaction
+  where
+    setTypeInspectorScope scope =
+      transactionFromAction
+        "Set Types inspector scope"
+        NoUndo
+        (editorProperties.typesInspectorScope .= scope)
 
 markAnalysisPending :: Document -> EditorModel -> Transaction EditorModel -> Transaction EditorModel
 markAnalysisPending document model update
@@ -2262,22 +2669,87 @@ closeTabRequested tabKey model =
     Just document
       | documentDirty document ->
           transactionFromAction
-            "Defer dirty tab close"
+            "Request dirty document close confirmation"
             NoUndo
-            ( liftDocumentAction document.documentKey
-                ( batchActions
-                    "Defer dirty tab close"
-                    [ documentProperties.documentStatus
-                        .= "Close deferred: save this document to close its tab"
-                    , documentProperties.documentCloseAfterSave .= True
-                    ]
-                )
-            )
+            (editorProperties.pendingDocumentClose .= Just document.documentKey)
       | otherwise ->
           transactionFromAction
             "Close document tab"
             NoUndo
             (removeDocumentAction document.documentKey)
+
+handleDocumentClosePresentation
+  :: PresentationResult
+  -> EditorModel
+  -> Transaction EditorModel
+handleDocumentClosePresentation result model =
+  case model.pendingDocumentClose >>= (`Map.lookup` model.documents) of
+    Nothing ->
+      transactionFromAction
+        "Clear stale document close confirmation"
+        NoUndo
+        (editorProperties.pendingDocumentClose .= Nothing)
+    Just document ->
+      case result of
+        PresentationActionSelected actionId
+          | actionId == saveCloseActionId -> saveAndCloseDocument document
+          | actionId == discardCloseActionId -> discardAndCloseDocument document
+          | otherwise -> cancelDocumentClose
+        -- Legacy backends without custom presentation actions keep the safe
+        -- accepted/cancelled contract: acceptance means save, never discard.
+        PresentationAccepted -> saveAndCloseDocument document
+        PresentationCancelled -> cancelDocumentClose
+        PresentationDismissed -> cancelDocumentClose
+  where
+    cancelDocumentClose :: Transaction EditorModel
+    cancelDocumentClose =
+      transactionFromAction
+        "Cancel dirty document close"
+        NoUndo
+        (editorProperties.pendingDocumentClose .= Nothing)
+
+    discardAndCloseDocument :: Document -> Transaction EditorModel
+    discardAndCloseDocument document =
+      transactionFromAction
+        "Discard changes and close document"
+        NoUndo
+        ( batchActions
+            "Discard changes and close document"
+            [ editorProperties.pendingDocumentClose .= Nothing
+            , removeDocumentAction document.documentKey
+            ]
+        )
+
+    saveAndCloseDocument :: Document -> Transaction EditorModel
+    saveAndCloseDocument document
+      | not (documentDirty document) =
+          transactionFromAction
+            "Close document already saved while confirmation was open"
+            NoUndo
+            ( batchActions
+                "Close document already saved while confirmation was open"
+                [ editorProperties.pendingDocumentClose .= Nothing
+                , removeDocumentAction document.documentKey
+                ]
+            )
+      | otherwise =
+          transactionFromActionWithEffects
+            "Save and close document"
+            NoUndo
+            [WriteTextFile document.documentEffectKey document.documentPath document.documentContents]
+            ( batchActions
+                "Begin save and close"
+                [ editorProperties.pendingDocumentClose .= Nothing
+                , liftDocumentAction
+                    document.documentKey
+                    ( batchActions
+                        "Mark document saving before close"
+                        [ documentProperties.documentStatus .= "Saving before close…"
+                        , documentProperties.documentCloseAfterSave .= True
+                        ]
+                    )
+                ]
+            )
 
 closeWorkspaceRequested :: EditorModel -> Transaction EditorModel
 closeWorkspaceRequested model =
@@ -2400,6 +2872,7 @@ handleWriteResult writtenKey writtenPath writtenContents result model =
                                     .= if document.documentContents == writtenContents
                                       then "Saved"
                                       else "Saved an older revision; newer edits remain unsaved"
+                                , documentProperties.documentCloseAfterSave .= False
                                 ]
                             )
                         )
@@ -2561,6 +3034,10 @@ removeDocument key model =
             { documents = Map.delete key model.documents
             , tabOrder = remainingOrder
             , selectedTab = nextSelection
+            , pendingDocumentClose =
+                if model.pendingDocumentClose == Just key
+                  then Nothing
+                  else model.pendingDocumentClose
             , workspaceMessage =
                 if null remainingOrder
                   then "No documents open"

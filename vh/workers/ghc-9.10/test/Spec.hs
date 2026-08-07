@@ -100,8 +100,13 @@ main = do
   let aPath = fixture </> "A.hs"
       bPath = fixture </> "B.hs"
       aSource = Text.unlines
-        [ "module A (message) where"
+        [ "module A where"
         , "import B (value)"
+        , "data Tree a = Leaf { leafValue :: a } | Branch (Tree a) (Tree a)"
+        , "newtype UserId = UserId Int"
+        , "type Forest a = [Tree a]"
+        , "class Eq a => Renderable a where"
+        , "  renderValue :: a -> String"
         , "message :: String"
         , "message = value"
         ]
@@ -133,6 +138,56 @@ main = do
       assert "GHC returns the requested top-level declaration" (any ((== "message") . declarationName) analyzed.analysisDeclarations)
       assert "GHC types normalize into the stable type table" (not (Map.null analyzed.analysisTypes))
       assert "successful unsaved analysis has no errors" (null analyzed.analysisDiagnostics)
+      let semanticsNamed name =
+            [ semantics
+            | declaration <- analyzed.analysisDeclarations
+            , declaration.declarationName == name
+            , Just semantics <- [declaration.declarationTypeSemantics]
+            ]
+          treeSemantics = semanticsNamed "Tree"
+          userIdSemantics = semanticsNamed "UserId"
+          forestSemantics = semanticsNamed "Forest"
+          renderableSemantics = semanticsNamed "Renderable"
+          universe =
+            buildTypeUniverse
+              (CurrentDocumentTypes aSnapshot.snapshotDocumentId)
+              [analyzed]
+          debugProjection = renderTypeUniverseDebug (Text.pack . show) universe
+      assert "GHC projects an algebraic type and all constructors" $
+        case treeSemantics of
+          [TypeDeclarationSemantics _ [TypeParameterSemantics "a" (Just _)] (AlgebraicTypeSemantics constructors)] ->
+            fmap (.typeConstructorSemanticName) constructors == ["Leaf", "Branch"]
+              && any (any ((== "leafValue") . (.typeFieldSemanticName)) . (.typeConstructorSemanticFields)) constructors
+          _ -> False
+      assert "GHC distinguishes newtypes" $
+        case userIdSemantics of
+          [TypeDeclarationSemantics _ [] (NewtypeSemantics constructor)] ->
+            constructor.typeConstructorSemanticName == "UserId"
+          _ -> False
+      assert "GHC projects type-synonym right-hand sides" $
+        case forestSemantics of
+          [TypeDeclarationSemantics _ [_] (TypeAliasSemantics _)] -> True
+          _ -> False
+      assert "GHC projects class constraints and methods" $
+        case renderableSemantics of
+          [TypeDeclarationSemantics _ [_] (TypeClassSemantics constraints methods)] ->
+            not (null constraints)
+              && fmap (.typeMethodSemanticName) methods == ["renderValue"]
+          _ -> False
+      assert "the Type Universe derives recursive type relationships" $
+        any ((== RecursiveTypeReference) . (.typeRelationKind)) universe.typeUniverseRelations
+      assert "the inspector debug projection exposes rich declaration semantics" $
+        all
+          (`Text.isInfixOf` debugProjection)
+          [ "definition: algebraic (2 constructors)"
+          , "name: Branch"
+          , "name: leafValue"
+          , "definition: newtype UserId"
+          , "alias-target:"
+          , "superclass-constraints:"
+          , "name: renderValue"
+          , "--recursive-reference-->"
+          ]
 
       (brokenMilliseconds, failed) <-
         timed (analyzeWithEngine engine brokenDocuments (DocumentId "B") (WorkspaceGeneration 3))
@@ -169,6 +224,21 @@ main = do
   (_, protocolAnalysis, warmProtocolAnalysis) <- analyzeThroughWorker fixture aSnapshot bSnapshot []
   assert "the real worker protocol returns typechecked unsaved analysis" (protocolAnalysis.analysisCompleteness == Typechecked)
   assert "the real worker protocol preserves content identity" (protocolAnalysis.analysisContentHash == aSnapshot.snapshotContentHash)
+  assert "the worker protocol transports rich declared-type semantics" $
+    any
+      (maybe False (const True) . (.declarationTypeSemantics))
+      protocolAnalysis.analysisDeclarations
+  let protocolDebugProjection =
+        renderTypeUniverseDebug
+          (Text.pack . show)
+          ( buildTypeUniverse
+              (CurrentDocumentTypes aSnapshot.snapshotDocumentId)
+              [protocolAnalysis]
+          )
+  assert "the transported semantics are present in the inspector debug projection" $
+    all
+      (`Text.isInfixOf` protocolDebugProjection)
+      ["definition: algebraic (2 constructors)", "name: leafValue", "name: renderValue"]
   assert "the real worker protocol reuses its session for a later document revision" $
     warmProtocolAnalysis.analysisCompleteness == Typechecked
       && warmProtocolAnalysis.analysisRevision == TextRevision 2

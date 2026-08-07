@@ -1349,6 +1349,15 @@ Layout uses device-independent `Dp` values and logical inline/block axes in a
 top-left coordinate system. A backend measures native leaf controls, the pure
 solver produces a `LayoutPlan`, and the backend commits the resulting frames.
 
+`layoutContainerFrame` is the declared fallback and initial placement. When a
+retained native host receives a different allocation, its backend supplies the
+current `Size` to `resolveControlLayoutsWithAllocations` (or the application-
+wide `resolveAppViewLayoutsWithAllocations`). Core replaces that container's
+width and height for the layout pass, preserves its declared origin, and
+re-solves the entire nested strategy tree. The allocation is backend state: it
+does not generate a `UIEvent`, enter the application model, or require a window
+size field.
+
 The `Rect` carried by a child inside a layout container provides a fallback
 intrinsic size. Its x/y position is replaced by the solver. On AppKit, native
 `fittingSize` measurements override these fallbacks and are cached until a
@@ -1461,10 +1470,14 @@ Visibility has three states inside `BoxSpec`:
 falls back to a declared default. Alternative branches may reuse the same
 stable leaf keys because only one branch is active.
 
-The current vertical slice recomputes layout when `AppView` is reconciled.
-Automatic model updates driven by live native window-resize events are not yet
-part of the public runtime; applications currently need to render an updated
-container frame to select a new adaptive branch.
+Layout is recomputed both during ordinary `AppView` reconciliation and when a
+retained native host changes allocation. The AppKit backend coalesces native
+allocation notifications, reuses cached intrinsic measurements, and commits
+only changed frames. Live resize therefore selects `LayoutAdaptive` branches
+and updates flow, grid, overlay, wrap, canvas, split, and box geometry without
+rebuilding application state or disturbing text focus and selection. Future
+backends must implement the same allocation contract; applications should not
+special-case AppKit or synthesize resize messages.
 
 ### Performance
 
@@ -1684,6 +1697,7 @@ Popover
     , presentationKind = PopoverPresentation anchorKey
     , presentationTitle = "Details"
     , presentationMessage = model.details
+    , presentationActions = []
     , presentationVisible = model.popoverVisible
     }
 ```
@@ -1691,6 +1705,34 @@ Popover
 The popover anchor must be a retained `ElementKey`. Handle
 `PresentationClosed key result` by updating the model so native dismissal and
 desired state agree. Dialogs and alerts follow the same ownership rule.
+
+Dialogs and alerts may declare typed, stable actions. Roles are semantic rather
+than visual: the backend applies platform-native order, default and Escape-key
+behavior, emphasis, and destructive styling.
+
+```haskell
+Alert
+  PresentationSpec
+    { presentationKey = closePromptKey
+    , presentationFrame = Rect 0 0 0 0
+    , presentationKind = AlertPresentation
+    , presentationTitle = "Save changes?"
+    , presentationMessage = "Your changes will be lost if you don’t save them."
+    , presentationActions =
+        [ PresentationActionSpec saveAction "Save" DefaultPresentationAction True
+        , PresentationActionSpec cancelAction "Cancel" CancelPresentationAction True
+        , PresentationActionSpec discardAction "Don’t Save" DestructivePresentationAction True
+        ]
+    , presentationVisible = model.closePromptVisible
+    }
+```
+
+Selection arrives as `PresentationActionSelected actionId`. Treat
+`PresentationCancelled` and `PresentationDismissed` as cancellation unless the
+application explicitly has different semantics. Keep the presentation in the
+control tree while hidden so its `ElementKey` remains stable; visibility is a
+model value, not an imperative `showDialog` call. An empty action list retains
+the backend's simple legacy OK/Cancel behavior.
 
 Use the lightweight feedback controls for nonmodal state:
 
@@ -1990,7 +2032,10 @@ application framework. Plan around these current boundaries:
   full typed column/cell/sort/edit API.
 - Collection data is declared eagerly; scalable application data-source APIs
   remain future work even though native peers virtualize their realized views.
-- Live automatic relayout from public window-resize events is incomplete.
+- AppKit implements retained live relayout through Core's backend allocation
+  API. Future Windows and custom-renderer backends must provide the same host-
+  allocation notifications; this is a backend conformance requirement, not an
+  application-level resize event.
 - Authored rich-text persistence and editing operations are not complete;
   derived text presentation layers are implemented.
 - Portable retained drawing surfaces, pure semantic hit testing, captured and

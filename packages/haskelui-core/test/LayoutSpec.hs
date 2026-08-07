@@ -26,6 +26,7 @@ runLayoutTests = do
   testStrategyVariants
   testValidation
   testControlIntegration
+  testAllocatedControlIntegration
   testGeometryProperties
   testLargeTree
   putStrLn "haskelui-layout: all box, flow, wrap, grid, overlay, canvas, split, adaptive, validation, and scale tests passed"
@@ -447,6 +448,56 @@ testControlIntegration = do
           assertRectDouble "first control frame" (Rect 0 0 40 20) (controlFrame firstChild)
           assertRectDouble "second control frame" (Rect 45 0 30 20) (controlFrame secondChild)
     _ -> error "resolved portable layout root changed shape"
+
+testAllocatedControlIntegration :: IO ()
+testAllocatedControlIntegration = do
+  let header = Label (ElementKey 21) (Rect 0 0 80 20) "Header"
+      body = Label (ElementKey 22) (Rect 0 0 80 20) "Body"
+      root =
+        LayoutContainer
+          LayoutContainerSpec
+            { layoutContainerKey = ElementKey 20
+            , layoutContainerFrame = Rect 7 9 200 100
+            , layoutContainerPresentation = PlainLayoutContainer
+            , layoutContainerEnvironment = defaultLayoutEnvironment
+            , layoutContainerLayout =
+                LayoutOverlay
+                  defaultOverlay
+                  [ OverlayItem
+                      (Anchor AnchorStretch AnchorStart)
+                      (Insets 8 10 0 10)
+                      0
+                      0
+                      (LayoutLeaf (ElementKey 21))
+                  , OverlayItem
+                      (Anchor AnchorStretch AnchorStretch)
+                      (Insets 36 10 12 10)
+                      0
+                      0
+                      (LayoutLeaf (ElementKey 22))
+                  ]
+            , layoutContainerChildren = [header, body]
+            }
+      allocation = Map.singleton (ElementKey 20) (Size 420 640)
+      (resolved, diagnostics) =
+        resolveControlLayoutsWithAllocations Map.empty allocation [root]
+  assert "allocated portable control layout has no diagnostics" (null diagnostics)
+  case resolved of
+    [LayoutContainer spec]
+      | resolvedHeader : resolvedBody : _ <- spec.layoutContainerChildren -> do
+          assertRectDouble
+            "native allocation replaces only container extent"
+            (Rect 7 9 420 640)
+            spec.layoutContainerFrame
+          assertRectDouble
+            "top-anchored control follows allocated width"
+            (Rect 10 8 400 20)
+            (controlFrame resolvedHeader)
+          assertRectDouble
+            "stretched control follows allocated width and height"
+            (Rect 10 36 400 592)
+            (controlFrame resolvedBody)
+    _ -> error "allocated portable layout root changed shape"
 
 testGeometryProperties :: IO ()
 testGeometryProperties = do

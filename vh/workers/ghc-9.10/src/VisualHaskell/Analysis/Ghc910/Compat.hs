@@ -34,7 +34,7 @@ import Control.Concurrent.STM
   , writeTQueue
   )
 import Control.Exception (bracket, displayException)
-import Control.Monad (forM, void)
+import Control.Monad (forM, forM_, void)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (State, execState, get, modify')
 import Data.IORef
@@ -46,19 +46,37 @@ import Data.IORef
   )
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (catMaybes, mapMaybe)
+import Data.Maybe (catMaybes)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Clock (UTCTime, getCurrentTime)
 import qualified GHC
 import GHC.Builtin.Types (listTyCon)
+import GHC.Core.Class (classMethods, classSCTheta)
+import GHC.Core.ConLike (ConLike (..))
+import GHC.Core.DataCon
+  ( DataCon
+  , dataConFieldLabels
+  , dataConFullSig
+  , dataConName
+  , dataConRepType
+  )
 import GHC.Core.TyCon
   ( isTupleTyCon
+  , isAlgTyCon
+  , isFamilyTyCon
+  , isNewTyCon
+  , synTyConRhs_maybe
+  , tyConClass_maybe
+  , tyConDataCons
   , tyConName
+  , tyConTyVars
   )
+import GHC.Core.TyCo.Rep (scaledThing)
 import GHC.Core.Type
   ( Type
   , getTyVar_maybe
+  , splitAppTy_maybe
   , splitForAllTyCoVar_maybe
   , splitFunTy_maybe
   , splitTyConApp_maybe
@@ -71,12 +89,25 @@ import GHC.Types.Error
   , Severity (..)
   )
 import GHC.Types.Id (idType)
+import GHC.Types.FieldLabel
+  ( flLabel
+  , flSelector
+  )
 import GHC.Types.Name
   ( Name
+  , nameModule_maybe
   , nameOccName
   , nameSrcSpan
   )
-import GHC.Types.Name.Occurrence (occNameString)
+import GHC.Types.Name.Occurrence
+  ( NameSpace
+  , isDataConNameSpace
+  , isFieldNameSpace
+  , isTcClsNameSpace
+  , isVarNameSpace
+  , occNameSpace
+  , occNameString
+  )
 import GHC.Types.SrcLoc
   ( RealSrcSpan
   , SrcSpan (..)
@@ -87,6 +118,11 @@ import GHC.Types.SrcLoc
   , srcSpanStartLine
   )
 import GHC.Types.TyThing (TyThing (..))
+import GHC.Types.Var
+  ( isInvisibleFunArg
+  , tyVarKind
+  , varType
+  )
 import GHC.Utils.Outputable
   ( SDoc
   , ppr
@@ -95,8 +131,15 @@ import GHC.Utils.Outputable
   )
 import GHC.Utils.Logger (LogAction, LogFlags (..))
 import GHC.Data.FastString (unpackFS)
+import GHC.Unit.Types
+  ( moduleName
+  , moduleUnit
+  , unitString
+  )
 import HIE.Bios.Environment (initSession)
 import HIE.Bios.Types (ComponentOptions (..))
+import Language.Haskell.Syntax.Basic (FieldLabelString (..))
+import Language.Haskell.Syntax.Module.Name (moduleNameString)
 import System.FilePath (normalise)
 import VisualHaskell.Analysis.Ghc910.Types
 import VisualHaskell.Semantic
@@ -421,37 +464,56 @@ declarationsFor snapshot = do
           declarationsAndTypes <- forM names $ \name -> do
             thing <- GHC.lookupName name
             pure (declarationFor snapshot name =<< thing)
-          let declarations = mapMaybe (fmap fst) declarationsAndTypes
-              typeTable = execState (mapM_ (recordType . snd) (catMaybes declarationsAndTypes)) Map.empty
+          let projected = catMaybes declarationsAndTypes
+              declarations = fmap (\(declaration, _, _) -> declaration) projected
+              typeTable = execState (recordProjectedTypes projected) Map.empty
               declarationsWithIds = map (attachTypeId typeTable) declarations
           pure (declarationsWithIds, typeTable)
+
+recordProjectedTypes
+  :: [(Declaration range, [Type], Maybe GHC.TyCon)]
+  -> State TypeTable ()
+recordProjectedTypes projected =
+  forM_ projected $ \(_, types, declaredConstructor) -> do
+    mapM_ recordType types
+    forM_ declaredConstructor recordTypeConstructor
 
 declarationFor
   :: DocumentSnapshot
   -> Name
   -> TyThing
-  -> Maybe (Declaration RevisionedSourceRange, Type)
+  -> Maybe (Declaration RevisionedSourceRange, [Type], Maybe GHC.TyCon)
 declarationFor snapshot name thing = do
   range <- sourceRangeFor snapshot (nameSrcSpan name)
-  declarationTypeValue <- typeOfThing thing
   let declarationNameValue = Text.pack (occNameString (nameOccName name))
+      declarationTypeValue = typeOfThing thing
   pure
     ( Declaration
-        { declarationId = DeclarationId ("ghc:" <> declarationNameValue <> ":" <> Text.pack (show range))
+        { declarationId = declarationIdFor declarationNameValue range
         , declarationName = declarationNameValue
         , declarationKind = declarationKindFor thing
         , declarationRange = range
         , declarationSelectionRange = range
-        , declarationType = Just (typeIdentity declarationTypeValue)
-        , declarationSignatureText = Just (renderType declarationTypeValue)
+        , declarationType = typeIdentity <$> declarationTypeValue
+        , declarationSignatureText = renderType <$> declarationTypeValue
+        , declarationTypeSemantics = typeDeclarationSemanticsFor snapshot thing
         }
-    , declarationTypeValue
+    , semanticTypesForThing thing
+    , case thing of
+        ATyCon constructor -> Just constructor
+        _ -> Nothing
     )
+
+declarationIdFor :: Text -> RevisionedSourceRange -> DeclarationId
+declarationIdFor name range =
+  DeclarationId ("ghc:" <> name <> ":" <> Text.pack (show range))
 
 declarationKindFor :: TyThing -> DeclarationKind
 declarationKindFor = \case
   AnId _ -> ValueDeclaration
-  ATyCon _ -> TypeDeclaration
+  ATyCon constructor
+    | Just _ <- tyConClass_maybe constructor -> ClassDeclaration
+    | otherwise -> TypeDeclaration
   AConLike _ -> DataConstructorDeclaration
   ACoAxiom _ -> UnsupportedDeclaration "coercion-axiom"
 
@@ -459,8 +521,167 @@ typeOfThing :: TyThing -> Maybe Type
 typeOfThing = \case
   AnId identifier -> Just (idType identifier)
   ATyCon constructor -> Just (GHC.tyConKind constructor)
-  AConLike _ -> Nothing
+  AConLike (RealDataCon constructor) -> Just (dataConRepType constructor)
+  AConLike (PatSynCon _) -> Nothing
   ACoAxiom _ -> Nothing
+
+semanticTypesForThing :: TyThing -> [Type]
+semanticTypesForThing thing =
+  maybe [] pure (typeOfThing thing)
+    <> case thing of
+      ATyCon constructor -> semanticTypesForTyCon constructor
+      _ -> []
+
+semanticTypesForTyCon :: GHC.TyCon -> [Type]
+semanticTypesForTyCon constructor =
+  fmap tyVarKind (tyConTyVars constructor)
+    <> maybe [] pure (synTyConRhs_maybe constructor)
+    <> case tyConClass_maybe constructor of
+      Just classValue ->
+        classSCTheta classValue <> fmap idType (classMethods classValue)
+      Nothing -> concatMap semanticTypesForDataCon (tyConDataCons constructor)
+
+semanticTypesForDataCon :: DataCon -> [Type]
+semanticTypesForDataCon constructor =
+  let (_, existentialVariables, _, constraints, arguments, result) =
+        dataConFullSig constructor
+   in fmap varType existentialVariables
+        <> constraints
+        <> fmap scaledThing arguments
+        <> [result]
+
+typeDeclarationSemanticsFor
+  :: DocumentSnapshot
+  -> TyThing
+  -> Maybe (TypeDeclarationSemantics RevisionedSourceRange)
+typeDeclarationSemanticsFor snapshot = \case
+  ATyCon constructor ->
+    Just
+      TypeDeclarationSemantics
+        { typeDeclarationSemanticConstructor = typeConstructorIdentity constructor
+        , typeDeclarationSemanticParameters =
+            fmap typeParameterSemanticsFor (tyConTyVars constructor)
+        , typeDeclarationSemanticDefinition =
+            typeDeclarationDefinitionFor snapshot constructor
+        }
+  _ -> Nothing
+
+typeParameterSemanticsFor :: GHC.TyVar -> TypeParameterSemantics
+typeParameterSemanticsFor variable =
+  TypeParameterSemantics
+    { typeParameterSemanticName = nameText (GHC.getName variable)
+    , typeParameterSemanticKind = Just (typeIdentity (tyVarKind variable))
+    }
+
+typeDeclarationDefinitionFor
+  :: DocumentSnapshot
+  -> GHC.TyCon
+  -> TypeDeclarationDefinition RevisionedSourceRange
+typeDeclarationDefinitionFor snapshot constructor
+  | Just classValue <- tyConClass_maybe constructor =
+      TypeClassSemantics
+        (fmap typeIdentity (classSCTheta classValue))
+        (fmap (typeMethodSemanticsFor snapshot) (classMethods classValue))
+  | isFamilyTyCon constructor = TypeFamilySemantics
+  | Just rhs <- synTyConRhs_maybe constructor = TypeAliasSemantics (typeIdentity rhs)
+  | isNewTyCon constructor =
+      case tyConDataCons constructor of
+        dataConstructor : _ -> NewtypeSemantics (typeConstructorSemanticsFor snapshot dataConstructor)
+        [] -> AbstractTypeSemantics "newtype has no visible data constructor"
+  | isAlgTyCon constructor =
+      AlgebraicTypeSemantics
+        (fmap (typeConstructorSemanticsFor snapshot) (tyConDataCons constructor))
+  | otherwise =
+      AbstractTypeSemantics "GHC type constructor has no supported source definition shape"
+
+typeConstructorSemanticsFor
+  :: DocumentSnapshot
+  -> DataCon
+  -> TypeConstructorSemantics RevisionedSourceRange
+typeConstructorSemanticsFor snapshot constructor =
+  TypeConstructorSemantics
+    { typeConstructorSemanticId = "ghc:data-constructor:" <> stableNameIdentity (dataConName constructor)
+    , typeConstructorSemanticName = nameText (dataConName constructor)
+    , typeConstructorSemanticExistentials =
+        fmap
+          (\variable ->
+            TypeParameterSemantics
+              { typeParameterSemanticName = nameText (GHC.getName variable)
+              , typeParameterSemanticKind = Just (typeIdentity (varType variable))
+              }
+          )
+          existentialVariables
+    , typeConstructorSemanticConstraints = fmap typeIdentity constraints
+    , typeConstructorSemanticArguments = fmap (typeIdentity . scaledThing) arguments
+    , typeConstructorSemanticFields =
+        [ TypeFieldSemantics
+            { typeFieldSemanticId = "ghc:field:" <> stableNameIdentity (flSelector field)
+            , typeFieldSemanticName = Text.pack (unpackFS (field_label (flLabel field)))
+            , typeFieldSemanticType = typeIdentity (scaledThing argument)
+            , typeFieldSemanticRange = sourceRangeFor snapshot (nameSrcSpan (flSelector field))
+            }
+        | (field, argument) <- zip (dataConFieldLabels constructor) arguments
+        ]
+    , typeConstructorSemanticResult = Just (typeIdentity result)
+    , typeConstructorSemanticRange = sourceRangeFor snapshot (nameSrcSpan (dataConName constructor))
+    }
+  where
+    (_, existentialVariables, _, constraints, arguments, result) =
+      dataConFullSig constructor
+
+typeMethodSemanticsFor
+  :: DocumentSnapshot
+  -> GHC.Id
+  -> TypeMethodSemantics RevisionedSourceRange
+typeMethodSemanticsFor snapshot method =
+  TypeMethodSemantics
+    { typeMethodSemanticDeclaration =
+        maybe
+          (DeclarationId ("ghc:" <> stableNameIdentity methodName))
+          (declarationIdFor (nameText methodName))
+          methodRange
+    , typeMethodSemanticName = nameText methodName
+    , typeMethodSemanticType = Just (typeIdentity methodType)
+    , typeMethodSemanticSignatureText = Just (renderType methodType)
+    , typeMethodSemanticRange = methodRange
+    }
+  where
+    methodName = GHC.getName method
+    methodType = idType method
+    methodRange = sourceRangeFor snapshot (nameSrcSpan methodName)
+
+typeConstructorIdentity :: GHC.TyCon -> TypeId
+typeConstructorIdentity constructor =
+  TypeId ("ghc:constructor:" <> stableNameIdentity (tyConName constructor))
+
+nameText :: Name -> Text
+nameText = Text.pack . occNameString . nameOccName
+
+-- | GHC 'Unique' values and pretty-printer qualification are session-local.
+-- Protocol identity therefore follows unit/module/namespace/occurrence, as
+-- required by the stable semantic contract.
+stableNameIdentity :: Name -> Text
+stableNameIdentity name =
+  Text.intercalate
+    ":"
+    (moduleIdentity <> [namespaceText (occNameSpace occurrence), Text.pack (occNameString occurrence)])
+  where
+    occurrence = nameOccName name
+    moduleIdentity =
+      case nameModule_maybe name of
+        Nothing -> ["local"]
+        Just definingModule ->
+          [ Text.pack (unitString (moduleUnit definingModule))
+          , Text.pack (moduleNameString (moduleName definingModule))
+          ]
+
+namespaceText :: NameSpace -> Text
+namespaceText namespace
+  | isFieldNameSpace namespace = "field"
+  | isDataConNameSpace namespace = "data"
+  | isTcClsNameSpace namespace = "type-class"
+  | isVarNameSpace namespace = "value"
+  | otherwise = "type-variable"
 
 attachTypeId :: TypeTable -> Declaration range -> Declaration range
 attachTypeId table declaration =
@@ -488,8 +709,10 @@ normalizeType ghcType
   | Just (binder, body) <- splitForAllTyCoVar_maybe ghcType = do
       bodyIdentifier <- recordType body
       pure (ForallType [Text.pack (occNameString (nameOccName (GHC.getName binder)))] bodyIdentifier)
-  | Just (_, _, argument, result) <- splitFunTy_maybe ghcType =
-      FunctionType <$> recordType argument <*> recordType result
+  | Just (flag, _, argument, result) <- splitFunTy_maybe ghcType =
+      if isInvisibleFunArg flag
+        then ConstrainedType <$> (pure <$> recordType argument) <*> recordType result
+        else FunctionType <$> recordType argument <*> recordType result
   | Just (constructor, arguments) <- splitTyConApp_maybe ghcType = do
       argumentIdentifiers <- traverse recordType arguments
       if constructor == listTyCon
@@ -503,12 +726,14 @@ normalizeType ghcType
             else do
               constructorIdentifier <- recordTypeConstructor constructor
               pure (TypeApplication constructorIdentifier argumentIdentifiers)
+  | Just (function, argument) <- splitAppTy_maybe ghcType =
+      TypeApplication <$> recordType function <*> (pure <$> recordType argument)
   | otherwise = pure (UnsupportedType (renderType ghcType))
 
 recordTypeConstructor :: GHC.TyCon -> State TypeTable TypeId
 recordTypeConstructor constructor = do
   let name = qualifiedName (tyConName constructor)
-      identifier = TypeId ("ghc:constructor:" <> name)
+      identifier = typeConstructorIdentity constructor
   modify' (Map.insert identifier (TypeConstructor name))
   pure identifier
 

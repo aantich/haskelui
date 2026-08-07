@@ -323,6 +323,23 @@ shellControls model =
         , presentationKind = DialogPresentation
         , presentationTitle = "Portable dialog"
         , presentationMessage = "This sheet is owned by desired Haskell state."
+        , presentationActions =
+            [ PresentationActionSpec
+                (PresentationActionId 1)
+                "Save"
+                DefaultPresentationAction
+                True
+            , PresentationActionSpec
+                (PresentationActionId 2)
+                "Cancel"
+                CancelPresentationAction
+                True
+            , PresentationActionSpec
+                (PresentationActionId 3)
+                "Don’t Save"
+                DestructivePresentationAction
+                True
+            ]
         , presentationVisible = model.galleryDialogVisible
         }
   , Alert
@@ -332,6 +349,7 @@ shellControls model =
         , presentationKind = AlertPresentation
         , presentationTitle = "Portable alert"
         , presentationMessage = "AppKit renders NSAlert; Windows will render ContentDialog."
+        , presentationActions = []
         , presentationVisible = model.galleryAlertVisible
         }
   , Popover
@@ -341,6 +359,7 @@ shellControls model =
         , presentationKind = PopoverPresentation (ElementKey 405)
         , presentationTitle = "Portable popover"
         , presentationMessage = "Anchored transient native content."
+        , presentationActions = []
         , presentationVisible = model.galleryPopoverVisible
         }
   ]

@@ -147,6 +147,7 @@ analyze _workspace session generation snapshot =
         , declarationSelectionRange = wholeLine
         , declarationType = Just typeId
         , declarationSignatureText = Just "main :: Text -> IO"
+        , declarationTypeSemantics = Nothing
         }
     diagnostics =
       [ Diagnostic

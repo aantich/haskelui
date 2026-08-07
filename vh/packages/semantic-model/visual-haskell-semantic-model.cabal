@@ -25,6 +25,7 @@ library
   exposed-modules:
       VisualHaskell.Semantic
       VisualHaskell.Semantic.Coordinates
+      VisualHaskell.Semantic.TypeUniverse
       VisualHaskell.Semantic.Types
   other-modules:
       Paths_visual_haskell_semantic_model

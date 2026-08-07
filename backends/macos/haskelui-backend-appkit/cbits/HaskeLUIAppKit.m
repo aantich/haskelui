@@ -28,6 +28,8 @@ typedef NS_ENUM(NSInteger, HaskeLUIMacControlKind) {
 
 static void HaskeLUIEmit(int32_t kind, uint64_t identity, NSString *text);
 static void HaskeLUIEmitDrawingInput(uint64_t identity, HaskeLUIMacDrawingInput input);
+static void HaskeLUILayoutContainer(HaskeLUIMacControlHandle *handle);
+static void HaskeLUIScheduleLayoutAllocation(HaskeLUIMacControlHandle *handle);
 static NSString *HaskeLUISystemColorScheme(void);
 static void *HaskeLUIEffectiveAppearanceContext = &HaskeLUIEffectiveAppearanceContext;
 
@@ -36,6 +38,8 @@ static void *HaskeLUIEffectiveAppearanceContext = &HaskeLUIEffectiveAppearanceCo
 @property(nonatomic, assign) void *callbackContext;
 @property(nonatomic, assign) HaskeLUIMacDrawingInputCallback drawingInputCallback;
 @property(nonatomic, assign) void *drawingInputCallbackContext;
+@property(nonatomic, assign) HaskeLUIMacLayoutAllocationCallback layoutAllocationCallback;
+@property(nonatomic, assign) void *layoutAllocationCallbackContext;
 @property(nonatomic, strong) NSMenu *fileMenu;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSMenuItem *> *commandItems;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, id> *commandTargets;
@@ -138,6 +142,10 @@ static NSString *HaskeLUISystemColorScheme(void) {
 
 @interface HaskeLUIContainerHostView : NSView
 @property(nonatomic, assign) BOOL usesTopLeftCoordinates;
+@end
+
+@interface HaskeLUILayoutContainerBox : NSBox
+@property(nonatomic, weak) HaskeLUIMacControlHandle *layoutOwner;
 @end
 
 @implementation HaskeLUIContainerHostView
@@ -1203,6 +1211,7 @@ static NSImage *HaskeLUIImageSource(NSString *source);
 
 @interface HaskeLUIMacControlHandle : NSObject <NSPopoverDelegate>
 @property(nonatomic, assign) uint64_t identity;
+@property(nonatomic, assign) uint64_t windowIdentity;
 @property(nonatomic, strong) NSView *view;
 @property(nonatomic, strong) NSView *focusView;
 @property(nonatomic, assign) NSRect desiredFrame;
@@ -1230,6 +1239,8 @@ static NSImage *HaskeLUIImageSource(NSString *source);
 @property(nonatomic, assign) int32_t containerState;
 @property(nonatomic, copy) NSString *primaryText;
 @property(nonatomic, copy) NSString *secondaryText;
+@property(nonatomic, assign) NSSize lastScheduledLayoutAllocation;
+@property(nonatomic, assign) uint64_t layoutAllocationGeneration;
 @end
 
 @implementation HaskeLUIMacControlHandle
@@ -1264,6 +1275,50 @@ static NSImage *HaskeLUIImageSource(NSString *source);
   [self finishPopoverDismissal];
 }
 @end
+
+
+@implementation HaskeLUILayoutContainerBox
+- (void)layout {
+  [super layout];
+  HaskeLUIMacControlHandle *owner = self.layoutOwner;
+  if (owner != nil) {
+    HaskeLUILayoutContainer(owner);
+    HaskeLUIScheduleLayoutAllocation(owner);
+  }
+}
+@end
+
+static void HaskeLUIScheduleLayoutAllocation(HaskeLUIMacControlHandle *handle) {
+  if (handle == nil || handle.containerState < 6000) {
+    return;
+  }
+  NSSize allocation = handle.view.bounds.size;
+  if (!(allocation.width > 0) || !(allocation.height > 0) ||
+      !isfinite(allocation.width) || !isfinite(allocation.height)) {
+    return;
+  }
+  NSSize previous = handle.lastScheduledLayoutAllocation;
+  if (fabs(previous.width - allocation.width) <= 0.25 &&
+      fabs(previous.height - allocation.height) <= 0.25) {
+    return;
+  }
+  handle.lastScheduledLayoutAllocation = allocation;
+  uint64_t generation = ++handle.layoutAllocationGeneration;
+  __sync_add_and_fetch(&HaskeLUIQueuedCallbacks, 1);
+  dispatch_async(dispatch_get_main_queue(), ^{
+    HaskeLUIMacApplicationState *state = HaskeLUIState;
+    if (state != nil && state.layoutAllocationCallback != NULL &&
+        handle.layoutAllocationGeneration == generation) {
+      state.layoutAllocationCallback(
+          state.layoutAllocationCallbackContext,
+          handle.windowIdentity,
+          handle.identity,
+          allocation.width,
+          allocation.height);
+    }
+    __sync_sub_and_fetch(&HaskeLUIQueuedCallbacks, 1);
+  });
+}
 
 static HaskeLUIMacWindowHandle *HaskeLUIWindow(HaskeLUIMacWindowRef reference) {
   return (__bridge HaskeLUIMacWindowHandle *)reference;
@@ -1325,6 +1380,16 @@ void haskelui_macos_set_drawing_input_callback(
   if (HaskeLUIState != nil) {
     HaskeLUIState.drawingInputCallback = callback;
     HaskeLUIState.drawingInputCallbackContext = context;
+  }
+}
+
+void haskelui_macos_set_layout_allocation_callback(
+    HaskeLUIMacLayoutAllocationCallback callback,
+    void *context) {
+  HaskeLUIAssertMainThread();
+  if (HaskeLUIState != nil) {
+    HaskeLUIState.layoutAllocationCallback = callback;
+    HaskeLUIState.layoutAllocationCallbackContext = context;
   }
 }
 
@@ -1400,6 +1465,8 @@ void haskelui_macos_shutdown(void) {
   HaskeLUIState.callbackContext = NULL;
   HaskeLUIState.drawingInputCallback = NULL;
   HaskeLUIState.drawingInputCallbackContext = NULL;
+  HaskeLUIState.layoutAllocationCallback = NULL;
+  HaskeLUIState.layoutAllocationCallbackContext = NULL;
   NSApplication.sharedApplication.mainMenu = nil;
   HaskeLUIState = nil;
   HaskeLUIControlGalleryTestActive = NO;
@@ -1927,6 +1994,7 @@ static HaskeLUIMacControlRef HaskeLUIRetainControl(
     HaskeLUIMacWindowRef windowReference) {
   HaskeLUIMacControlHandle *handle = [[HaskeLUIMacControlHandle alloc] init];
   handle.identity = identity;
+  handle.windowIdentity = HaskeLUIWindow(windowReference).identity;
   handle.view = view;
   handle.focusView = focusView;
   handle.desiredFrame = view.frame;
@@ -2568,7 +2636,6 @@ HaskeLUIMacControlRef haskelui_macos_catalog_control_create(
       NSTextView *text = nil;
       NSScrollView *scroll = HaskeLUITextArea(frame, nil, YES, &text);
       scroll.borderType = NSNoBorder;
-      scroll.hasVerticalScroller = NO;
       text.editable = NO;
       text.selectable = YES;
       text.drawsBackground = NO;
@@ -2908,8 +2975,11 @@ HaskeLUIMacControlRef haskelui_macos_catalog_control_create(
     case HaskeLUIMacCatalogContainer:
     default: {
       target = HaskeLUINewTarget(identity, HaskeLUIMacEventDisclosureChanged);
-      NSBox *box = [[NSBox alloc] initWithFrame:HaskeLUIRect(frame)];
+      HaskeLUILayoutContainerBox *box =
+          [[HaskeLUILayoutContainerBox alloc] initWithFrame:HaskeLUIRect(frame)];
       box.boxType = NSBoxCustom;
+      box.titlePosition = NSNoTitle;
+      box.contentViewMargins = NSZeroSize;
       box.transparent = YES;
       NSButton *disclosure = [[NSButton alloc] initWithFrame:NSZeroRect];
       disclosure.buttonType = NSButtonTypePushOnPushOff;
@@ -2959,6 +3029,7 @@ HaskeLUIMacControlRef haskelui_macos_catalog_control_create(
       }
     }
     handle.contentView = handle.normalContentView;
+    ((HaskeLUILayoutContainerBox *)view).layoutOwner = handle;
   } else if ([view isKindOfClass:NSBox.class]) {
     handle.contentView = ((NSBox *)view).contentView;
   } else if (catalogKind == HaskeLUIMacCatalogTabView) {
@@ -3129,7 +3200,7 @@ static void HaskeLUILayoutContainer(HaskeLUIMacControlHandle *handle) {
   NSArray<NSView *> *children = host.subviews;
   NSInteger count = children.count;
   NSInteger state = handle.containerState;
-  NSRect bounds = ((NSBox *)handle.view).contentView.bounds;
+  NSRect bounds = handle.view.bounds;
 
   if (state == 3000 || state == 6300) {
     CGFloat headerY = MAX(0, NSHeight(bounds) - 28);
@@ -3274,6 +3345,13 @@ static void HaskeLUIConfigureContainer(HaskeLUIMacControlHandle *handle, int32_t
     box.title = @"";
   }
   HaskeLUILayoutContainer(handle);
+  if (portable) {
+    /* The authored frame is the baseline, not a native allocation. A later
+       fill/autoresize operation will differ from it and publish the host's
+       authoritative size. */
+    handle.lastScheduledLayoutAllocation = handle.view.bounds.size;
+    handle.layoutAllocationGeneration += 1;
+  }
 }
 
 static NSImage *HaskeLUIImageSource(NSString *source) {
@@ -3902,15 +3980,43 @@ void haskelui_macos_catalog_control_set_presentation(
     NSAlert *alert = [[NSAlert alloc] init];
     alert.messageText = handle.primaryText ?: @"";
     alert.informativeText = handle.secondaryText ?: @"";
-    [alert addButtonWithTitle:@"OK"];
-    if (handle.catalogKind == HaskeLUIMacCatalogDialog) {
-      [alert addButtonWithTitle:@"Cancel"];
+    if (handle.catalogKind == HaskeLUIMacCatalogAlert) {
+      alert.alertStyle = NSAlertStyleWarning;
+    }
+    NSArray<NSDictionary *> *presentationItems = handle.items.copy;
+    if (presentationItems.count == 0) {
+      [alert addButtonWithTitle:@"OK"];
+      if (handle.catalogKind == HaskeLUIMacCatalogDialog) {
+        [alert addButtonWithTitle:@"Cancel"];
+      }
+    } else {
+      for (NSDictionary *item in presentationItems) {
+        NSButton *button = [alert addButtonWithTitle:item[@"label"] ?: @""];
+        button.enabled = [item[@"enabled"] boolValue];
+        NSString *role = item[@"detail"] ?: @"";
+        if ([role isEqualToString:@"default"]) {
+          button.keyEquivalent = @"\r";
+        } else if ([role isEqualToString:@"cancel"]) {
+          button.keyEquivalent = @"\033";
+        } else if ([role isEqualToString:@"destructive"]) {
+          button.hasDestructiveAction = YES;
+        }
+      }
     }
     [alert beginSheetModalForWindow:owner.window completionHandler:^(NSModalResponse response) {
       BOOL wasPresented = handle.presentationVisible;
       handle.presentationVisible = NO;
       handle.presentationWindow = nil;
-      NSString *result = response == NSAlertFirstButtonReturn ? @"accepted" : @"cancelled";
+      NSString *result = @"dismissed";
+      NSInteger actionIndex = response - NSAlertFirstButtonReturn;
+      if (presentationItems.count > 0 &&
+          actionIndex >= 0 &&
+          actionIndex < (NSInteger)presentationItems.count) {
+        NSNumber *identity = presentationItems[(NSUInteger)actionIndex][@"identity"];
+        result = [NSString stringWithFormat:@"action:%@", identity];
+      } else if (presentationItems.count == 0) {
+        result = response == NSAlertFirstButtonReturn ? @"accepted" : @"cancelled";
+      }
       if (wasPresented) {
         HaskeLUIEmit(HaskeLUIMacEventPresentationClosed, handle.identity, result);
       }
@@ -4319,6 +4425,14 @@ void haskelui_macos_control_set_frame(HaskeLUIMacControlRef reference, const Has
   HaskeLUIAssertMainThread();
   HaskeLUIMacControlHandle *handle = HaskeLUIControl(reference);
   handle.desiredFrame = HaskeLUIRect(frame);
+  if (handle.catalogKind == HaskeLUIMacCatalogContainer &&
+      handle.containerState >= 6000) {
+    /* Frames committed by Core are semantic output, not fresh host input.
+       Recording the size before AppKit lays out the box prevents a feedback
+       callback and cancels an older coalesced allocation. */
+    handle.lastScheduledLayoutAllocation = handle.desiredFrame.size;
+    handle.layoutAllocationGeneration += 1;
+  }
   handle.view.frame = handle.desiredFrame;
   HaskeLUILayoutMessage(handle);
   HaskeLUILayoutContainer(handle);
@@ -4367,6 +4481,12 @@ static void HaskeLUIAttachControl(
   if (fillParent != 0) {
     control.view.frame = parent.bounds;
     control.view.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    [control.view layoutSubtreeIfNeeded];
+    HaskeLUIScheduleLayoutAllocation(control);
+  } else {
+    /* Portable layout children are owned by the pure solver.  Native springs
+       would otherwise race its committed frames during a host resize. */
+    control.view.autoresizingMask = NSViewNotSizable;
   }
 }
 
@@ -4875,6 +4995,12 @@ void haskelui_macos_test_schedule_control_gallery_script(
     HaskeLUIMacControlHandle *growTwo = HaskeLUIState.controls[@6013];
     HaskeLUIMacControlHandle *evenBadge = HaskeLUIState.controls[@6024];
     HaskeLUIMacControlHandle *gridFixed = HaskeLUIState.controls[@6031];
+    HaskeLUIMacControlHandle *overlayGroup = HaskeLUIState.controls[@6040];
+    HaskeLUIMacControlHandle *overlayStretch = HaskeLUIState.controls[@6041];
+    HaskeLUIMacControlHandle *overlayTopStart = HaskeLUIState.controls[@6042];
+    HaskeLUIMacControlHandle *overlayTopEnd = HaskeLUIState.controls[@6043];
+    HaskeLUIMacControlHandle *overlayCenter = HaskeLUIState.controls[@6044];
+    HaskeLUIMacControlHandle *overlayBottomEnd = HaskeLUIState.controls[@6045];
     HaskeLUIMacControlHandle *wrapFirst = HaskeLUIState.controls[@6051];
     HaskeLUIMacControlHandle *wrapLast = HaskeLUIState.controls[@6058];
     HaskeLUIMacControlHandle *compactAdaptive = HaskeLUIState.controls[@6071];
@@ -4891,6 +5017,8 @@ void haskelui_macos_test_schedule_control_gallery_script(
     HaskeLUIMacControlHandle *tableHorizontalLine = HaskeLUIState.controls[@6150];
     if (layoutRoot == nil || flowGroup == nil || fixedFlow == nil ||
         growOne == nil || growTwo == nil || evenBadge == nil || gridFixed == nil ||
+        overlayGroup == nil || overlayStretch == nil || overlayTopStart == nil ||
+        overlayTopEnd == nil || overlayCenter == nil || overlayBottomEnd == nil ||
         wrapFirst == nil || wrapLast == nil || compactAdaptive == nil ||
         wideAdaptive == nil || compactFirst == nil || compactSecond == nil ||
         wideFirst == nil || wideSecond == nil || tableGroup == nil ||
@@ -4979,6 +5107,21 @@ void haskelui_macos_test_schedule_control_gallery_script(
         HaskeLUITestFail(@"wide adaptive layout did not use its row strategy");
       }
     }
+
+    BOOL testPortableReflow = overlayGroup != nil && overlayStretch != nil &&
+        overlayTopStart != nil && overlayTopEnd != nil && overlayCenter != nil &&
+        overlayBottomEnd != nil;
+    NSSize overlayContentBefore =
+        testPortableReflow ? overlayGroup.contentView.bounds.size : NSZeroSize;
+    if (testPortableReflow) {
+      NSRect resizedOverlayFrame = overlayGroup.view.frame;
+      resizedOverlayFrame.size.width += 180;
+      resizedOverlayFrame.size.height += 90;
+      overlayGroup.view.frame = resizedOverlayFrame;
+      [overlayGroup.view layoutSubtreeIfNeeded];
+    }
+    NSSize overlayContentAfter =
+        testPortableReflow ? overlayGroup.contentView.bounds.size : NSZeroSize;
     if (richText == nil || ![richText.focusView isKindOfClass:NSTextView.class]) {
       HaskeLUITestFail(@"rich text did not map to an attributed native text peer");
     } else {
@@ -5124,6 +5267,35 @@ void haskelui_macos_test_schedule_control_gallery_script(
         [NSNotification notificationWithName:NSTextDidChangeNotification object:editor]];
 
     HaskeLUITestAfter(0.14, ^{
+      if (testPortableReflow) {
+        CGFloat widthDelta = overlayContentAfter.width - overlayContentBefore.width;
+        CGFloat heightDelta = overlayContentAfter.height - overlayContentBefore.height;
+        if (widthDelta < 179 || heightDelta < 89 ||
+            fabs(NSWidth(overlayStretch.view.frame) -
+                (overlayContentAfter.width - 20)) > 1 ||
+            fabs(NSHeight(overlayStretch.view.frame) -
+                (overlayContentAfter.height - 20)) > 1 ||
+            fabs(NSMinX(overlayTopStart.view.frame) - 18) > 1 ||
+            fabs(NSMinY(overlayTopStart.view.frame) - 18) > 1 ||
+            fabs(NSMaxX(overlayTopEnd.view.frame) -
+                (overlayContentAfter.width - 18)) > 1 ||
+            fabs(NSMinY(overlayTopEnd.view.frame) - 18) > 1 ||
+            fabs(NSMidX(overlayCenter.view.frame) -
+                overlayContentAfter.width / 2) > 1 ||
+            fabs(NSMidY(overlayCenter.view.frame) -
+                overlayContentAfter.height / 2) > 1 ||
+            fabs(NSMaxX(overlayBottomEnd.view.frame) -
+                (overlayContentAfter.width - 18)) > 1 ||
+            fabs(NSMaxY(overlayBottomEnd.view.frame) -
+                (overlayContentAfter.height - 18)) > 1) {
+          HaskeLUITestFail([NSString stringWithFormat:
+              @"portable layout did not re-solve after native allocation changed "
+               "(content=%.1fx%.1f delta=%.1fx%.1f stretch=%.1fx%.1f)",
+              overlayContentAfter.width, overlayContentAfter.height,
+              widthDelta, heightDelta,
+              NSWidth(overlayStretch.view.frame), NSHeight(overlayStretch.view.frame)]);
+        }
+      }
       HaskeLUIMacControlHandle *textMirror = HaskeLUIState.controls[@(textMirrorIdentity)];
       if (textMirror == nil ||
           ![((NSTextField *)textMirror.view).stringValue isEqualToString:@"native gallery edit"]) {

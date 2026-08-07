@@ -94,6 +94,37 @@ main = do
       Left _ -> True
       Right _ -> False
 
+  let presentationAction identity title role =
+        PresentationActionSpec
+          (PresentationActionId identity)
+          title
+          role
+          True
+      closePresentation =
+        PresentationSpec
+          (ElementKey 30)
+          (Rect 0 0 0 0)
+          AlertPresentation
+          "Save changes?"
+          "Unsaved changes will be lost."
+          [ presentationAction 1 "Save" DefaultPresentationAction
+          , presentationAction 2 "Cancel" CancelPresentationAction
+          , presentationAction 3 "Don’t Save" DestructivePresentationAction
+          ]
+          True
+  assert "typed presentation actions form a valid portable close confirmation" $
+    validateControlCatalog [Alert closePresentation] == []
+  assert "presentation validation rejects duplicate action identities" $
+    not . null $
+      validateControlCatalog
+        [ Alert
+            closePresentation
+              { presentationActions =
+                  presentationAction 1 "Save" DefaultPresentationAction
+                    : closePresentation.presentationActions
+              }
+        ]
+
   let sourceItem =
         WorkspaceItemSpec
           (WorkspaceItemKey 1)

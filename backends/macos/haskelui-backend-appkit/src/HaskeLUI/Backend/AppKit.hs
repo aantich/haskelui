@@ -83,6 +83,7 @@ data NativeWindow = NativeWindow
   { nativeWindowHandle :: !(Ptr MacWindowHandle)
   , nativeWindowSpec :: !WindowSpec
   , nativeWindowControls :: !(Map ElementKey NativeControl)
+  , nativeLayoutAllocations :: !(Map ElementKey Size)
   }
 
 data AppKitState = AppKitState
@@ -96,16 +97,20 @@ appKitBackend = Backend openAppKit
 openAppKit :: (UIEvent -> IO ()) -> IO BackendSession
 openAppKit dispatch = do
   scheduledActions <- newIORef []
+  stateReference <- newIORef (AppKitState Map.empty Map.empty)
   callback <- makeEventCallback (receiveEvent dispatch (drainScheduledActions scheduledActions))
   drawingInputCallback <- makeDrawingInputCallback (receiveDrawingInput dispatch)
+  layoutAllocationCallback <-
+    makeLayoutAllocationCallback (receiveLayoutAllocation stateReference)
   initialized <- c_initialize callback nullPtr
   unless (initialized /= 0) $ do
     freeHaskellFunPtr callback
     freeHaskellFunPtr drawingInputCallback
+    freeHaskellFunPtr layoutAllocationCallback
     error "HaskeLUI AppKit backend could not initialize NSApplication"
   c_setDrawingInputCallback drawingInputCallback nullPtr
+  c_setLayoutAllocationCallback layoutAllocationCallback nullPtr
 
-  stateReference <- newIORef (AppKitState Map.empty Map.empty)
   pure
     BackendSession
       { backendRender = reconcile stateReference
@@ -114,7 +119,12 @@ openAppKit dispatch = do
       , backendRequestOpenProjectFolder = c_openProjectFolder
       , backendRun = c_run
       , backendStop = c_stop
-      , backendShutdown = shutdown stateReference callback drawingInputCallback
+      , backendShutdown =
+          shutdown
+            stateReference
+            callback
+            drawingInputCallback
+            layoutAllocationCallback
       }
 
 scheduleOnUI :: IORef [IO ()] -> IO () -> IO ()
@@ -263,6 +273,47 @@ receiveDrawingInput dispatch _ identity inputPointer
             )
             (decodeDrawingPhase input.cDrawingInputKind)
 
+-- Native allocation changes are backend bookkeeping, not application events.
+-- Re-solving here keeps the declarative model independent of window sizes and
+-- preserves focus because only the resulting frames are committed.
+receiveLayoutAllocation
+  :: IORef AppKitState
+  -> Ptr ()
+  -> Word64
+  -> Word64
+  -> CDouble
+  -> CDouble
+  -> IO ()
+receiveLayoutAllocation stateReference _ windowIdentity controlIdentity nativeWidth nativeHeight = do
+  let width = realToFrac nativeWidth :: Double
+      height = realToFrac nativeHeight :: Double
+  when
+    ( width > 0
+        && height > 0
+        && not (isNaN width || isInfinite width || isNaN height || isInfinite height)
+    ) $ do
+      state <- readIORef stateReference
+      let nativeWindowKey = WindowKey windowIdentity
+          elementKey = ElementKey controlIdentity
+          allocation = Size (Dp width) (Dp height)
+      case Map.lookup nativeWindowKey state.nativeWindows of
+        Just native
+          | Just control <- Map.lookup elementKey native.nativeWindowControls
+          , LayoutContainer {} <- control.nativeControlSpec
+          , Map.lookup elementKey native.nativeLayoutAllocations /= Just allocation -> do
+              updated <-
+                reflowNativeWindow
+                  native
+                    { nativeLayoutAllocations =
+                        Map.insert elementKey allocation native.nativeLayoutAllocations
+                    }
+              writeIORef
+                stateReference
+                state
+                  { nativeWindows = Map.insert nativeWindowKey updated state.nativeWindows
+                  }
+        _ -> pure ()
+
 decodeDrawingPhase :: CInt -> Maybe DrawingPointerPhase
 decodeDrawingPhase 1 = Just DrawingPointerDown
 decodeDrawingPhase 2 = Just DrawingPointerMoved
@@ -328,6 +379,10 @@ decodeColor value =
     _ -> Nothing
 
 decodePresentationResult :: Text -> PresentationResult
+decodePresentationResult value
+  | Just encodedIdentity <- Text.stripPrefix "action:" value
+  , Just identity <- readMaybe (Text.unpack encodedIdentity) =
+      PresentationActionSelected (PresentationActionId identity)
 decodePresentationResult "accepted" = PresentationAccepted
 decodePresentationResult "cancelled" = PresentationCancelled
 decodePresentationResult _ = PresentationDismissed
@@ -409,7 +464,7 @@ createWindow spec =
       forM_ (windowWorkspace spec) (configureWorkspaceStructure handle)
       let desiredControls = windowLeafControls spec
       created <- foldM (createAndInsertControl handle) Map.empty desiredControls
-      (resolvedSpec, measured) <- resolveNativeLayouts created spec
+      (resolvedSpec, measured) <- resolveNativeLayouts created Map.empty spec
       controls <- commitPortableLayoutFrames handle measured resolvedSpec
       forM_ (windowWorkspace resolvedSpec) (configureWorkspaceParents handle controls)
       configureNestedControlParents controls (windowRootControls resolvedSpec)
@@ -420,6 +475,7 @@ createWindow spec =
           { nativeWindowHandle = handle
           , nativeWindowSpec = resolvedSpec
           , nativeWindowControls = controls
+          , nativeLayoutAllocations = Map.empty
           }
 
 updateWindow :: NativeWindow -> WindowSpec -> IO NativeWindow
@@ -433,7 +489,8 @@ updateWindow native desired = do
       native.nativeWindowHandle
       native.nativeWindowControls
       desiredControls
-  (resolvedDesired, measured) <- resolveNativeLayouts reconciled desired
+  (resolvedDesired, measured) <-
+    resolveNativeLayouts reconciled native.nativeLayoutAllocations desired
   controls <- commitPortableLayoutFrames native.nativeWindowHandle measured resolvedDesired
   forM_ (windowWorkspace resolvedDesired) (configureWorkspaceParents native.nativeWindowHandle controls)
   configureNestedControlParents controls (windowRootControls resolvedDesired)
@@ -822,13 +879,14 @@ measurementAffectingChanged old new =
 
 resolveNativeLayouts
   :: Map ElementKey NativeControl
+  -> Map ElementKey Size
   -> WindowSpec
   -> IO (WindowSpec, Map ElementKey NativeControl)
-resolveNativeLayouts controls desired = do
+resolveNativeLayouts controls allocations desired = do
   (measurements, measuredControls) <-
     ensureNativeMeasurements (portableMeasurementKeys desired) controls
   let (resolvedView, diagnostics) =
-        resolveAppViewLayoutsWith measurements (AppView [desired] [])
+        resolveAppViewLayoutsWithAllocations measurements allocations (AppView [desired] [])
       errors =
         [ diagnosticMessage diagnostic
         | diagnostic <- diagnostics
@@ -839,6 +897,20 @@ resolveNativeLayouts controls desired = do
   case resolvedView.appWindows of
     [resolved] -> pure (resolved, measuredControls)
     _ -> error "HaskeLUI AppKit failed to resolve a single-window layout"
+
+reflowNativeWindow :: NativeWindow -> IO NativeWindow
+reflowNativeWindow native = do
+  (resolved, measured) <-
+    resolveNativeLayouts
+      native.nativeWindowControls
+      native.nativeLayoutAllocations
+      native.nativeWindowSpec
+  controls <- commitResolvedLayoutFrames measured resolved
+  pure
+    native
+      { nativeWindowSpec = resolved
+      , nativeWindowControls = controls
+      }
 
 ensureNativeMeasurements
   :: Set ElementKey
@@ -883,6 +955,30 @@ commitPortableLayoutFrames window controls resolved =
           committed <- updateControl window native control
           pure (Map.insert key committed updated)
         _ -> pure updated
+
+-- A native resize must not replay text values, focus requests, presentation
+-- state, or other control configuration.  It commits geometry only, while
+-- retaining the resolved control forest for the next incremental reflow.
+commitResolvedLayoutFrames
+  :: Map ElementKey NativeControl
+  -> WindowSpec
+  -> IO (Map ElementKey NativeControl)
+commitResolvedLayoutFrames controls resolved =
+  Map.traverseWithKey commitOne controls
+  where
+    desired = Map.fromList [(controlKey control, control) | control <- windowLeafControls resolved]
+    layoutKeys = portableMeasurementKeys resolved
+
+    commitOne key native =
+      case Map.lookup key desired of
+        Nothing -> pure native
+        Just control -> do
+          when
+            ( key `Set.member` layoutKeys
+                && controlFrame native.nativeControlSpec /= controlFrame control
+            ) $
+              withMacRect (controlFrame control) (c_controlSetFrame native.nativeControlHandle)
+          pure native {nativeControlSpec = control}
 
 measureNativeControl :: NativeControl -> IO IntrinsicMetrics
 measureNativeControl native
@@ -1106,6 +1202,21 @@ configureCatalogControl handle = \case
     configurePresentation spec = do
       setPrimary handle spec.presentationTitle
       setSecondary handle spec.presentationMessage
+      setCatalogItems handle
+        [ catalogItem
+            presentationAction.presentationActionId.unPresentationActionId
+            presentationAction.presentationActionTitle
+            (presentationActionRoleText presentationAction.presentationActionRole)
+            ""
+            0
+            presentationAction.presentationActionEnabled
+            False
+            False
+            False
+            False
+            Nothing
+        | presentationAction <- spec.presentationActions
+        ]
       c_catalogSetPresentation handle
         (booleanInt spec.presentationVisible)
         (case spec.presentationKind of
@@ -1216,6 +1327,14 @@ menuCatalogItems entries = zipWith convert [1 ..] entries
       catalogItem index label "" "" 0 enabled False False False False (Just command)
     convert index MenuSeparator =
       catalogItem index "" "" "" 0 False False False False True Nothing
+
+presentationActionRoleText :: PresentationActionRole -> Text
+presentationActionRoleText role =
+  case role of
+    DefaultPresentationAction -> "default"
+    CancelPresentationAction -> "cancel"
+    DestructivePresentationAction -> "destructive"
+    AuxiliaryPresentationAction -> "auxiliary"
 
 setCatalogItems :: Ptr MacControlHandle -> [CatalogItem] -> IO ()
 setCatalogItems handle items = do
@@ -1580,8 +1699,13 @@ applyTextEditorNavigation handle editor =
     advanceUtf16 offset character =
       offset + if ord character > 0xFFFF then 2 else 1
 
-shutdown :: IORef AppKitState -> FunPtr EventCallback -> FunPtr DrawingInputCallback -> IO ()
-shutdown stateReference callback drawingInputCallback = do
+shutdown
+  :: IORef AppKitState
+  -> FunPtr EventCallback
+  -> FunPtr DrawingInputCallback
+  -> FunPtr LayoutAllocationCallback
+  -> IO ()
+shutdown stateReference callback drawingInputCallback layoutAllocationCallback = do
   state <- readIORef stateReference
   forM_ (Map.elems state.nativeWindows) destroyWindow
   forM_ (Map.keys state.nativeCommands) (c_commandRemove . unCommandId)
@@ -1589,6 +1713,7 @@ shutdown stateReference callback drawingInputCallback = do
   c_shutdown
   freeHaskellFunPtr callback
   freeHaskellFunPtr drawingInputCallback
+  freeHaskellFunPtr layoutAllocationCallback
 
 withText :: Text -> (CString -> IO result) -> IO result
 withText value = ByteString.useAsCString (TextEncoding.encodeUtf8 value)

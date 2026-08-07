@@ -40,11 +40,15 @@ The initial implementation will:
    configuration.
 3. Not depend initially on `ghcide`, HLS, LSP, `hls-graph`, or
    `hls-plugin-api`.
-4. Run compiler integration in a separate GHC-version-specific worker process.
+4. Run compiler integration in a separate compiler-compatible worker process.
+   Keep one protocol and predominantly one shared worker implementation, with
+   the small GHC API compatibility surface selected when that source is built
+   against a supported `ghc` package.
 5. Communicate through a stable Visual Haskell protocol containing no raw GHC
    values.
-6. Support GHC 9.10.3 first and add other compiler workers only after the
-   protocol and product behavior stabilize.
+6. Support GHC 9.10.3 first and build the shared worker source against other
+   compiler API families only after the protocol and product behavior
+   stabilize.
 7. Use the implemented asynchronous TextMate service for broad lexical
    highlighting, while keeping the existing pure Haskell lexer as an immediate
    startup/failure fallback.
@@ -54,6 +58,12 @@ The initial implementation will:
    a user cache outside the workspace.
 10. Use the implemented generic HaskeLUI asynchronous runtime before
     integrating the compiler worker.
+11. Prefer GHCup as the managed installer and locator for GHC, Cabal, Stack,
+    and optional auxiliary tools. Cabal, Stack, and `hie-bios` remain the
+    authorities for project plans, components, dependencies, and GHC flags.
+12. Distribute supported compiler integration as signed, prebuilt artifacts
+    produced from the shared worker source and selected through compatibility
+    metadata. Do not compile workers during the normal end-user workflow.
 
 The required runtime design is specified in
 [HaskeLUI services, tasks, and external events](services-tasks-external-events.md).
@@ -106,10 +116,10 @@ flowchart TB
     RUNTIME["HaskeLUI serialized runtime inbox"]
     CLIENT["Analysis client and supervisor"]
     PROTOCOL["Versioned Visual Haskell protocol"]
-    WORKER["vh-analysis-ghc-9.10 worker"]
+    WORKER["Selected compiler-compatible worker"]
     ENGINE["Direct GHC analysis engine"]
     BIOS["hie-bios project configuration"]
-    GHC["GHC 9.10.3 API"]
+    GHC["Selected project-compatible GHC API"]
     INDEX["Optional HIE index"]
     EDITORS["Source and project-file edit providers"]
 
@@ -342,8 +352,42 @@ The rest of the worker uses small internal wrapper types. Even for one GHC
 version, this boundary prevents compiler constructors and error representations
 from spreading into project loading, scheduling, or protocol conversion.
 
-A future GHC worker may copy or adapt this compatibility namespace without
-changing client or semantic-model packages.
+"Compiler-compatible worker" does not mean a separately designed service or a
+copy of the product pipeline for every compiler release. It means that a
+compiled Haskell executable is linked against one concrete version of the
+`ghc` package. Supplying a different project `libdir` at runtime changes the
+compiler data and package environment used by that linked API; it does not
+dynamically replace the Haskell modules, types, constructors, or ABI already
+linked into the executable. The GHC API and its representations also change
+between release families.
+
+The intended implementation is therefore:
+
+- One stable Visual Haskell protocol and analysis service.
+- One shared worker engine, scheduler, snapshot store, and semantic converter.
+- A small compatibility namespace using ordinary modules, Cabal conditionals,
+  CPP, or compatibility packages where source APIs differ.
+- Reproducible builds of that shared source against the supported `ghc`
+  packages.
+- Metadata-driven artifact selection by compiler version and platform, with no
+  product-model or HaskeLUI branch per compiler version.
+
+Several compiler releases may share the same source compatibility module.
+Whether they may share one compiled artifact is a stricter ABI and runtime
+compatibility question and must be proved by fixtures; source compatibility
+alone is not enough.
+
+The selected distribution design is **shared source with prebuilt,
+compiler-compatible artifacts**. Visual Haskell obtains a signed artifact that
+was built and tested against the selected compiler constraint and platform; it
+does not compile the analysis worker on the user's machine as part of the
+normal product flow. This provides deterministic startup and avoids worker
+bootstrap builds, Cabal-index dependencies, and first-use compilation latency.
+Locally compiling the shared worker source remains a contributor/development
+workflow and a possible future exceptional fallback, not the current product
+design. Even that fallback would still produce a compiler-matched executable;
+it would not make an already running process dynamically swap its `ghc`
+library.
 
 ### 7.2 Project loading
 
@@ -383,10 +427,70 @@ package database, wired-in package, extension, and interface-format differences
 make such results unsound even when a module appears to parse.
 
 Future multi-version support keeps this policy and changes only worker
-selection: detect the cradle compiler, choose an exact compatible worker, and
-offer toolchain/worker installation when one is missing. Cabal/Stack/Hpack
-parsers used by project-file editors remain presentation/editing providers, not
-session configuration fallbacks.
+selection: detect the cradle compiler, choose a tested compatible build of the
+shared worker, and offer toolchain/worker installation when one is missing.
+Cabal/Stack/Hpack parsers used by project-file editors remain
+presentation/editing providers, not session configuration fallbacks.
+
+#### 7.2.2 Toolchain acquisition with GHCup
+
+Visual Haskell should reuse GHCup as its preferred managed toolchain provider,
+not reimplement platform detection, bindist metadata, download verification,
+installation layout, caching, mirrors, revisions, or installed-version
+inventory.
+
+The ownership boundary is:
+
+| Concern | Authority |
+| --- | --- |
+| Install and locate GHC, Cabal, Stack, and optional HLS | GHCup |
+| Select a Stack snapshot/compiler and construct its package plan | Stack |
+| Select a Cabal compiler, solve dependencies, and construct its build plan | Cabal |
+| Obtain component-specific package databases and GHC flags | `hie-bios` and the build tool |
+| Perform semantic analysis and convert GHC values to stable DTOs | Visual Haskell worker |
+
+GHCup does not decide which component owns a file, interpret all
+`cabal.project*` or `stack.yaml*` semantics, solve project dependencies, or
+construct the component's final GHC argument list. In particular, a Stack
+snapshot normally determines its compiler, while a Cabal project may not pin a
+compiler at all. Visual Haskell must preserve that distinction instead of
+blindly installing GHCup's `recommended` compiler.
+
+Initial integration uses the `ghcup` executable behind a Visual Haskell-owned
+toolchain-provider interface rather than linking GHCup's Haskell library into
+the UI process. It should use machine-oriented commands such as `whereis`,
+explicit absolute executable paths, and an explicitly constructed child
+environment. It must not silently invoke `ghcup set`, because changing global
+unversioned symlinks affects unrelated terminals, projects, and applications.
+`ghcup run` or direct paths may select an exact toolchain without changing the
+user's global active version.
+
+Resolution order is:
+
+1. Respect an explicit workspace toolchain or custom environment.
+2. Respect a working compiler selected by the trusted project tooling.
+3. Reuse a matching compiler already installed by GHCup.
+4. With explicit user consent, ask GHCup to install a missing supported tool.
+5. Resolve the project again through Cabal/Stack and `hie-bios`, then launch a
+   tested compatible worker build.
+
+For Stack, either preserve the user's existing Stack toolchain policy or use
+Stack's supported GHCup installation hook in a clearly owned configuration;
+Visual Haskell must not silently rewrite global Stack configuration. For Cabal,
+the resolved GHC may be supplied with an absolute `--with-compiler` path when
+that does not override an explicit project choice.
+
+Tool installation is a visible, cancellable task showing version, source,
+download size, progress, logs, destination, and failure recovery. Existing
+Nix, custom `bios`, CI, corporate mirror, or manually managed toolchains remain
+valid providers. GHCup is the preferred managed fallback, not a compulsory
+replacement for every environment.
+
+GHCup manages the project compiler and build-tool executables. Visual Haskell
+separately manages its own compiler-compatible worker builds, signatures,
+protocol compatibility, and rollback. A future GHCup metadata channel could be
+evaluated as a distribution mechanism for those builds, but it is not required
+for the ownership boundary.
 
 ### 7.3 Session identity
 
@@ -591,6 +695,36 @@ Every exposed declaration may carry:
 
 The source-facing form prevents synonym expansion from destroying the user's
 mental model. The canonical form supports compatibility and visualization.
+
+### 8.5 Declared-type semantics
+
+The analysis snapshot carries an optional, compiler-neutral declared-type
+payload alongside ordinary declaration/type attachments. It records:
+
+- A stable declared constructor identity based on unit, module, namespace,
+  and occurrence—not a GHC `Unique`
+- Type parameters and their kinds
+- ADT and newtype constructors
+- Constructor existentials, constraints, arguments, GADT result types, and
+  record fields
+- Type-synonym right-hand sides
+- Class superclass constraints and method signatures
+- An explicit type-family or unsupported/abstract shape
+
+All embedded types are `TypeId` references into the snapshot's normalized
+type table. The product-level `TypeUniverse` joins accepted snapshots, keeps
+the compiler payload immutable, and derives typed edges for ordinary
+references, aliases, constraints, superclass extension, and recursive
+strongly-connected components. Its deterministic Debug projection is the
+authoritative textual view of the same value consumed by the future diagram.
+
+This document-level projection does not claim whole-project indexing. Until
+the indexer exists, project coverage is the exact set of accepted snapshots.
+External package and built-in type constructors remain resolvable structured
+type references but are not fabricated as source-backed editable entities.
+Type-family equations are also not flattened into the first declaration
+shape: open families, closed equation order, and imported family instances
+need a dedicated equation/instance contract in the indexing phase.
 
 ## 9. UI integration
 
@@ -887,23 +1021,44 @@ prevents opening the workspace; it causes eviction and rebuilding.
 
 ## 16. Worker lifecycle and compiler versions
 
-V1 bundles one worker:
+V1 bundles one build of the shared worker source:
 
 ```text
 visual-haskell-analysis-ghc910
 ```
 
-One worker process serves one workspace and compiler version, with one or more
-component sessions inside it. This maximizes failure isolation and prevents
-project state from leaking between workspaces.
+This name identifies the current GHC 9.10 compatibility/build family, not a
+separate product service. One worker process serves one workspace and compiler
+version, with one or more component sessions inside it. This maximizes failure
+isolation and prevents project state from leaking between workspaces.
+
+Installed builds are described by data rather than product code:
+
+```haskell
+data WorkerArtifact = WorkerArtifact
+  { workerArtifactId          :: !WorkerArtifactId
+  , workerExecutable          :: !FilePath
+  , workerProtocolRange       :: !ProtocolRange
+  , workerCompilerConstraint  :: !CompilerConstraint
+  , workerPlatform            :: !Platform
+  , workerDigest              :: !Digest
+  }
+```
+
+The artifact registry may contain exact patch builds or a wider tested
+constraint. The registry, fixtures, and handshake establish compatibility; VH
+must not assume that sharing a source module implies binary compatibility.
 
 Later worker selection performs:
 
 1. Detect project compiler through trusted project tooling.
-2. Find an exact compatible installed worker.
-3. Offer a signed supported worker download when absent.
-4. Verify signature, protocol, and exact compiler compatibility.
-5. Start and negotiate capabilities.
+2. Ask the toolchain provider, normally GHCup, to locate or—with consent—install
+   the required project compiler and build tool.
+3. Find an installed worker artifact whose tested compiler constraint,
+   platform, and protocol match.
+4. Offer a signed supported worker artifact download when absent.
+5. Verify signature, protocol, and compiler compatibility.
+6. Start and negotiate capabilities.
 
 Unsupported compilers leave the editor fully usable in lexical mode.
 
@@ -1131,7 +1286,8 @@ Gate:
 
 ### Phase 7: Compiler matrix and distribution
 
-- Add another GHC-version worker.
+- Build the shared worker source against another `ghc` API family and keep any
+  compiler-specific adaptation inside the compatibility namespace.
 - Implement signed worker discovery/install/update.
 - Prove one UI client can switch between compiler workers without product model
   changes.
@@ -1167,6 +1323,15 @@ Gate:
 10. `.vihs` remains portable UI state, not a compiler cache.
 11. The generic HaskeLUI runtime is Phase 0 and contains no Haskell-specific
     request or result constructors.
+12. GHCup is the preferred managed installer and locator for compiler and build
+    tools, while Cabal, Stack, and `hie-bios` remain project-configuration
+    authorities.
+13. Multi-compiler support reuses one protocol and shared worker implementation;
+    compiler-matched builds and small compatibility modules do not create
+    separate product services.
+14. Supported compiler integration is distributed as signed, prebuilt,
+    compiler-compatible artifacts built from the shared worker source. Runtime
+    compilation of the worker is not part of the normal product flow.
 
 ## 22. Remaining open questions
 
@@ -1207,10 +1372,14 @@ bottleneck. Protocol meaning must remain independent of encoding.
 
 ### 22.5 Worker acquisition
 
-Bundling one worker is clear; supporting many compilers raises storage,
-signature, update, rollback, and offline questions. Do not design a public
-marketplace yet. First prove a second worker can coexist and negotiate against
-the same client, then specify signed distribution.
+The artifact form is resolved: supported compiler integration uses signed,
+prebuilt artifacts produced from the shared worker source. Supporting many
+compilers still raises storage, update, rollback, channel, and offline
+questions. Do not design a public marketplace yet. First prove a second
+prebuilt artifact can coexist and negotiate against the same client, then
+specify the distribution channel. GHCup is the preferred provider for
+GHC/Cabal/Stack themselves; whether a Visual Haskell worker channel should also
+use GHCup metadata remains an implementation/distribution question.
 
 ### 22.6 Visual round-trip boundary
 
@@ -1247,6 +1416,9 @@ analysis snapshots.
 
 - [GHC API documentation](https://downloads.haskell.org/~ghc/9.10.2/docs/libraries/ghc-9.10.2-96d4/GHC.html)
 - [`hie-bios`](https://hackage.haskell.org/package/hie-bios)
+- [GHCup user guide](https://www.haskell.org/ghcup/guide/)
+- [GHCup and Stack integration](https://www.haskell.org/ghcup/guide/stack/)
+- [Cabal project compiler selection](https://cabal.readthedocs.io/en/stable/cabal-project-description-file.html#with-compiler-path)
 - [`hiedb`](https://hackage.haskell.org/package/hiedb)
 - [`ghc-exactprint`](https://hackage.haskell.org/package/ghc-exactprint)
 - [`Cabal-syntax`](https://hackage.haskell.org/package/Cabal-syntax)

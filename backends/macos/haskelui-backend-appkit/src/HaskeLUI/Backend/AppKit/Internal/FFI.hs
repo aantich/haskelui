@@ -10,6 +10,7 @@ module HaskeLUI.Backend.AppKit.Internal.FFI
   , CTextStyle
   , EventCallback
   , DrawingInputCallback
+  , LayoutAllocationCallback
   , MacControlHandle
   , MacWindowHandle
   , c_commandRemove
@@ -76,6 +77,7 @@ module HaskeLUI.Backend.AppKit.Internal.FFI
   , c_debugCounters
   , c_initialize
   , c_setDrawingInputCallback
+  , c_setLayoutAllocationCallback
   , c_openProjectFolder
   , c_openTextFiles
   , c_run
@@ -104,6 +106,7 @@ module HaskeLUI.Backend.AppKit.Internal.FFI
   , c_workspaceTabSet
   , makeEventCallback
   , makeDrawingInputCallback
+  , makeLayoutAllocationCallback
   , withCTextStyle
   , withMacRect
   ) where
@@ -413,17 +416,31 @@ type EventCallback = Ptr () -> CInt -> Word64 -> CString -> IO ()
 
 type DrawingInputCallback = Ptr () -> Word64 -> Ptr CDrawingInput -> IO ()
 
+type LayoutAllocationCallback =
+  Ptr () -> Word64 -> Word64 -> CDouble -> CDouble -> IO ()
+
 foreign import ccall "wrapper"
   makeEventCallback :: EventCallback -> IO (FunPtr EventCallback)
 
 foreign import ccall "wrapper"
   makeDrawingInputCallback :: DrawingInputCallback -> IO (FunPtr DrawingInputCallback)
 
+foreign import ccall "wrapper"
+  makeLayoutAllocationCallback
+    :: LayoutAllocationCallback
+    -> IO (FunPtr LayoutAllocationCallback)
+
 foreign import ccall unsafe "haskelui_macos_initialize"
   c_initialize :: FunPtr EventCallback -> Ptr () -> IO CInt
 
 foreign import ccall unsafe "haskelui_macos_set_drawing_input_callback"
   c_setDrawingInputCallback :: FunPtr DrawingInputCallback -> Ptr () -> IO ()
+
+foreign import ccall unsafe "haskelui_macos_set_layout_allocation_callback"
+  c_setLayoutAllocationCallback
+    :: FunPtr LayoutAllocationCallback
+    -> Ptr ()
+    -> IO ()
 
 foreign import ccall safe "haskelui_macos_run"
   c_run :: IO ()
@@ -672,7 +689,12 @@ foreign import ccall unsafe "haskelui_macos_control_set_parent_status"
   c_controlSetParentStatus :: Ptr MacWindowHandle -> Ptr MacControlHandle -> CInt -> IO ()
 
 foreign import ccall unsafe "haskelui_macos_control_set_parent_control"
-  c_controlSetParentControl :: Ptr MacControlHandle -> Ptr MacControlHandle -> Word64 -> CInt -> IO ()
+  c_controlSetParentControl
+    :: Ptr MacControlHandle
+    -> Ptr MacControlHandle
+    -> Word64
+    -> CInt
+    -> IO ()
 
 foreign import ccall unsafe "haskelui_macos_control_destroy"
   c_controlDestroy :: Ptr MacControlHandle -> IO ()

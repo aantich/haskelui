@@ -124,6 +124,16 @@ typedef void (*HaskeLUIMacDrawingInputCallback)(
     uint64_t identity,
     const HaskeLUIMacDrawingInput *input);
 
+/* Backend-private retained-layout allocation.  Unlike UI events this never
+   enters the application update function; it asks the backend to re-run the
+   pure portable layout solver for a native host's current bounds. */
+typedef void (*HaskeLUIMacLayoutAllocationCallback)(
+    void *context,
+    uint64_t window_identity,
+    uint64_t control_identity,
+    double width,
+    double height);
+
 typedef struct HaskeLUIMacRect {
   double x;
   double y;
@@ -182,6 +192,9 @@ typedef struct HaskeLUIMacDebugCounters {
 int32_t haskelui_macos_initialize(HaskeLUIMacEventCallback callback, void *context);
 void haskelui_macos_set_drawing_input_callback(
     HaskeLUIMacDrawingInputCallback callback,
+    void *context);
+void haskelui_macos_set_layout_allocation_callback(
+    HaskeLUIMacLayoutAllocationCallback callback,
     void *context);
 void haskelui_macos_run(void);
 void haskelui_macos_stop(void);

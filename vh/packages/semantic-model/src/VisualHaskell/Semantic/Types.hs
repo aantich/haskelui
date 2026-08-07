@@ -25,7 +25,13 @@ module VisualHaskell.Semantic.Types
   , SessionId (..)
   , StructuredType (..)
   , TextRevision (..)
+  , TypeConstructorSemantics (..)
+  , TypeDeclarationDefinition (..)
+  , TypeDeclarationSemantics (..)
+  , TypeFieldSemantics (..)
   , TypeId (..)
+  , TypeMethodSemantics (..)
+  , TypeParameterSemantics (..)
   , TypeTable
   , WorkspaceGeneration (..)
   , WorkspaceId (..)
@@ -162,6 +168,68 @@ data Declaration range = Declaration
   , declarationSelectionRange :: !range
   , declarationType :: !(Maybe TypeId)
   , declarationSignatureText :: !(Maybe Text)
+  , declarationTypeSemantics :: !(Maybe (TypeDeclarationSemantics range))
+  }
+  deriving stock (Eq, Show)
+
+-- | Compiler-neutral semantics for a declared type parameter. Kinds are
+-- references into the enclosing snapshot's 'TypeTable', just like every other
+-- semantic type in the protocol.
+data TypeParameterSemantics = TypeParameterSemantics
+  { typeParameterSemanticName :: !Text
+  , typeParameterSemanticKind :: !(Maybe TypeId)
+  }
+  deriving stock (Eq, Show)
+
+data TypeFieldSemantics range = TypeFieldSemantics
+  { typeFieldSemanticId :: !Text
+  , typeFieldSemanticName :: !Text
+  , typeFieldSemanticType :: !TypeId
+  , typeFieldSemanticRange :: !(Maybe range)
+  }
+  deriving stock (Eq, Show)
+
+-- | Constructor structure retains both positional arguments and record fields.
+-- GADT-specific existential variables, constraints, and result type remain
+-- explicit instead of being flattened into pretty-printed text.
+data TypeConstructorSemantics range = TypeConstructorSemantics
+  { typeConstructorSemanticId :: !Text
+  , typeConstructorSemanticName :: !Text
+  , typeConstructorSemanticExistentials :: ![TypeParameterSemantics]
+  , typeConstructorSemanticConstraints :: ![TypeId]
+  , typeConstructorSemanticArguments :: ![TypeId]
+  , typeConstructorSemanticFields :: ![TypeFieldSemantics range]
+  , typeConstructorSemanticResult :: !(Maybe TypeId)
+  , typeConstructorSemanticRange :: !(Maybe range)
+  }
+  deriving stock (Eq, Show)
+
+data TypeMethodSemantics range = TypeMethodSemantics
+  { typeMethodSemanticDeclaration :: !DeclarationId
+  , typeMethodSemanticName :: !Text
+  , typeMethodSemanticType :: !(Maybe TypeId)
+  , typeMethodSemanticSignatureText :: !(Maybe Text)
+  , typeMethodSemanticRange :: !(Maybe range)
+  }
+  deriving stock (Eq, Show)
+
+data TypeDeclarationDefinition range
+  = AlgebraicTypeSemantics ![TypeConstructorSemantics range]
+  | NewtypeSemantics !(TypeConstructorSemantics range)
+  | TypeAliasSemantics !TypeId
+  | TypeClassSemantics ![TypeId] ![TypeMethodSemantics range]
+  | TypeFamilySemantics
+  | AbstractTypeSemantics !Text
+  deriving stock (Eq, Show)
+
+-- | Rich semantics attached only to type/class declarations. The constructor
+-- identity is distinct from 'declarationType': for @data Box a@ the former is
+-- @Box@, while the latter is the kind of @Box@. Keeping both makes cross-type
+-- relationships unambiguous even when names are imported or qualified.
+data TypeDeclarationSemantics range = TypeDeclarationSemantics
+  { typeDeclarationSemanticConstructor :: !TypeId
+  , typeDeclarationSemanticParameters :: ![TypeParameterSemantics]
+  , typeDeclarationSemanticDefinition :: !(TypeDeclarationDefinition range)
   }
   deriving stock (Eq, Show)
 
@@ -324,6 +392,7 @@ instance ToJSON range => ToJSON (Declaration range) where
     , "selectionRange" .= declaration.declarationSelectionRange
     , "type" .= declaration.declarationType
     , "signatureText" .= declaration.declarationSignatureText
+    , "typeSemantics" .= declaration.declarationTypeSemantics
     ]
 
 instance FromJSON range => FromJSON (Declaration range) where
@@ -332,6 +401,107 @@ instance FromJSON range => FromJSON (Declaration range) where
       <$> value .: "id" <*> value .: "name" <*> value .: "kind"
       <*> value .: "range" <*> value .: "selectionRange"
       <*> value .:? "type" <*> value .:? "signatureText"
+      <*> value .:? "typeSemantics"
+
+instance ToJSON TypeParameterSemantics where
+  toJSON parameter = object
+    [ "name" .= parameter.typeParameterSemanticName
+    , "kind" .= parameter.typeParameterSemanticKind
+    ]
+
+instance FromJSON TypeParameterSemantics where
+  parseJSON = withObject "type parameter semantics" $ \value ->
+    TypeParameterSemantics <$> value .: "name" <*> value .:? "kind"
+
+instance ToJSON range => ToJSON (TypeFieldSemantics range) where
+  toJSON field = object
+    [ "id" .= field.typeFieldSemanticId
+    , "name" .= field.typeFieldSemanticName
+    , "type" .= field.typeFieldSemanticType
+    , "range" .= field.typeFieldSemanticRange
+    ]
+
+instance FromJSON range => FromJSON (TypeFieldSemantics range) where
+  parseJSON = withObject "type field semantics" $ \value ->
+    TypeFieldSemantics
+      <$> value .: "id" <*> value .: "name" <*> value .: "type"
+      <*> value .:? "range"
+
+instance ToJSON range => ToJSON (TypeConstructorSemantics range) where
+  toJSON constructor = object
+    [ "id" .= constructor.typeConstructorSemanticId
+    , "name" .= constructor.typeConstructorSemanticName
+    , "existentials" .= constructor.typeConstructorSemanticExistentials
+    , "constraints" .= constructor.typeConstructorSemanticConstraints
+    , "arguments" .= constructor.typeConstructorSemanticArguments
+    , "fields" .= constructor.typeConstructorSemanticFields
+    , "result" .= constructor.typeConstructorSemanticResult
+    , "range" .= constructor.typeConstructorSemanticRange
+    ]
+
+instance FromJSON range => FromJSON (TypeConstructorSemantics range) where
+  parseJSON = withObject "type constructor semantics" $ \value ->
+    TypeConstructorSemantics
+      <$> value .: "id" <*> value .: "name"
+      <*> value .: "existentials" <*> value .: "constraints"
+      <*> value .: "arguments" <*> value .: "fields"
+      <*> value .:? "result" <*> value .:? "range"
+
+instance ToJSON range => ToJSON (TypeMethodSemantics range) where
+  toJSON method = object
+    [ "declaration" .= method.typeMethodSemanticDeclaration
+    , "name" .= method.typeMethodSemanticName
+    , "type" .= method.typeMethodSemanticType
+    , "signatureText" .= method.typeMethodSemanticSignatureText
+    , "range" .= method.typeMethodSemanticRange
+    ]
+
+instance FromJSON range => FromJSON (TypeMethodSemantics range) where
+  parseJSON = withObject "type method semantics" $ \value ->
+    TypeMethodSemantics
+      <$> value .: "declaration" <*> value .: "name"
+      <*> value .:? "type" <*> value .:? "signatureText"
+      <*> value .:? "range"
+
+instance ToJSON range => ToJSON (TypeDeclarationDefinition range) where
+  toJSON definition = case definition of
+    AlgebraicTypeSemantics constructors ->
+      tagged "algebraic" ["constructors" .= constructors]
+    NewtypeSemantics constructor ->
+      tagged "newtype" ["constructor" .= constructor]
+    TypeAliasSemantics target ->
+      tagged "alias" ["target" .= target]
+    TypeClassSemantics constraints methods ->
+      tagged "class" ["constraints" .= constraints, "methods" .= methods]
+    TypeFamilySemantics -> tagged "type-family" []
+    AbstractTypeSemantics reason -> tagged "abstract" ["reason" .= reason]
+    where
+      tagged kind fields = object (("kind" .= (kind :: Text)) : fields)
+
+instance FromJSON range => FromJSON (TypeDeclarationDefinition range) where
+  parseJSON = withObject "type declaration definition" $ \value -> do
+    kind <- value .: "kind"
+    case (kind :: Text) of
+      "algebraic" -> AlgebraicTypeSemantics <$> value .: "constructors"
+      "newtype" -> NewtypeSemantics <$> value .: "constructor"
+      "alias" -> TypeAliasSemantics <$> value .: "target"
+      "class" -> TypeClassSemantics <$> value .: "constraints" <*> value .: "methods"
+      "type-family" -> pure TypeFamilySemantics
+      "abstract" -> AbstractTypeSemantics <$> value .: "reason"
+      _ -> fail ("unknown type declaration definition " <> Text.unpack kind)
+
+instance ToJSON range => ToJSON (TypeDeclarationSemantics range) where
+  toJSON semantics = object
+    [ "constructor" .= semantics.typeDeclarationSemanticConstructor
+    , "parameters" .= semantics.typeDeclarationSemanticParameters
+    , "definition" .= semantics.typeDeclarationSemanticDefinition
+    ]
+
+instance FromJSON range => FromJSON (TypeDeclarationSemantics range) where
+  parseJSON = withObject "type declaration semantics" $ \value ->
+    TypeDeclarationSemantics
+      <$> value .: "constructor" <*> value .: "parameters"
+      <*> value .: "definition"
 
 instance ToJSON StructuredType where
   toJSON structured = case structured of

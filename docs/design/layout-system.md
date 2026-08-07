@@ -1,8 +1,8 @@
 # Portable layout system
 
-Status: Implemented vertical slice  
-Date: 2026-08-06  
-Scope: Core layout vocabulary, deterministic solver, control integration, and AppKit realization
+Status: Implemented, including retained live reflow
+Date: 2026-08-07
+Scope: Core layout vocabulary, deterministic solver, allocation-aware control integration, and AppKit realization
 
 ## 1. Contract
 
@@ -174,15 +174,26 @@ scroll/group/disclosure determine native hosting, clipping, scrolling,
 labelling, and accessibility semantics. Any child control can be placed inside
 any layout strategy.
 
-`resolveControlLayouts` and `resolveAppViewLayoutsWith` recursively solve
-containers and write the resulting frames back into ephemeral control
-descriptions. They validate that every referenced leaf exists, every direct
+`resolveControlLayouts` and `resolveAppViewLayoutsWith` recursively solve using
+declared frames. Their allocation-aware counterparts,
+`resolveControlLayoutsWithAllocations` and
+`resolveAppViewLayoutsWithAllocations`, additionally accept a stable-keyed map
+of sizes supplied by a host backend. An allocation authoritatively replaces a
+layout root's width and height for that pass while preserving its declared
+origin. They write the resulting frames back into ephemeral control
+descriptions and validate that every referenced leaf exists, every direct
 child is represented, keys are unambiguous in an active branch, and numeric
 inputs are legal. Inactive adaptive children receive zero frames rather than
 retaining stale geometry.
 
+The allocation map is backend state. Native window or pane resize does not
+produce an application `UIEvent`, mutate the user's model, or require a public
+window-size property. This separation prevents resize feedback loops while
+letting the same layout declaration respond to its real retained host.
+
 The runtime resolves layout before both initial realization and later backend
-reconciliation.
+reconciliation. A conforming retained backend also resolves again whenever a
+native layout host receives a materially different allocation.
 
 ## 5. Native realization
 
@@ -194,6 +205,14 @@ The AppKit backend follows a four-stage cycle:
 3. Run the pure Core solver with cached `IntrinsicMetrics`.
 4. Commit only changed portable leaf frames, then parent them into native
    layout hosts.
+
+During live resize, AppKit coalesces each portable container's native
+allocation on the main queue, calls the allocation-aware Core entry point, and
+performs a geometry-only commit. It deliberately does not replay text values,
+focus requests, presentation visibility, or other semantic configuration.
+Nested layout containers use the same path, so flow, wrap, grid, overlay,
+canvas, split, and adaptive strategies do not require native strategy-specific
+implementations.
 
 Portable AppKit hosts use flipped top-left coordinates. Plain, scroll, group,
 and disclosure containers use ordinary native view/scroll/group compositions,
@@ -213,10 +232,12 @@ solver. Stable-key maps add logarithmic lookup/update factors at integration
 boundaries.
 
 The implementation avoids native calls during recursive solving, caches
-intrinsic measurements, and computes only when the declarative view is
-reconciled. A deterministic 2,500-leaf scale test exercises the solver. Large
-lists, tables, trees, and collections continue to use their specialized
-virtualized controls rather than materializing thousands of layout leaves.
+intrinsic measurements, and computes when the declarative view is reconciled
+or a retained host allocation changes. Allocation notifications are coalesced,
+and only changed frames cross the native boundary. A deterministic 2,500-leaf
+scale test exercises the solver. Large lists, tables, trees, and collections
+continue to use their specialized virtualized controls rather than
+materializing thousands of layout leaves.
 
 Future invalidation can cache solved subtrees by constraints, environment,
 layout hash, and measurement generation without changing the public types.
@@ -235,14 +256,17 @@ layout hash, and measurement generation without changing the public types.
 - split bounds and adaptive branch selection;
 - malformed layouts and duplicate-key diagnostics;
 - Core control-frame integration;
+- allocation-aware control integration, including a fixed header and a body
+  stretched to a larger native host;
 - deterministic fuzzed sizes with finite non-negative output;
 - a 2,500-leaf scale fixture.
 
 The AppKit native gallery test additionally asserts real peer hierarchy,
 top-left hosting, fixed basis, weighted growth, grid track width, a lined table
-with distinct rows and columns, wrapping, and both compact and wide adaptive
-arrangements. The gallery's sixth page is a scrollable visual lab containing
-native controls for every strategy:
+with distinct rows and columns, wrapping, both compact and wide adaptive
+arrangements, and a live native resize that re-solves stretch/start/end/center
+overlay anchors through Core. The gallery's sixth page is a scrollable visual
+lab containing native controls for every strategy:
 
 ```console
 stack exec haskelui-control-gallery -- --layout
