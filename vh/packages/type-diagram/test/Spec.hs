@@ -193,12 +193,7 @@ interactionTests :: IO ()
 interactionTests = do
   let diagram = projectTypeDiagram fixtureUniverse initialTypeDiagramState
       presentation = renderTypeDiagram defaultDiagramMetrics (diagramTheme LightColorScheme) viewport diagram initialTypeDiagramState
-      functionNodeId =
-        head
-          [ nodeId
-          | (nodeId, node) <- Map.toList diagram.typeDiagramNodes
-          , node.diagramNodeKind == FunctionNodeKind
-          ]
+      functionNodeId = ReferenceNode equalsType
       disclosureKey = presentation.diagramPresentationRegions Map.! (DisclosurePart treeId)
       disclosureHit = DrawingHitResult disclosureKey PointingHandCursor
       collapse =
@@ -247,6 +242,18 @@ interactionTests = do
               ((pointer DrawingPointerMoved (Just functionEndpointHit) 1 (Point 16 7)) {drawingPointerDelta = Point 16 7})
           )
           functionDragStart.updatedTypeDiagramState
+      functionDragRecovered =
+        handleTypeDiagramInput
+          defaultDiagramMetrics
+          presentation
+          ( DrawingPointerInput
+              ( ((pointer DrawingPointerMoved (Just functionEndpointHit) 1 (Point 16 7)) {drawingPointerDelta = Point 16 7})
+                  { drawingPointerButtons =
+                      noDrawingPointerButtons {primaryPointerButtonPressed = True}
+                  }
+              )
+          )
+          initialTypeDiagramState
       panStart =
         handleTypeDiagramInput
           defaultDiagramMetrics
@@ -279,6 +286,9 @@ interactionTests = do
   assertTrue
     "dragging any function endpoint moves the owning composite function node"
     (Map.member functionNodeId functionDragged.updatedTypeDiagramState.typeDiagramPinnedNodes)
+  assertTrue
+    "a pressed function drag survives a declarative re-render between down and move"
+    (Map.member functionNodeId functionDragRecovered.updatedTypeDiagramState.typeDiagramPinnedNodes)
   assertEqual "blank drag pans canvas" (Point 32 28) panned.updatedTypeDiagramState.typeDiagramViewport.diagramViewportOffset
   assertTrue "modified scroll zooms" (zoomed.updatedTypeDiagramState.typeDiagramViewport.diagramViewportScale > 0.78)
 

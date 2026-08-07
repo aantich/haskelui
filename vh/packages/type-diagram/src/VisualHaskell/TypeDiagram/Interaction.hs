@@ -1,4 +1,5 @@
 {-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 
 module VisualHaskell.TypeDiagram.Interaction
@@ -80,24 +81,13 @@ handleTypeDiagramInput metrics presentation input state =
             , typeDiagramSelected = Just (DisclosurePart entityId)
             , typeDiagramDrag = Nothing
             }
-        Just part@(AnchorPart (NodeAnchor nodeId)) ->
-          current
-            { typeDiagramSelected = Just part
-            , typeDiagramHovered = Just part
-            , typeDiagramDrag = Just (DraggingNode nodeId)
-            }
-        Just part@(FunctionEndpointPart nodeId _) ->
-          current
-            { typeDiagramSelected = Just part
-            , typeDiagramHovered = Just part
-            , typeDiagramDrag = Just (DraggingNode nodeId)
-            }
-        Just part@(FunctionOverflowPart nodeId) ->
-          current
-            { typeDiagramSelected = Just part
-            , typeDiagramHovered = Just part
-            , typeDiagramDrag = Just (DraggingNode nodeId)
-            }
+        Just part
+          | Just nodeId <- draggableNode part ->
+              current
+                { typeDiagramSelected = Just part
+                , typeDiagramHovered = Just part
+                , typeDiagramDrag = Just (DraggingNode nodeId)
+                }
         Just part ->
           current
             { typeDiagramSelected = Just part
@@ -120,15 +110,24 @@ handleTypeDiagramInput metrics presentation input state =
             , typeDiagramHovered = target
             }
         Just (DraggingNode nodeId) ->
-          current
-            { typeDiagramPinnedNodes =
-                Map.insert
-                  nodeId
-                  (moveNode nodeId event.drawingPointerDelta current)
-                  current.typeDiagramPinnedNodes
-            , typeDiagramHovered = target
-            }
-        Nothing -> current {typeDiagramHovered = target}
+          moveDraggedNode nodeId target event.drawingPointerDelta current
+        Nothing
+          | event.drawingPointerButtons.primaryPointerButtonPressed
+          , Just nodeId <- target >>= draggableNode ->
+              (moveDraggedNode nodeId target event.drawingPointerDelta current)
+                { typeDiagramDrag = Just (DraggingNode nodeId)
+                }
+          | otherwise -> current {typeDiagramHovered = target}
+    moveDraggedNode :: DiagramNodeId -> Maybe DiagramPart -> Point -> TypeDiagramState -> TypeDiagramState
+    moveDraggedNode nodeId target delta current =
+      current
+        { typeDiagramPinnedNodes =
+            Map.insert
+              nodeId
+              (moveNode nodeId delta current)
+              current.typeDiagramPinnedNodes
+        , typeDiagramHovered = target
+        }
     moveNode :: DiagramNodeId -> Point -> TypeDiagramState -> Point
     moveNode nodeId delta current =
       let scale = current.typeDiagramViewport.diagramViewportScale
@@ -171,6 +170,17 @@ handleTypeDiagramInput metrics presentation input state =
             { typeDiagramViewport = DiagramViewport newOffset newScale
             }
     changed next = nextDiagramRevision next
+
+-- Function visuals are composite nodes: every endpoint card and the overflow
+-- ellipsis drag the owning graph node, just like the body of a regular card.
+-- Keeping this mapping in one place also lets an in-progress native drag
+-- recover after a declarative re-render between pointer-down and pointer-move.
+draggableNode :: DiagramPart -> Maybe DiagramNodeId
+draggableNode = \case
+  AnchorPart (NodeAnchor nodeId) -> Just nodeId
+  FunctionEndpointPart nodeId _ -> Just nodeId
+  FunctionOverflowPart nodeId -> Just nodeId
+  _ -> Nothing
 
 resetTypeDiagramSelection :: TypeDiagramState -> TypeDiagramState
 resetTypeDiagramSelection state =
