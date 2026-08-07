@@ -15,7 +15,7 @@ import Data.IORef (newIORef, readIORef, writeIORef)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
-import Data.Time.Clock (getCurrentTime)
+import Data.Time.Clock (diffUTCTime, getCurrentTime)
 import Data.Time.Format (defaultTimeLocale, formatTime)
 import System.Directory (createDirectoryIfMissing)
 import System.FilePath (takeDirectory, (</>))
@@ -58,15 +58,24 @@ withDebugLogger logDirectory requestedPath action = do
           sequenceNumber <- readIORef sequenceReference
           let next = sequenceNumber + 1
               severity = severityText event.traceSeverity
+              timestampText =
+                Text.pack
+                  (formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%S%QZ" timestamp)
+              elapsedMilliseconds =
+                round (diffUTCTime timestamp started * 1000) :: Integer
           writeIORef sequenceReference next
           let human =
-                "[vh " <> severity <> "] "
+                "[" <> timestampText
+                  <> " +" <> Text.pack (show elapsedMilliseconds) <> "ms"
+                  <> " #" <> Text.pack (show next) <> "] "
+                  <> "[vh " <> severity <> "] "
                   <> event.traceSubsystem <> "." <> event.traceOperation
                   <> foldMap (\(name, value) -> " " <> name <> "=" <> value) event.traceFields
               encoded =
                 encode $
                   object
-                    [ "timestamp" .= formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%S%QZ" timestamp
+                    [ "timestamp" .= timestampText
+                    , "elapsedMilliseconds" .= elapsedMilliseconds
                     , "session" .= session
                     , "sequence" .= next
                     , "severity" .= severity

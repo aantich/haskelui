@@ -20,6 +20,7 @@ module VisualHaskell
   , workspaceWindowKey
   ) where
 
+import Control.Concurrent (threadDelay)
 import Data.Bits (setBit, xor)
 import Data.List
   ( find
@@ -901,13 +902,14 @@ analysisCommandsForTransition
 analysisCommandsForTransition endpoint oldModel newModel
   | oldModel.projectRoot /= newModel.projectRoot
       || oldModel.analysisWorkspaceTrusted /= newModel.analysisWorkspaceTrusted =
-      analysisCommandsForCurrentState endpoint newModel
+      cancelTask analysisEditDebounceTaskKey
+        : analysisCommandsForCurrentState endpoint newModel
   | not newModel.analysisWorkspaceTrusted = []
   | newModel.projectRoot == Nothing = []
   | otherwise =
       fmap (sendService endpoint . closeCommand) closedDocuments
         <> fmap (sendService endpoint . upsertCommand) changedDocuments
-        <> fmap (sendService endpoint . analyzeCommand) analysisTargets
+        <> analysisSchedulingCommands
   where
     oldAnalysisDocuments = Map.filter isHaskellDocument oldModel.documents
     newAnalysisDocuments = Map.filter isHaskellDocument newModel.documents
@@ -919,12 +921,19 @@ analysisCommandsForTransition endpoint oldModel newModel
           Nothing -> True
           Just previous -> analysisDocumentChanged previous document
       ]
-    -- Full-snapshot Phase 1 deliberately rechecks every open Haskell module
-    -- after one changes: an edit in B can invalidate its dependent A. Phase 3
-    -- will replace this conservative policy with measured invalidation.
-    analysisTargets
-      | null changedDocuments = []
-      | otherwise = Map.elems newAnalysisDocuments
+    selectedChanged =
+      case selectedDocument newModel of
+        Nothing -> False
+        Just selected ->
+          any ((== selected.documentKey) . (.documentKey)) changedDocuments
+    selectionChanged = oldModel.selectedTab /= newModel.selectedTab
+    analysisSchedulingCommands
+      | not selectedChanged && not selectionChanged = []
+      | Just selected <- selectedDocument newModel
+      , isHaskellDocument selected
+      , selectedChanged || not (documentAnalysisIsCurrent newModel selected) =
+          [scheduleDocumentAnalysis endpoint selected.documentKey]
+      | otherwise = [cancelTask analysisEditDebounceTaskKey]
     closeCommand document =
       CloseAnalysisDocument
         newModel.analysisWorkspaceGeneration
@@ -937,12 +946,78 @@ analysisCommandsForTransition endpoint oldModel newModel
         (analysisWorkspaceId newModel)
         (analysisSession newModel)
         (analysisDocumentSnapshot document)
+
+-- One task key intentionally serializes interactive checking. Replacing the
+-- sleeping task makes rapid edits cheap; replacing an already-running GHC
+-- invocation is a separate worker concern, so at most the current stale pass
+-- plus the newest requested pass remain.
+analysisEditDebounceTaskKey :: TaskKey
+analysisEditDebounceTaskKey = TaskKey "visual-haskell.analysis.edit-debounce"
+
+analysisEditDebounceMicroseconds :: Int
+analysisEditDebounceMicroseconds = 350000
+
+scheduleDocumentAnalysis
+  :: ServiceEndpoint AnalysisCommand
+  -> DocumentKey
+  -> RuntimeCommand EditorModel
+scheduleDocumentAnalysis endpoint targetDocument =
+  startTask
+    analysisEditDebounceTaskKey
+    ApplicationScope
+    ReplaceRunning
+    "Debounce Visual Haskell compiler analysis"
+    (const (threadDelay analysisEditDebounceMicroseconds))
+    (\outcome ->
+      externalEvent "Request current compiler analysis" $ \model ->
+        case outcome of
+          TaskSucceeded () ->
+            transactionWithCommands
+              "Request current compiler analysis"
+              NoUndo
+              (analysisCommandsForDocument endpoint targetDocument model)
+              id
+          TaskCancelled -> noTransaction
+          TaskFailed _ -> noTransaction
+    )
+
+analysisCommandsForDocument
+  :: ServiceEndpoint AnalysisCommand
+  -> DocumentKey
+  -> EditorModel
+  -> [RuntimeCommand EditorModel]
+analysisCommandsForDocument endpoint targetDocument model =
+  case (model.analysisWorkspaceTrusted, model.projectRoot, Map.lookup targetDocument model.documents) of
+    (True, Just _, Just document)
+      | isHaskellDocument document ->
+          [ sendService endpoint (upsertCommand document)
+          , sendService endpoint (analyzeCommand document)
+          ]
+    _ -> []
+  where
+    workspace = analysisWorkspaceId model
+    session = analysisSession model
+    upsertCommand document =
+      UpsertAnalysisDocument
+        model.analysisWorkspaceGeneration
+        workspace
+        session
+        (analysisDocumentSnapshot document)
     analyzeCommand document =
       RequestDocumentAnalysis
-        newModel.analysisWorkspaceGeneration
-        (analysisWorkspaceId newModel)
-        (analysisSession newModel)
+        model.analysisWorkspaceGeneration
+        workspace
+        session
         (analysisDocumentSnapshot document)
+
+documentAnalysisIsCurrent :: EditorModel -> Document -> Bool
+documentAnalysisIsCurrent model document =
+  case Map.lookup (analysisDocumentId document) model.analysisSnapshots of
+    Nothing -> False
+    Just snapshot ->
+      snapshot.analysisWorkspaceGeneration == model.analysisWorkspaceGeneration
+        && snapshot.analysisRevision == semanticRevision document.documentRevision
+        && snapshot.analysisContentHash == Semantic.contentHash document.documentContents
 
 analysisCommandsForCurrentState
   :: ServiceEndpoint AnalysisCommand
@@ -963,11 +1038,14 @@ analysisCommandsForCurrentState endpoint model =
               }
         )
         : fmap (sendService endpoint . upsertCommand) documentsToAnalyze
-          <> fmap (sendService endpoint . analyzeCommand) documentsToAnalyze
+          <> maybe [] (pure . sendService endpoint . analyzeCommand) selectedToAnalyze
       where
         workspace = analysisWorkspaceId model
         session = analysisSession model
         documentsToAnalyze = filter isHaskellDocument (Map.elems model.documents)
+        selectedToAnalyze = do
+          document <- selectedDocument model
+          if isHaskellDocument document then Just document else Nothing
         upsertCommand document =
           UpsertAnalysisDocument
             model.analysisWorkspaceGeneration

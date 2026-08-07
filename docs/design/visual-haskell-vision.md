@@ -410,18 +410,17 @@ assume that limitation.
 
 ### 7.4 GHC pipeline
 
-The direct engine initially follows the high-level GHC API:
+The direct engine follows the high-level GHC API inside one long-lived,
+component-scoped worker loop:
 
 ```haskell
 runGhc (Just libDir) $ do
-  setSessionDynFlags componentFlags
-  setTargets componentTargets
-  load LoadAllTargets
-  summary <- getModSummary moduleName
-  parsed <- parseModule summary
-  checked <- typecheckModule parsed
-  -- Convert parsed, renamed, typed, and module information immediately
-  -- into Visual Haskell semantic values.
+  initializeComponentSession componentFlags
+  forever $ do
+    request <- receiveTypedAnalysisRequest
+    setTargets (targetsWithStableRevisionTimestamps request.snapshots)
+    load LoadAllTargets
+    -- Convert module information immediately into stable VH values.
 ```
 
 Relevant data includes:
@@ -1081,7 +1080,9 @@ specified and tested against real GHC fixtures.
 
 ### Phase 3: Incrementality and workspace index
 
-- Profile direct GHC reload behavior.
+- Retain one component-scoped GHC session and stable in-memory target versions.
+- Profile direct GHC reload behavior. Initial measurements are 1–80 ms for the
+  two-module warm fixture and 31–174 ms for self-hosted Visual Haskell edits.
 - Add only the invalidation/cache layers measurements require.
 - Add HIE generation/indexing and workspace references.
 - Introduce document deltas and efficient text storage.
@@ -1189,12 +1190,13 @@ latency before choosing a larger pool.
 
 ### 22.3 Direct-GHC incrementality threshold
 
-We do not yet know whether GHC's live session reuse is sufficient for target
-projects. Define fixture baselines before implementing custom rule graphs. If
-visible diagnostics exceed acceptable measured latency or reloads touch
-unrelated modules, add dependency-aware caching. If that work begins to
-recreate most of `ghcide`, reassess using it behind the unchanged engine
-boundary.
+The first measured answer is encouraging: GHC live-session reuse reduces the
+two-module warm fixture to 1–80 ms and self-hosted Visual Haskell edits to
+31–174 ms on the development machine, versus cold loads around 0.8–2.4 seconds.
+The next gate is medium and large multi-component projects, including memory
+growth and dependent-module fan-out. Add custom dependency-aware caching only
+if those measurements exceed the interactive budget. If that work begins to
+recreate most of `ghcide`, reassess using it behind the unchanged engine boundary.
 
 ### 22.4 Protocol encoding after JSON
 

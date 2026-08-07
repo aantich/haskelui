@@ -1,20 +1,51 @@
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
 module VisualHaskell.Analysis.Ghc910.Compat
-  ( analyzeWithGhc910
+  ( AnalysisEngine
+  , analyzeWithEngine
+  , analyzeWithGhc910
+  , analysisEngineIsRunning
+  , startAnalysisEngine
+  , stopAnalysisEngine
   ) where
 
-import Control.Exception (SomeException, displayException, try)
-import Control.Monad (forM)
+import Control.Concurrent.Async
+  ( Async
+  , async
+  , cancel
+  , poll
+  , race
+  , waitCatch
+  )
+import Control.Concurrent.STM
+  ( TQueue
+  , TMVar
+  , atomically
+  , newEmptyTMVarIO
+  , newTQueueIO
+  , putTMVar
+  , readTQueue
+  , takeTMVar
+  , writeTQueue
+  )
+import Control.Exception (bracket, displayException)
+import Control.Monad (forM, void)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (State, execState, get, modify')
-import qualified Data.Map.Strict as Map
+import Data.IORef
+  ( IORef
+  , modifyIORef'
+  , newIORef
+  , readIORef
+  , writeIORef
+  )
 import Data.Map.Strict (Map)
-import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
+import qualified Data.Map.Strict as Map
 import Data.Maybe (catMaybes, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -70,6 +101,143 @@ import System.FilePath (normalise)
 import VisualHaskell.Analysis.Ghc910.Types
 import VisualHaskell.Semantic
 
+-- | A single component-scoped GHC session. The worker thread owns the Ghc
+-- monad for its entire lifetime; callers communicate through typed requests.
+-- This preserves GHC's module graph, home-unit table, parsed modules, and
+-- typechecked modules between editor revisions.
+data AnalysisEngine = AnalysisEngine
+  { engineRequests :: !(TQueue EngineRequest)
+  , engineWorker :: !(Async ())
+  }
+
+data EngineRequest = EngineRequest
+  { requestDocuments :: !(Map DocumentId DocumentSnapshot)
+  , requestDocument :: !DocumentId
+  , requestGeneration :: !WorkspaceGeneration
+  , requestResponse :: !(TMVar (Either GhcAnalysisFailure (AnalysisSnapshot RevisionedSourceRange)))
+  }
+
+data TargetVersion = TargetVersion
+  { targetPath :: !FilePath
+  , targetRevision :: !TextRevision
+  , targetContentHash :: !ContentHash
+  }
+  deriving stock (Eq)
+
+type TargetCache = Map DocumentId (TargetVersion, UTCTime)
+
+type DiagnosticCapture =
+  Maybe
+    ( DocumentSnapshot
+    , IORef [Diagnostic RevisionedSourceRange]
+    )
+
+startAnalysisEngine
+  :: CompilerInvocation
+  -> IO (Either GhcAnalysisFailure AnalysisEngine)
+startAnalysisEngine invocation = do
+  requests <- newTQueueIO
+  ready <- newEmptyTMVarIO
+  worker <-
+    async $
+      GHC.runGhc (Just invocation.invocationCompilerLibDir) $ do
+        let componentOptions =
+              ComponentOptions
+                invocation.invocationCompilerOptions
+                invocation.invocationComponentRoot
+                invocation.invocationCradleDependencies
+        _ <- initSession componentOptions
+        captureReference <- liftIO (newIORef Nothing)
+        pushLogHookM (const (captureCurrentLog captureReference))
+        liftIO (atomically (putTMVar ready ()))
+        engineLoop invocation captureReference requests Map.empty
+  startup <- race (atomically (takeTMVar ready)) (waitCatch worker)
+  case startup of
+    Left () ->
+      pure
+        ( Right
+            AnalysisEngine
+              { engineRequests = requests
+              , engineWorker = worker
+              }
+        )
+    Right result -> do
+      cancel worker
+      pure
+        ( Left
+            ( failure
+                "ghc-session-start-failed"
+                (case result of
+                  Left exception -> Text.pack (displayException exception)
+                  Right () -> "The persistent GHC session stopped during initialization"
+                )
+                True
+            )
+        )
+
+stopAnalysisEngine :: AnalysisEngine -> IO ()
+stopAnalysisEngine engine = do
+  cancel engine.engineWorker
+  void (waitCatch engine.engineWorker)
+
+analysisEngineIsRunning :: AnalysisEngine -> IO Bool
+analysisEngineIsRunning engine =
+  maybe True (const False) <$> poll engine.engineWorker
+
+analyzeWithEngine
+  :: AnalysisEngine
+  -> Map DocumentId DocumentSnapshot
+  -> DocumentId
+  -> WorkspaceGeneration
+  -> IO (Either GhcAnalysisFailure (AnalysisSnapshot RevisionedSourceRange))
+analyzeWithEngine engine documents requested generation =
+  case Map.lookup requested documents of
+    Nothing -> pure (Left (failure "document-unavailable" "The requested document is not open" True))
+    Just _ -> do
+      response <- newEmptyTMVarIO
+      atomically $
+        writeTQueue
+          engine.engineRequests
+          EngineRequest
+            { requestDocuments = documents
+            , requestDocument = requested
+            , requestGeneration = generation
+            , requestResponse = response
+            }
+      completed <- race (atomically (takeTMVar response)) (waitCatch engine.engineWorker)
+      pure $
+        case completed of
+          Left result -> result
+          Right workerResult ->
+            Left
+              ( failure
+                  "ghc-session-terminated"
+                  (case workerResult of
+                    Left exception -> Text.pack (displayException exception)
+                    Right () -> "The persistent GHC session stopped before producing a result"
+                  )
+                  True
+              )
+
+engineLoop
+  :: CompilerInvocation
+  -> IORef DiagnosticCapture
+  -> TQueue EngineRequest
+  -> TargetCache
+  -> GHC.Ghc ()
+engineLoop invocation captureReference requests targetCache = do
+  request <- liftIO (atomically (readTQueue requests))
+  (result, updatedTargetCache) <-
+    analyzeInCurrentSession
+      invocation
+      captureReference
+      targetCache
+      request.requestDocuments
+      request.requestDocument
+      request.requestGeneration
+  liftIO (atomically (putTMVar request.requestResponse result))
+  engineLoop invocation captureReference requests updatedTargetCache
+
 analyzeWithGhc910
   :: CompilerInvocation
   -> Map DocumentId DocumentSnapshot
@@ -77,51 +245,95 @@ analyzeWithGhc910
   -> WorkspaceGeneration
   -> IO (Either GhcAnalysisFailure (AnalysisSnapshot RevisionedSourceRange))
 analyzeWithGhc910 invocation documents requested generation =
+  bracket (startAnalysisEngine invocation) stopStarted $ \started ->
+    case started of
+      Left engineFailure -> pure (Left engineFailure)
+      Right engine -> analyzeWithEngine engine documents requested generation
+  where
+    stopStarted (Left _) = pure ()
+    stopStarted (Right engine) = stopAnalysisEngine engine
+
+analyzeInCurrentSession
+  :: CompilerInvocation
+  -> IORef DiagnosticCapture
+  -> TargetCache
+  -> Map DocumentId DocumentSnapshot
+  -> DocumentId
+  -> WorkspaceGeneration
+  -> GHC.Ghc
+      ( Either GhcAnalysisFailure (AnalysisSnapshot RevisionedSourceRange)
+      , TargetCache
+      )
+analyzeInCurrentSession invocation captureReference previousTargets documents requested generation =
   case Map.lookup requested documents of
-    Nothing -> pure (Left (failure "document-unavailable" "The requested document is not open" True))
+    Nothing ->
+      pure
+        ( Left (failure "document-unavailable" "The requested document is not open" True)
+        , previousTargets
+        )
     Just requestedSnapshot -> do
-      attempted <-
-        try
-          ( GHC.runGhc (Just invocation.invocationCompilerLibDir) $ do
-              let componentOptions =
-                    ComponentOptions
-                      invocation.invocationCompilerOptions
-                      invocation.invocationComponentRoot
-                      invocation.invocationCradleDependencies
-              _ <- initSession componentOptions
-              diagnosticReference <- liftIO (newIORef [])
-              pushLogHookM (const (captureLog diagnosticReference requestedSnapshot))
-              now <- liftIO getCurrentTime
-              targets <- traverse (snapshotTarget now) (Map.elems documents)
-              GHC.setTargets targets
-              loadResult <- GHC.load GHC.LoadAllTargets
-              diagnostics <- liftIO (readIORef diagnosticReference)
-              (declarations, typeTable) <-
-                case loadResult of
-                  GHC.Failed -> pure ([], Map.empty)
-                  GHC.Succeeded -> declarationsFor requestedSnapshot
-              pure
-                AnalysisSnapshot
-                  { analysisWorkspaceGeneration = generation
-                  , analysisSession = invocationSession invocation
-                  , analysisDocument = requested
-                  , analysisRevision = requestedSnapshot.snapshotRevision
-                  , analysisContentHash = requestedSnapshot.snapshotContentHash
-                  , analysisCompleteness =
-                      case loadResult of
-                        GHC.Succeeded -> Typechecked
-                        GHC.Failed -> PartiallyFailed
-                  , analysisFreshness = CurrentAnalysis
-                  , analysisDiagnostics = diagnostics
-                  , analysisDeclarations = declarations
-                  , analysisTypes = typeTable
-                  }
-          )
-      pure $
-        case attempted of
-          Left (exception :: SomeException) ->
-            Left (failure "ghc-exception" (Text.pack (displayException exception)) True)
-          Right snapshot -> Right snapshot
+      now <- liftIO getCurrentTime
+      let targetCache = refreshTargetCache now previousTargets documents
+      diagnosticReference <- liftIO (newIORef [])
+      liftIO (writeIORef captureReference (Just (requestedSnapshot, diagnosticReference)))
+      targets <-
+        traverse
+          (\snapshot -> snapshotTarget (targetTimestamp targetCache snapshot) snapshot)
+          (Map.elems documents)
+      GHC.setTargets targets
+      loadResult <- GHC.load GHC.LoadAllTargets
+      liftIO (writeIORef captureReference Nothing)
+      diagnostics <- liftIO (readIORef diagnosticReference)
+      (declarations, typeTable) <-
+        case loadResult of
+          GHC.Failed -> pure ([], Map.empty)
+          GHC.Succeeded -> declarationsFor requestedSnapshot
+      pure
+        ( Right
+            AnalysisSnapshot
+              { analysisWorkspaceGeneration = generation
+              , analysisSession = invocationSession invocation
+              , analysisDocument = requested
+              , analysisRevision = requestedSnapshot.snapshotRevision
+              , analysisContentHash = requestedSnapshot.snapshotContentHash
+              , analysisCompleteness =
+                  case loadResult of
+                    GHC.Succeeded -> Typechecked
+                    GHC.Failed -> PartiallyFailed
+              , analysisFreshness = CurrentAnalysis
+              , analysisDiagnostics = diagnostics
+              , analysisDeclarations = declarations
+              , analysisTypes = typeTable
+              }
+        , targetCache
+        )
+
+refreshTargetCache
+  :: UTCTime
+  -> TargetCache
+  -> Map DocumentId DocumentSnapshot
+  -> TargetCache
+refreshTargetCache now previous =
+  Map.mapWithKey $ \document snapshot ->
+    let version = targetVersion snapshot
+     in case Map.lookup document previous of
+          Just (previousVersion, timestamp)
+            | previousVersion == version -> (version, timestamp)
+          _ -> (version, now)
+
+targetVersion :: DocumentSnapshot -> TargetVersion
+targetVersion snapshot =
+  TargetVersion
+    { targetPath = normalise snapshot.snapshotPath
+    , targetRevision = snapshot.snapshotRevision
+    , targetContentHash = snapshot.snapshotContentHash
+    }
+
+targetTimestamp :: TargetCache -> DocumentSnapshot -> UTCTime
+targetTimestamp targetCache snapshot =
+  case Map.lookup snapshot.snapshotDocumentId targetCache of
+    Just (_, timestamp) -> timestamp
+    Nothing -> error "Visual Haskell invariant: target cache omitted an open document"
 
 snapshotTarget :: GHC.GhcMonad monad => UTCTime -> DocumentSnapshot -> monad GHC.Target
 snapshotTarget now snapshot = do
@@ -147,6 +359,14 @@ captureLog reference snapshot logFlags messageClass sourceSpan message =
         Nothing -> pure ()
         Just diagnostic -> modifyIORef' reference (<> [diagnostic])
     _ -> pure ()
+
+captureCurrentLog :: IORef DiagnosticCapture -> LogAction
+captureCurrentLog captureReference logFlags messageClass sourceSpan message = do
+  current <- readIORef captureReference
+  case current of
+    Nothing -> pure ()
+    Just (snapshot, diagnosticReference) ->
+      captureLog diagnosticReference snapshot logFlags messageClass sourceSpan message
 
 diagnosticFor
   :: DocumentSnapshot

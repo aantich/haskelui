@@ -6,6 +6,7 @@ module Main (main) where
 
 import VisualHaskell
   ( application
+  , applicationWithAnalysisEnvironment
   , applicationWithWorkspaceRegistry
   , firstDocumentEditorKey
   , firstDocumentTabKey
@@ -15,12 +16,14 @@ import VisualHaskell
   , projectTreeKey
   , saveCommand
   )
+import VisualHaskell.Analysis.Service (defaultAnalysisConfiguration)
 import VisualHaskell.Highlighting
   ( SyntaxClass (..)
   , highlightHaskell
   )
 import qualified VisualHaskell.Diagnostics as Diagnostics
 import qualified VisualHaskell.Semantic as Semantic
+import VisualHaskell.TextMate (defaultTextMateConfiguration)
 import VisualHaskell.WorkspaceState
   ( WorkspaceState (..)
   , decodeWorkspaceState
@@ -529,10 +532,64 @@ main = do
 
   let workspaceClosed = applyEvent (WindowCloseRequested firstDocumentWindowKey) closed
   assert "clean workspace close removes the OS window" (null (application.appView workspaceClosed).appWindows)
+
+  textMateConfiguration <- defaultTextMateConfiguration "/tmp/visual-haskell-scheduler"
+  let compilerApplication =
+        applicationWithAnalysisEnvironment
+          "/tmp/visual-haskell-scheduler/last-workspace"
+          textMateConfiguration
+          (defaultAnalysisConfiguration "visual-haskell-analysis-ghc910")
+      compilerInitial = compilerApplication.appInitialModel
+      compilerFolderUpdate =
+        compilerApplication.appHandleEvent
+          (ProjectFolderChosen "/tmp/compiler-project")
+          compilerInitial
+      compilerFolder = applyTransaction compilerFolderUpdate compilerInitial
+      compilerTrustUpdate =
+        compilerApplication.appHandleEvent (CommandInvoked (CommandId 13)) compilerFolder
+      compilerTrusted = applyTransaction compilerTrustUpdate compilerFolder
+      compilerOpenUpdate =
+        compilerApplication.appHandleEvent
+          (TextFileRead "/tmp/compiler-project/Main.hs" (Right "module Main where\nvalue = 1\n"))
+          compilerTrusted
+      compilerOpened = applyTransaction compilerOpenUpdate compilerTrusted
+      compilerEditUpdate =
+        compilerApplication.appHandleEvent
+          (TextChanged firstDocumentEditorKey "module Main where\nvalue = 2\n")
+          compilerOpened
+      compilerEdited = applyTransaction compilerEditUpdate compilerOpened
+  assertEqual
+    "opening an active Haskell document schedules one debounced compiler request"
+    [TaskKey "visual-haskell.analysis.edit-debounce"]
+    (taskKeys compilerOpenUpdate.transactionCommands)
+  assertEqual
+    "editing replaces the same document-analysis debounce task"
+    [TaskKey "visual-haskell.analysis.edit-debounce"]
+    (taskKeys compilerEditUpdate.transactionCommands)
+  debouncedRequest <- runOnlyTask compilerEditUpdate.transactionCommands compilerEdited
+  assertEqual
+    "the completed debounce sends the latest snapshot and one analysis request"
+    2
+    (length debouncedRequest.transactionCommands)
+
   putStrLn "vh: pure workspace/tab/document model test passed"
   where
     applyEvent event model =
       applyTransaction (application.appHandleEvent event model) model
+
+taskKeys :: [RuntimeCommand model] -> [TaskKey]
+taskKeys commands =
+  [ key
+  | StartTaskCommand key _ _ _ _ <- commands
+  ]
+
+runOnlyTask :: [RuntimeCommand model] -> model -> IO (Transaction model)
+runOnlyTask commands model =
+  case [command | command@StartTaskCommand {} <- commands] of
+    [StartTaskCommand _ _ _ runTask finishTask] -> do
+      result <- runTask (CancellationToken (pure False) (pure ()))
+      pure (handleExternalEvent (finishTask (TaskSucceeded result)) model)
+    matches -> error ("expected one task command, got " <> show (length matches))
 
 validateWindowWorkspace :: WindowSpec -> [Text.Text]
 validateWindowWorkspace window = maybe [] validateWorkspaceSpec (windowWorkspace window)

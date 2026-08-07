@@ -25,6 +25,9 @@ main =
         [("document", "doc-1"), ("characters", "42")]
     contents <- readFile logPath
     assert "debug log contains session start" ("debug-session.start" `isInfixOf` contents)
+    assert "debug log contains UTC timestamps" ("\"timestamp\":" `isInfixOf` contents)
+    assert "debug log contains session-relative timing" ("\"elapsedMilliseconds\":" `isInfixOf` contents)
+    assert "debug log contains monotonic sequence numbers" ("\"sequence\":" `isInfixOf` contents)
     assert "debug log contains structured subsystem" ("\"subsystem\":\"fixture\"" `isInfixOf` contents)
     assert "debug log contains structured operation" ("\"operation\":\"operation\"" `isInfixOf` contents)
     assert "debug log contains safe metadata" ("\"characters\":\"42\"" `isInfixOf` contents)

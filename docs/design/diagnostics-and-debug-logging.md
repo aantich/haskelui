@@ -58,15 +58,42 @@ stack exec vh -- --debug-log /tmp/vh.jsonl
 
 `--debug` creates one timestamped file under the platform per-user Visual
 Haskell state directory's `logs` folder and prints the path. Each line is an
-independent JSON object containing UTC timestamp, session, monotonic sequence,
-severity, subsystem, operation, and a metadata object. Writes are serialized
+independent JSON object containing UTC timestamp, session-relative elapsed
+milliseconds, session, monotonic sequence, severity, subsystem, operation, and
+a metadata object. Writes are serialized
 because the UI thread, services, subscriptions, and worker supervisor can log
-concurrently. A compact human-readable copy is also written to stderr.
+concurrently. A compact human-readable copy is also written to stderr. Every
+terminal line begins with UTC time, elapsed milliseconds, and sequence, for
+example `[2026-08-07T12:34:56.123Z +1842ms #91]`, so delays remain visible even
+when only terminal output is shared.
 
 The GHC worker receives its own `--debug` switch only when the parent editor is
 in debug mode. Its stderr is already a supervised protocol side channel; the
 analysis service converts each line into the same structured session log.
 Stdout remains reserved for framed protocol messages.
+
+## Interactive compiler scheduling
+
+Document snapshots are sent to the compiler service as soon as their revision
+changes, but interactive analysis requests are debounced for 350 milliseconds
+with a replace-running HaskeLUI task. After the user pauses, Visual Haskell
+requests one analysis for the active Haskell document rather than enqueueing
+one full GHC load for every open Haskell tab. All open Haskell snapshots remain
+in the worker workspace, so the selected module is still checked in the
+context of its imports and open dependencies.
+
+Switching to a document requests analysis only when its accepted snapshot is
+absent or stale. A workspace open or trust transition configures the workspace,
+uploads every open Haskell snapshot, and requests the active document once.
+This bounds interactive backlog to an already-running stale GHC pass plus the
+latest requested revision. The GHC-9.10 worker retains one component-scoped
+`runGhc` session, initializes `hie-bios` and GHC once, and assigns a stable
+target timestamp to each path/revision/hash. Consequently `LoadAllTargets`
+reuses GHC's module graph and parsed/typechecked home modules; only changed
+targets and their invalidated dependents are rebuilt. Debug events report
+`session=cold|warm` and preserve total analysis timing. Interrupting an
+already-running stale load remains a separate efficiency improvement;
+acceptance identities continue to provide correctness.
 
 ## Privacy and stability rules
 

@@ -1969,10 +1969,14 @@ application framework. Plan around these current boundaries:
   supervised process client, fake worker, GHC-9.10.3 worker, typed HaskeLUI
   service adapter, and strict model acceptance are implemented. They
   deliberately remain VH-owned rather than HaskeLUI APIs. Current compiler
-  analysis uses conservative full snapshots and rechecks every open Haskell
-  module after an edit. Current-revision compiler diagnostics, colored
+  analysis sends authoritative full snapshots, debounces interactive requests,
+  checks the active document, and reuses one persistent component-scoped GHC
+  session with stable target versions. GHC incrementally reloads the changed
+  module and invalidated dependents instead of recreating its session for every
+  edit. Current-revision compiler diagnostics, colored
   underline layers, the Problems inspector, and keyed source navigation are
-  implemented. Cancellation, incremental invalidation, declaration outline,
+  implemented. In-progress cancellation, custom invalidation beyond GHC's own
+  module graph, declaration outline,
   hover/definition queries, and component-selection UI are the next product
   layers. The current worker accepts exactly GHC 9.10.3; a different
   cradle-selected compiler produces an explicit unsupported-compiler state

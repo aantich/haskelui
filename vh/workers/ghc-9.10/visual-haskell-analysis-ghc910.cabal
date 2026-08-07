@@ -37,13 +37,15 @@ library
       src
   ghc-options: -Wall -Wcompat
   build-depends:
-      base >=4.20.2 && <4.21
+      async
+    , base >=4.20.2 && <4.21
     , containers
     , directory
     , filepath
     , ghc ==9.10.3
     , hie-bios ==0.18.*
     , mtl
+    , stm
     , text
     , time
     , visual-haskell-analysis-protocol
@@ -60,13 +62,15 @@ executable visual-haskell-analysis-ghc910
       app
   ghc-options: -Wall -Wcompat -threaded
   build-depends:
-      base >=4.20.2 && <4.21
+      async
+    , base >=4.20.2 && <4.21
     , containers
     , directory
     , filepath
     , ghc ==9.10.3
     , hie-bios ==0.18.*
     , mtl
+    , stm
     , text
     , time
     , visual-haskell-analysis-ghc910
@@ -85,7 +89,8 @@ test-suite visual-haskell-analysis-ghc-910-test
       test
   ghc-options: -Wall -Wcompat -threaded
   build-depends:
-      base >=4.20.2 && <4.21
+      async
+    , base >=4.20.2 && <4.21
     , containers
     , directory
     , filepath

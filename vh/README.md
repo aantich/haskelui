@@ -163,6 +163,15 @@ GHC-9.10 compatibility namespace. The UI process never links GHC. This
 repository includes an explicit multi-component `hie.yaml`, which avoids
 ambiguous `stack repl` selection in the self-hosting workspace.
 
+The worker discovers the active component and initializes one persistent
+`runGhc` session on the first analysis. Later full document snapshots update
+in-memory targets inside that same session with stable per-revision timestamps,
+allowing GHC to reuse its module graph and parsed/typechecked cache. The
+self-hosted verification measured 31–174 ms warm edits after 0.8–2.4 s cold
+loads; the two-module fixture measured 1–80 ms warm edits across successful,
+broken, and recovered revisions. These measurements are diagnostic baselines
+rather than public timing guarantees.
+
 The current worker supports exactly GHC 9.10.3. `hie-bios`, rather than a VH
 Cabal/Stack parser, remains the authority for the actual cradle, flags, package
 databases, targets, `libdir`, and compiler selection. If the project selects a
@@ -178,7 +187,8 @@ security authority. Removing either record restores the workspace as
 untrusted.
 
 Focused verification covers the real Stack component, two dependent unsaved
-modules, revision-bound compiler diagnostics, stable declaration/type DTOs,
+modules, warm-session error/recovery, revision-bound compiler diagnostics,
+stable declaration/type DTOs,
 an actual forced GHC-worker crash followed by authoritative replay, and a full
 Visual Haskell runtime result reaching the rendered status surface:
 

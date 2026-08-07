@@ -173,11 +173,10 @@ selected component and old snapshots. An explicit Open Folder action grants
 trust and configures analysis. On restart, trusted mode is restored only when
 the workspace `.vihs` preference and user-owned trust registry both agree.
 Otherwise the workspace remains text-only until the user invokes the trust
-command. During the
-full-snapshot feasibility phase, changing one
-Haskell module rechecks all open Haskell modules because a dependency edit can
-invalidate its consumers. This conservative policy is deliberately visible;
-measured invalidation belongs to Phase 3.
+command. Full snapshots for all open Haskell documents remain authoritative in
+the worker, while interactive requests are debounced and target the active
+document. A component-scoped persistent GHC session uses its retained module
+graph to invalidate the changed target and affected dependents.
 
 ## 7. Direct GHC 9.10.3 worker
 
@@ -187,16 +186,21 @@ trees to exact Stack targets, avoiding ambiguous executable `Main` selection.
 The worker rejects untrusted workspaces and any compiler other than GHC 9.10.3.
 
 All direct compiler imports are isolated under
-`VisualHaskell.Analysis.Ghc910.Compat`. Each analysis creates GHC targets for
-all open documents and sets `targetContents` to the authoritative in-memory
-text, so dependent unsaved modules are typechecked together without temporary
-source files. GHC diagnostics are intercepted by a private log hook; stdout
-remains protocol-only. Top-level declarations and GHC types are translated to
-stable semantic DTOs before they cross the process boundary.
+`VisualHaskell.Analysis.Ghc910.Compat`. The worker starts one `runGhc` engine
+for the selected component, initializes `hie-bios`/GHC once, and keeps the
+engine alive until workspace/configuration replacement or process shutdown.
+Every analysis sets GHC targets for all open documents and uses `targetContents`
+for authoritative in-memory text. A path/revision/hash retains its prior target
+timestamp; a changed version receives a new timestamp. This lets GHC reuse its
+module graph and parsed/typechecked cache while still invalidating edited
+modules and dependents. GHC diagnostics are intercepted by one session-level
+log hook whose current capture is switched per request; stdout remains
+protocol-only. Top-level declarations and GHC types are translated to stable
+semantic DTOs before they cross the process boundary.
 
-The feasibility worker handles one analysis synchronously and does not
-advertise cancellation. That is an explicit current limit, not an implied
-guarantee: correctness still comes from acceptance identities.
+The worker serializes analysis within its GHC session and does not yet
+advertise in-progress cancellation. That is an explicit current limit, not an
+implied guarantee: correctness still comes from acceptance identities.
 
 ## 8. Verification
 
@@ -216,10 +220,12 @@ The implemented tests cover:
   process that still owns the build lock.
 - Two dependent modules whose on-disk types disagree but whose two unsaved
   snapshots typecheck, plus a broken unsaved revision whose GHC diagnostic is
-  bound to that exact revision.
-- The real GHC worker protocol, component/session events, normalized
-  declarations and types, and a forced child-process crash. The replacement
-  generation replays workspace, buffers, and analysis intent and completes.
+  bound to that exact revision and a corrected revision checked in the same
+  live GHC session. The fixture enforces a one-second warm-edit budget.
+- The real GHC worker protocol across two revisions, component/session events,
+  normalized declarations and types, and a forced child-process crash. The
+  replacement generation replays workspace, buffers, and analysis intent,
+  creates one replacement session, and then reuses it for the next revision.
 - A full Visual Haskell/HaskeLUI runtime fixture that opens a workspace and
   observes a strictly accepted direct-GHC result in the rendered status area.
 

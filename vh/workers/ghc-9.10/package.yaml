@@ -10,6 +10,7 @@ maintainer: Visual Haskell contributors
 copyright: 2026 Visual Haskell contributors
 
 dependencies:
+  - async
   - base >= 4.20.2 && < 4.21
   - containers
   - directory
@@ -17,6 +18,7 @@ dependencies:
   - ghc == 9.10.3
   - hie-bios >= 0.18 && < 0.19
   - mtl
+  - stm
   - text
   - time
   - visual-haskell-analysis-protocol

@@ -8,7 +8,7 @@ import Control.Exception (SomeException, displayException, try)
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
 import qualified Data.Text as Text
-import Data.Time.Clock (diffUTCTime, getCurrentTime)
+import Data.Time.Clock (UTCTime, diffUTCTime, getCurrentTime)
 import System.Directory (doesFileExist)
 import System.Environment (getArgs)
 import System.Exit (ExitCode (ExitFailure), exitFailure, exitWith)
@@ -31,6 +31,7 @@ data WorkerState = WorkerState
   , workerSession :: !(Maybe SessionId)
   , workerComponent :: !(Maybe ComponentInfo)
   , workerDocuments :: !(Map DocumentId DocumentSnapshot)
+  , workerAnalysisEngine :: !(Maybe AnalysisEngine)
   }
 
 data WorkerOptions = WorkerOptions
@@ -66,7 +67,7 @@ main = do
             , workerMaximumFrameBytes = maximumFrameBytes defaultFrameLimits
             }
       workerDebug options "handshake.complete" []
-      loop options (WorkerState Nothing Nothing Nothing Nothing Map.empty)
+      loop options (WorkerState Nothing Nothing Nothing Nothing Map.empty Nothing)
     Right _ -> failWorker "first frame was not ClientHello"
     Left failure -> failWorker ("could not read ClientHello: " <> show failure)
 
@@ -74,7 +75,7 @@ loop :: WorkerOptions -> WorkerState -> IO ()
 loop options state = do
   incoming <- readFrame defaultFrameLimits stdin
   case incoming of
-    Left FrameEndOfInput -> pure ()
+    Left FrameEndOfInput -> stopWorkerAnalysisEngine state
     Left failure -> failWorker ("protocol read failed: " <> show failure)
     Right envelope -> do
       workerDebug options "command.received" (clientMessageFields envelope.envelopePayload)
@@ -89,6 +90,7 @@ loop options state = do
               send envelope (WorkspaceFailed request.workspaceRequestId rejected)
               loop options state
             TrustedWorkspace -> do
+              stopWorkerAnalysisEngine state
               workerDebug options "workspace.open"
                 [ ("workspace", request.workspaceRequestId.unWorkspaceId)
                 , ("root", Text.pack request.workspaceRequestRoot)
@@ -101,6 +103,7 @@ loop options state = do
                       (Just session)
                       Nothing
                       Map.empty
+                      Nothing
               send envelope (WorkspaceLoading request.workspaceRequestId)
               send envelope (WorkspaceReady request.workspaceRequestId session)
               loop options updated
@@ -120,18 +123,16 @@ loop options state = do
           loop options state {workerDocuments = Map.delete document state.workerDocuments}
         AnalyzeDocument document -> do
           crashOnceIfRequested options
-          discovered <- analyze options envelope state document
-          let selected = case discovered of
-                Just component -> Just component
-                Nothing -> state.workerComponent
-          loop options state {workerComponent = selected}
+          updated <- analyze options envelope state document
+          loop options updated
         CancelRequest _ -> do
           sendFailure envelope "cancellation-unsupported" "This feasibility worker completes one request at a time" True
           loop options state
         ReloadConfiguration -> do
+          stopWorkerAnalysisEngine state
           send envelope (WorkerHealthChanged WorkerHealthy)
-          loop options state
-        ShutdownWorker -> pure ()
+          loop options state {workerComponent = Nothing, workerAnalysisEngine = Nothing}
+        ShutdownWorker -> stopWorkerAnalysisEngine state
 
 parseWorkerOptions :: [String] -> WorkerOptions
 parseWorkerOptions = go (WorkerOptions Nothing False)
@@ -162,43 +163,127 @@ analyze
   -> ProtocolEnvelope ClientMessage
   -> WorkerState
   -> DocumentId
-  -> IO (Maybe ComponentInfo)
+  -> IO WorkerState
 analyze options envelope state document =
   case (state.workerWorkspace, state.workerRoot, state.workerSession) of
     (Just _, Just root, Just _) -> do
       started <- getCurrentTime
+      let sessionCandidate = maybe "cold" (const "warm") state.workerAnalysisEngine
       workerDebug options "analysis.start"
         [ ("document", document.unDocumentId)
         , ("root", Text.pack root)
         , ("openDocuments", Text.pack (show (Map.size state.workerDocuments)))
+        , ("session", sessionCandidate)
         ]
-      attempted <- try (analyzeWorkspace root state.workerDocuments document envelope.envelopeWorkspaceGeneration)
-      finished <- getCurrentTime
-      workerDebug options "analysis.finish"
-        [ ("document", document.unDocumentId)
-        , ("milliseconds", Text.pack (show (round (diffUTCTime finished started * 1000) :: Integer)))
-        , ("result", either (const "exception") (either (const "failure") (const "success")) attempted)
-        ]
-      case attempted of
-        Left (exception :: SomeException) ->
-          sendFailure envelope "worker-exception" (Text.pack (displayException exception)) True >> pure Nothing
-        Right (Left failure) ->
-          sendFailure envelope failure.failureCode failure.failureMessage failure.failureRecoverable >> pure Nothing
-        Right (Right snapshot) -> do
-          let component =
-                ComponentInfo
-                  { componentId = ComponentId snapshot.analysisSession.unSessionId
-                  , componentRoot = root
-                  , componentCompilerVersion = CompilerVersion "9.10.3"
-                  , componentSession = snapshot.analysisSession
+      ensuredAttempt <- try (ensureAnalysisEngine state document)
+      case ensuredAttempt of
+        Left (exception :: SomeException) -> do
+          finishAnalysisDebug options started document False "exception"
+          sendFailure envelope "worker-exception" (Text.pack (displayException exception)) True
+          pure state {workerAnalysisEngine = Nothing}
+        Right (Left failure) -> do
+          finishAnalysisDebug options started document False "failure"
+          sendFailure envelope failure.failureCode failure.failureMessage failure.failureRecoverable
+          pure state
+        Right (Right (engine, reused)) -> do
+          workerDebug options "analysis.session"
+            [("document", document.unDocumentId), ("reuse", if reused then "warm" else "cold")]
+          attempted <-
+            try
+              ( analyzeWithEngine
+                  engine
+                  state.workerDocuments
+                  document
+                  envelope.envelopeWorkspaceGeneration
+              )
+          running <- analysisEngineIsRunning engine
+          if running then pure () else stopAnalysisEngine engine
+          let retainedEngine = if running then Just engine else Nothing
+          case attempted of
+            Left (exception :: SomeException) -> do
+              finishAnalysisDebug options started document reused "exception"
+              sendFailure envelope "worker-exception" (Text.pack (displayException exception)) True
+              pure state {workerAnalysisEngine = retainedEngine}
+            Right (Left failure) -> do
+              finishAnalysisDebug options started document reused "failure"
+              sendFailure envelope failure.failureCode failure.failureMessage failure.failureRecoverable
+              pure state {workerAnalysisEngine = retainedEngine}
+            Right (Right snapshot) -> do
+              finishAnalysisDebug options started document reused "success"
+              let component =
+                    ComponentInfo
+                      { componentId = ComponentId snapshot.analysisSession.unSessionId
+                      , componentRoot = root
+                      , componentCompilerVersion = CompilerVersion "9.10.3"
+                      , componentSession = snapshot.analysisSession
+                      }
+              send envelope (ComponentDiscovered component)
+              send envelope (ComponentSelected component)
+              send envelope (AnalysisCompleted snapshot)
+              pure
+                state
+                  { workerComponent = Just component
+                  , workerAnalysisEngine = retainedEngine
                   }
-          send envelope (ComponentDiscovered component)
-          send envelope (ComponentSelected component)
-          send envelope (AnalysisCompleted snapshot)
-          pure (Just component)
     _ ->
       sendFailure envelope "workspace-unavailable" "Open a trusted workspace before analysis" True
-        >> pure Nothing
+        >> pure state
+
+ensureAnalysisEngine
+  :: WorkerState
+  -> DocumentId
+  -> IO (Either GhcAnalysisFailure (AnalysisEngine, Bool))
+ensureAnalysisEngine state requestedDocument
+  | Just engine <- state.workerAnalysisEngine = do
+      running <- analysisEngineIsRunning engine
+      if running
+        then pure (Right (engine, True))
+        else stopAnalysisEngine engine >> createAnalysisEngine state requestedDocument
+ensureAnalysisEngine state requestedDocument = createAnalysisEngine state requestedDocument
+
+createAnalysisEngine
+  :: WorkerState
+  -> DocumentId
+  -> IO (Either GhcAnalysisFailure (AnalysisEngine, Bool))
+createAnalysisEngine state requestedDocument =
+  case Map.lookup requestedDocument state.workerDocuments of
+    Nothing ->
+      pure
+        ( Left
+            GhcAnalysisFailure
+              { failureCode = "document-unavailable"
+              , failureMessage = "The requested Haskell document is not open"
+              , failureRecoverable = True
+              }
+        )
+    Just primary -> do
+      let paths = fmap snapshotPath (Map.elems state.workerDocuments)
+      discovered <- discoverCompilerInvocation primary.snapshotPath paths
+      case discovered of
+        Left failure -> pure (Left failure)
+        Right invocation -> fmap (fmap (\engine -> (engine, False))) (startAnalysisEngine invocation)
+
+finishAnalysisDebug
+  :: WorkerOptions
+  -> UTCTime
+  -> DocumentId
+  -> Bool
+  -> Text.Text
+  -> IO ()
+finishAnalysisDebug options started document reused result = do
+  finished <- getCurrentTime
+  workerDebug options "analysis.finish"
+    [ ("document", document.unDocumentId)
+    , ("milliseconds", Text.pack (show (round (diffUTCTime finished started * 1000) :: Integer)))
+    , ("session", if reused then "warm" else "cold")
+    , ("result", result)
+    ]
+
+stopWorkerAnalysisEngine :: WorkerState -> IO ()
+stopWorkerAnalysisEngine state =
+  case state.workerAnalysisEngine of
+    Nothing -> pure ()
+    Just engine -> stopAnalysisEngine engine
 
 send
   :: ProtocolEnvelope ClientMessage
