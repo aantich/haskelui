@@ -53,7 +53,7 @@ main = do
       send envelope $
         WorkerHelloMessage
           WorkerHello
-            { workerAcceptedProtocol = protocolV1
+            { workerAcceptedProtocol = protocolV2
             , workerVersion = "visual-haskell-analysis-ghc910/0.1.0"
             , workerCompilerVersion = Just (CompilerVersion "9.10.3")
             , workerCapabilities =
@@ -164,6 +164,9 @@ loop options state = do
         CancelRequest _ -> do
           sendFailure envelope "cancellation-unsupported" "This feasibility worker completes one request at a time" True
           loop options state
+        DiscoverProject _ -> send envelope (ProjectDiscovered emptyProjectCatalog) >> loop options state
+        PrepareComponent _ -> sendFailure envelope "unsupported" "Project preparation is not configured" True >> loop options state
+        ConfigureContext _ -> sendFailure envelope "unsupported" "Compiler context is not configured" True >> loop options state
         ReloadConfiguration -> do
           stopWorkerAnalysisEngine state
           send envelope (WorkerHealthChanged WorkerHealthy)
@@ -328,7 +331,7 @@ send
 send incoming payload = do
   let outgoing =
         ProtocolEnvelope
-          { envelopeProtocolVersion = protocolV1
+          { envelopeProtocolVersion = protocolV2
           , envelopeRequestId = incoming.envelopeRequestId
           , envelopeWorkspace = incoming.envelopeWorkspace
           , envelopeWorkspaceGeneration = incoming.envelopeWorkspaceGeneration
@@ -338,6 +341,7 @@ send incoming payload = do
           , envelopeDocument = incoming.envelopeDocument
           , envelopeRevision = incoming.envelopeRevision
           , envelopeContentHash = incoming.envelopeContentHash
+          , envelopeInputHash = incoming.envelopeInputHash
           , envelopePayload = payload
           }
   result <- writeFrame defaultFrameLimits stdout outgoing
@@ -358,6 +362,9 @@ workerDebug options operation fields =
 clientMessageFields :: ClientMessage -> [(Text.Text, Text.Text)]
 clientMessageFields message =
   case message of
+    DiscoverProject _ -> [("kind", "discover-project")]
+    PrepareComponent _ -> [("kind", "prepare-component")]
+    ConfigureContext _ -> [("kind", "configure-context")]
     ClientHelloMessage {} -> [("kind", "client-hello")]
     OpenWorkspace request ->
       [ ("kind", "open-workspace")

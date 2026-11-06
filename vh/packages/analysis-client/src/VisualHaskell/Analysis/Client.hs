@@ -132,13 +132,14 @@ data StoredCommand = StoredCommand
 
 data ReplayState = ReplayState
   { replayWorkspace :: !(Maybe StoredCommand)
+  , replayProject :: !(Maybe StoredCommand)
   , replayComponent :: !(Maybe StoredCommand)
   , replayDocuments :: !(Map DocumentId StoredCommand)
   , replayAnalyses :: !(Map DocumentId StoredCommand)
   }
 
 emptyReplayState :: ReplayState
-emptyReplayState = ReplayState Nothing Nothing Map.empty Map.empty
+emptyReplayState = ReplayState Nothing Nothing Nothing Map.empty Map.empty
 
 data WorkerSession = WorkerSession
   { sessionInput :: !Handle
@@ -328,10 +329,10 @@ validateHello
 validateHello Nothing = Left "worker handshake timed out"
 validateHello (Just (Left failure)) = Left ("worker handshake failed: " <> Text.pack (show failure))
 validateHello (Just (Right envelope))
-  | envelope.envelopeProtocolVersion.protocolMajor /= protocolV1.protocolMajor =
+  | envelope.envelopeProtocolVersion.protocolMajor /= protocolV2.protocolMajor =
       Left "worker envelope uses an incompatible protocol major"
   | WorkerHelloMessage hello <- envelope.envelopePayload
-  , hello.workerAcceptedProtocol.protocolMajor == protocolV1.protocolMajor
+  , hello.workerAcceptedProtocol.protocolMajor == protocolV2.protocolMajor
   , hello.workerMaximumFrameBytes > 0 = Right hello
   | otherwise = Left "worker did not return a compatible WorkerHello"
 
@@ -348,7 +349,7 @@ replayCommands limits input replayState = go (replayCommandList replayState)
 
 replayCommandList :: ReplayState -> [StoredCommand]
 replayCommandList replayState =
-  catMaybes [replayState.replayWorkspace, replayState.replayComponent]
+  catMaybes [replayState.replayWorkspace, replayState.replayProject, replayState.replayComponent]
     <> Map.elems replayState.replayDocuments
     <> Map.elems replayState.replayAnalyses
 
@@ -398,7 +399,9 @@ retainForReplay :: StoredCommand -> ReplayState -> ReplayState
 retainForReplay stored replayState =
   case stored.storedEnvelope.envelopePayload of
     OpenWorkspace _ ->
-      ReplayState (Just stored) Nothing Map.empty Map.empty
+      ReplayState (Just stored) Nothing Nothing Map.empty Map.empty
+    DiscoverProject _ -> replayState {replayProject = Just stored}
+    ConfigureContext _ -> replayState {replayComponent = Just stored}
     SelectComponent _ ->
       replayState {replayComponent = Just stored}
     OpenDocument snapshot ->
@@ -430,6 +433,8 @@ retainForReplay stored replayState =
 replayManaged :: ClientMessage -> Bool
 replayManaged message =
   case message of
+    DiscoverProject _ -> True
+    ConfigureContext _ -> True
     OpenWorkspace _ -> True
     SelectComponent _ -> True
     OpenDocument _ -> True

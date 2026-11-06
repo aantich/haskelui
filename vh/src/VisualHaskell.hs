@@ -1812,6 +1812,9 @@ applyAnalysisWorkerMessage generation envelope model
   | AnalysisProtocol.envelopeWorkspaceGeneration envelope /= model.analysisWorkspaceGeneration = noTransaction
   | otherwise =
       case AnalysisProtocol.envelopePayload envelope of
+        AnalysisProtocol.ProjectDiscovered _ -> noTransaction
+        AnalysisProtocol.ProjectProgress _ -> noTransaction
+        AnalysisProtocol.ProjectConfigurationChanged _ -> noTransaction
         AnalysisProtocol.WorkerHelloMessage _ -> noTransaction
         AnalysisProtocol.WorkspaceLoading _ -> analysisStatusTransaction "GHC: loading workspace"
         AnalysisProtocol.WorkspaceReady _ _ -> analysisStatusTransaction "GHC: workspace ready"

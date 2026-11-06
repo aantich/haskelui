@@ -16,7 +16,7 @@ module VisualHaskell.Analysis.Protocol.Types
   , WorkerHello (..)
   , WorkerMessage (..)
   , WorkspaceRequest (..)
-  , protocolV1
+  , protocolV2
   , protocolEnvelope
   ) where
 
@@ -42,8 +42,8 @@ data ProtocolVersion = ProtocolVersion
   }
   deriving stock (Eq, Ord, Show)
 
-protocolV1 :: ProtocolVersion
-protocolV1 = ProtocolVersion 1 0
+protocolV2 :: ProtocolVersion
+protocolV2 = ProtocolVersion 2 0
 
 newtype RequestId = RequestId {unRequestId :: Word64}
   deriving stock (Eq, Ord, Show)
@@ -58,6 +58,7 @@ data ProtocolEnvelope payload = ProtocolEnvelope
   , envelopeDocument :: !(Maybe DocumentId)
   , envelopeRevision :: !(Maybe TextRevision)
   , envelopeContentHash :: !(Maybe ContentHash)
+  , envelopeInputHash :: !(Maybe ContentHash)
   , envelopePayload :: !payload
   }
   deriving stock (Eq, Show)
@@ -65,7 +66,7 @@ data ProtocolEnvelope payload = ProtocolEnvelope
 protocolEnvelope :: WorkspaceGeneration -> payload -> ProtocolEnvelope payload
 protocolEnvelope generation payload =
   ProtocolEnvelope
-    { envelopeProtocolVersion = protocolV1
+    { envelopeProtocolVersion = protocolV2
     , envelopeRequestId = Nothing
     , envelopeWorkspace = Nothing
     , envelopeWorkspaceGeneration = generation
@@ -73,6 +74,7 @@ protocolEnvelope generation payload =
     , envelopeDocument = Nothing
     , envelopeRevision = Nothing
     , envelopeContentHash = Nothing
+    , envelopeInputHash = Nothing
     , envelopePayload = payload
     }
 
@@ -130,6 +132,9 @@ data ClientMessage
   | CheckComposition !CompositionQuery
   | CancelRequest !RequestId
   | ReloadConfiguration
+  | DiscoverProject !(Maybe Text)
+  | PrepareComponent !ComponentId
+  | ConfigureContext !ResolvedContext
   | ShutdownWorker
   deriving stock (Eq, Show)
 
@@ -157,6 +162,9 @@ data WorkerMessage
   | CompositionChecked !CompositionResult
   | WorkerRequestFailed !(Maybe RequestId) !RequestFailure
   | WorkerHealthChanged !WorkerHealth
+  | ProjectDiscovered !ProjectCatalog
+  | ProjectProgress !Text
+  | ProjectConfigurationChanged ![FilePath]
   deriving stock (Eq, Show)
 
 instance ToJSON ProtocolVersion where
@@ -176,6 +184,7 @@ instance ToJSON payload => ToJSON (ProtocolEnvelope payload) where
     , "document" .= envelope.envelopeDocument
     , "revision" .= envelope.envelopeRevision
     , "contentHash" .= envelope.envelopeContentHash
+    , "inputHash" .= envelope.envelopeInputHash
     , "payload" .= envelope.envelopePayload
     ]
 
@@ -190,6 +199,7 @@ instance FromJSON payload => FromJSON (ProtocolEnvelope payload) where
       <*> value .:? "document"
       <*> value .:? "revision"
       <*> value .:? "contentHash"
+      <*> value .:? "inputHash"
       <*> value .: "payload"
 
 instance ToJSON AnalysisCapability where
@@ -266,6 +276,9 @@ instance ToJSON ClientMessage where
     CheckComposition query -> tagged "check-composition" ["query" .= query]
     CancelRequest request -> tagged "cancel-request" ["request" .= request]
     ReloadConfiguration -> tagged "reload-configuration" []
+    DiscoverProject profile -> tagged "discover-project" ["profile" .= profile]
+    PrepareComponent component -> tagged "prepare-component" ["component" .= component]
+    ConfigureContext context -> tagged "configure-context" ["context" .= context]
     ShutdownWorker -> tagged "shutdown" []
     where tagged messageType fields = object (("type" .= (messageType :: Text)) : fields)
 
@@ -284,6 +297,9 @@ instance FromJSON ClientMessage where
       "check-composition" -> CheckComposition <$> value .: "query"
       "cancel-request" -> CancelRequest <$> value .: "request"
       "reload-configuration" -> pure ReloadConfiguration
+      "discover-project" -> DiscoverProject <$> value .:? "profile"
+      "prepare-component" -> PrepareComponent <$> value .: "component"
+      "configure-context" -> ConfigureContext <$> value .: "context"
       "shutdown" -> pure ShutdownWorker
       _ -> fail ("unknown client message " <> Text.unpack messageType)
 
@@ -324,6 +340,9 @@ instance ToJSON WorkerMessage where
     CompositionChecked result -> tagged "composition-checked" ["result" .= result]
     WorkerRequestFailed request failure -> tagged "request-failed" ["request" .= request, "failure" .= failure]
     WorkerHealthChanged health -> tagged "worker-health" ["health" .= health]
+    ProjectDiscovered catalog -> tagged "project-discovered" ["catalog" .= catalog]
+    ProjectProgress progress -> tagged "project-progress" ["progress" .= progress]
+    ProjectConfigurationChanged paths -> tagged "project-configuration-changed" ["paths" .= paths]
     where tagged messageType fields = object (("type" .= (messageType :: Text)) : fields)
 
 instance FromJSON WorkerMessage where
@@ -341,6 +360,9 @@ instance FromJSON WorkerMessage where
       "composition-checked" -> CompositionChecked <$> value .: "result"
       "request-failed" -> WorkerRequestFailed <$> value .:? "request" <*> value .: "failure"
       "worker-health" -> WorkerHealthChanged <$> value .: "health"
+      "project-discovered" -> ProjectDiscovered <$> value .: "catalog"
+      "project-progress" -> ProjectProgress <$> value .: "progress"
+      "project-configuration-changed" -> ProjectConfigurationChanged <$> value .: "paths"
       _ -> fail ("unknown worker message " <> Text.unpack messageType)
 
 capabilityText :: AnalysisCapability -> Text

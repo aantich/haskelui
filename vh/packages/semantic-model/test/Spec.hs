@@ -36,6 +36,12 @@ main = do
           (DocumentId "doc") "Main.hs" revision
           (contentHash "main = pure ()") "main = pure ()" LF
   assertEqual "document snapshot JSON round trip" (Just snapshot) (decode (encode snapshot))
+  let dependency = snapshot {snapshotDocumentId = DocumentId "dependency", snapshotPath = "Dependency.hs"}
+      editedDependency = dependency {snapshotRevision = TextRevision 8, snapshotContentHash = contentHash "edited"}
+  assertEqual "input freshness ignores incidental map order" (analysisInputsHash [snapshot, dependency]) (analysisInputsHash [dependency, snapshot])
+  assertEqual "dependency edit invalidates unchanged consumer" False
+    (analysisInputsHash [snapshot, dependency] == analysisInputsHash [snapshot, editedDependency])
+  assertEqual "closed dependency changes the input set" False (analysisInputsHash [snapshot] == analysisInputsHash [snapshot, dependency])
 
   let boxType = TypeId "type:Box"
       boxConstructorType = TypeId "constructor:Box"

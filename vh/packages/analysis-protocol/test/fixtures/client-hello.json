@@ -1,5 +1,5 @@
 {
-  "protocol": { "major": 1, "minor": 0 },
+  "protocol": { "major": 2, "minor": 0 },
   "requestId": null,
   "workspace": null,
   "workspaceGeneration": 0,
@@ -7,6 +7,7 @@
   "document": null,
   "revision": null,
   "contentHash": null,
+  "inputHash": null,
   "payload": {
     "type": "client-hello",
     "hello": {

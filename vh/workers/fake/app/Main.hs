@@ -42,7 +42,7 @@ main = do
     Right envelope@(ProtocolEnvelope {envelopePayload = ClientHelloMessage _}) -> do
       send envelope $ WorkerHelloMessage
         WorkerHello
-          { workerAcceptedProtocol = protocolV1
+          { workerAcceptedProtocol = protocolV2
           , workerVersion = "visual-haskell-fake-worker/0.1.0"
           , workerCompilerVersion = Nothing
           , workerCapabilities =
@@ -96,6 +96,9 @@ loop configuration state = do
           sendFailure envelope "composition-unsupported" "The deterministic fake worker does not provide composition checks"
           loop configuration state
         CancelRequest _ -> loop configuration state
+        DiscoverProject _ -> send envelope (ProjectDiscovered emptyProjectCatalog) >> loop configuration state
+        PrepareComponent _ -> sendFailure envelope "unsupported" "Fake worker has no project preparation" >> loop configuration state
+        ConfigureContext _ -> sendFailure envelope "unsupported" "Fake worker has no compiler contexts" >> loop configuration state
         ReloadConfiguration -> do
           send envelope (WorkerHealthChanged WorkerHealthy)
           loop configuration state
@@ -178,7 +181,7 @@ send
 send incoming payload = do
   let outgoing =
         ProtocolEnvelope
-          { envelopeProtocolVersion = protocolV1
+          { envelopeProtocolVersion = protocolV2
           , envelopeRequestId = incoming.envelopeRequestId
           , envelopeWorkspace = incoming.envelopeWorkspace
           , envelopeWorkspaceGeneration = incoming.envelopeWorkspaceGeneration
@@ -186,6 +189,7 @@ send incoming payload = do
           , envelopeDocument = incoming.envelopeDocument
           , envelopeRevision = incoming.envelopeRevision
           , envelopeContentHash = incoming.envelopeContentHash
+          , envelopeInputHash = incoming.envelopeInputHash
           , envelopePayload = payload
           }
   result <- writeFrame defaultFrameLimits stdout outgoing

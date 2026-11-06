@@ -28,6 +28,7 @@ library
       VisualHaskell.Semantic.TypeUniverse
       VisualHaskell.Semantic.Types
       VisualHaskell.Semantic.FunctionUniverse
+      VisualHaskell.Semantic.Project
   other-modules:
       Paths_visual_haskell_semantic_model
   autogen-modules:

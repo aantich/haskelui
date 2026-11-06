@@ -17,7 +17,7 @@ import System.IO
   , openBinaryTempFile
   )
 import VisualHaskell.Analysis.Protocol
-import VisualHaskell.Semantic (DeclarationId (..), WorkspaceGeneration (..))
+import VisualHaskell.Semantic
 
 main :: IO ()
 main = do
@@ -30,6 +30,16 @@ main = do
           )
   assertEqual "client hello semantic golden" (decode fixture :: Maybe Value) (decode (encode message))
   assertEqual "client hello JSON round trip" (Just message) (decode (encode message))
+  assertEqual "project protocol major" 2 (protocolMajor protocolV2)
+  let profile = ProjectProfile "cabal:root" CabalProject "/project" (Just "/project/cabal.project")
+      component = ProjectComponent (ComponentId "pkg:lib") "pkg" "library" "lib:pkg" LibraryComponent "/project/pkg" ["/project/pkg/src"] [] []
+      catalog = ProjectCatalog [profile] (Just "cabal:root") [component] ["/project/cabal.project"] []
+      context = ResolvedContext (ComponentId "pkg:lib") "/project" ["-Wall"] "/ghc/lib" (CompilerVersion "9.10.3")
+        ["/project/cabal.project"] ["/project/pkg/src"] [] (SessionId "context-1")
+  mapM_ (\payload -> assertEqual "project request round trip" (Just payload) (decode (encode payload)))
+    [DiscoverProject Nothing, PrepareComponent (ComponentId "pkg:lib"), ConfigureContext context]
+  mapM_ (\payload -> assertEqual "project event round trip" (Just payload) (decode (encode payload)))
+    [ProjectDiscovered catalog, ProjectProgress "Preparing pkg", ProjectConfigurationChanged ["/project/cabal.project"]]
   let query = QueryPosition (PositionQuery CompletionQuery 17)
       result = PositionQueryCompleted (PositionResult (PositionQuery HoverQuery 5)
         (Just (HoverInfo "map" "(a -> b) -> [a] -> [b]" (Just "Prelude") 4 3)) [] [] 4 0)

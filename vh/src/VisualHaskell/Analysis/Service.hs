@@ -271,6 +271,9 @@ traceAnalysisClientEvent configuration event =
 workerMessageKind :: WorkerMessage -> Text
 workerMessageKind message =
   case message of
+    ProjectDiscovered {} -> "project-discovered"
+    ProjectProgress {} -> "project-progress"
+    ProjectConfigurationChanged {} -> "configuration-changed"
     WorkerHelloMessage {} -> "worker-hello"
     WorkspaceLoading {} -> "workspace-loading"
     WorkspaceReady {} -> "workspace-ready"

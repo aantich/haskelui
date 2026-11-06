@@ -28,6 +28,7 @@ library:
     - VisualHaskell.Semantic.TypeUniverse
     - VisualHaskell.Semantic.Types
     - VisualHaskell.Semantic.FunctionUniverse
+    - VisualHaskell.Semantic.Project
 
 tests:
   visual-haskell-semantic-model-test:
