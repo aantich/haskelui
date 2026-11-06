@@ -1,0 +1,34 @@
+name: visual-haskell-projects
+version: 0.1.0.0
+license: BSD-3-Clause
+github: aantich/haskelui
+dependencies:
+  - base >= 4.20.2 && < 4.21
+  - aeson
+  - async
+  - bytestring
+  - Cabal-syntax
+  - containers
+  - directory
+  - filepath
+  - fsnotify
+  - process
+  - stm
+  - text
+  - time
+  - unix
+  - visual-haskell-semantic-model
+ghc-options: [-Wall, -Wcompat]
+data-files: [data/BuildInfoHelper.hs]
+library:
+  source-dirs: src
+  exposed-modules:
+    - VisualHaskell.Projects
+    - VisualHaskell.Projects.Process
+  other-modules: [Paths_visual_haskell_projects]
+tests:
+  project-model-test:
+    main: Spec.hs
+    source-dirs: test
+    dependencies: [temporary, visual-haskell-projects]
+

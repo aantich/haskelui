@@ -67,6 +67,10 @@ cradle:
       component: visual-haskell-analysis-client:lib
     - path: ./vh/packages/analysis-client/test
       component: visual-haskell-analysis-client:test:visual-haskell-analysis-client-test
+    - path: ./vh/packages/projects/src
+      component: visual-haskell-projects:lib
+    - path: ./vh/packages/projects/test
+      component: visual-haskell-projects:test:project-model-test
     - path: ./vh/packages/textmate/src
       component: visual-haskell-textmate:lib
     - path: ./vh/packages/textmate/test
