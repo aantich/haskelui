@@ -103,6 +103,7 @@ main = do
       aSource = Text.unlines
         [ "module A where"
         , "import B (value)"
+        , "import qualified Data.List as L"
         , "data Tree a = Leaf { leafValue :: a } | Branch (Tree a) (Tree a)"
         , "newtype UserId = UserId Int"
         , "type Forest a = [Tree a]"
@@ -112,6 +113,18 @@ main = do
         , "data DebugLogger = DebugLogger { debugLogPath :: FilePath, debugTraceSink :: TraceSink }"
         , "message :: String"
         , "message = value"
+        , "toText :: Int -> String"
+        , "toText = show"
+        , "textLength :: String -> Int"
+        , "textLength = length"
+        , "negateInt :: Int -> Int"
+        , "negateInt = negate"
+        , "identity :: a -> a"
+        , "identity input = input"
+        , "renderAny :: Show a => a -> String"
+        , "renderAny = show"
+        , "sorted = L.sort [3 :: Int, 1]"
+        , "unicodeValue = \"😀\" ++ value"
         ]
       bSource = Text.unlines
         [ "module B (value) where"
@@ -153,6 +166,57 @@ main = do
       assert "GHC returns the requested top-level declaration" (any ((== "message") . declarationName) analyzed.analysisDeclarations)
       assert "GHC types normalize into the stable type table" (not (Map.null analyzed.analysisTypes))
       assert "successful unsaved analysis has no errors" (null analyzed.analysisDiagnostics)
+      let functionNodes = buildFunctionUniverse analyzed
+          functionId name = case [node.functionIdentity | node <- functionNodes, node.functionName == name] of
+            identifier : _ -> identifier
+            [] -> error ("Missing function node " <> Text.unpack name)
+      validComposition <- checkCompositionWithEngine engine documents (DocumentId "A")
+        (CompositionQuery [functionId "identity", functionId "toText", functionId "textLength"]) >>= either (fail . show) pure
+      assert "GHC validates the entire polymorphic composition chain" (validComposition.compositionValid && validComposition.compositionSignature /= Nothing)
+      invalidComposition <- checkCompositionWithEngine engine documents (DocumentId "A")
+        (CompositionQuery [functionId "toText", functionId "negateInt"]) >>= either (fail . show) pure
+      assert "GHC returns an actual mismatch for incompatible ports" (not invalidComposition.compositionValid && invalidComposition.compositionError /= Nothing)
+      constrained <- checkCompositionWithEngine engine documents (DocumentId "A")
+        (CompositionQuery [functionId "identity", functionId "renderAny"]) >>= either (fail . show) pure
+      assert "composition preserves inferred typeclass constraints" $
+        constrained.compositionValid && maybe False (Text.isInfixOf "Show") constrained.compositionSignature
+      let valueOffset = Text.length (fst (Text.breakOn "value\n" aSource))
+      hover <- queryWithEngine engine documents (DocumentId "A") (PositionQuery HoverQuery valueOffset) >>= either (fail . show) pure
+      assert "hover resolves the imported occurrence and its inferred type" $
+        case hover.resultHover of
+          Just info -> info.hoverName == "value" && not (Text.null info.hoverSignature)
+          Nothing -> False
+      definition <- queryWithEngine engine documents (DocumentId "A") (PositionQuery DefinitionQuery valueOffset) >>= either (fail . show) pure
+      assert "definition resolves into the dependent unsaved module" $
+        any (\target -> target.definitionPath == bPath && target.definitionContentHash == bSnapshot.snapshotContentHash) definition.resultDefinitions
+      endDefinition <- queryWithEngine engine documents (DocumentId "A") (PositionQuery DefinitionQuery (valueOffset + 5)) >>= either (fail . show) pure
+      assert "keyboard definition also works at the end of an identifier" (endDefinition.resultDefinitions == definition.resultDefinitions)
+      completions <- queryWithEngine engine documents (DocumentId "A") (PositionQuery CompletionQuery (valueOffset + 2)) >>= either (fail . show) pure
+      assert "completion uses GHC scope and returns an exact replacement range" $
+        any ((== "value") . (.completionLabel)) completions.resultCompletions
+          && completions.resultReplacementStart == valueOffset
+          && completions.resultReplacementLength == 2
+      let localOffset = Text.length (fst (Text.breakOn "identity input = input" aSource)) + Text.length "identity input = "
+          qualifiedOffset = Text.length (fst (Text.breakOn "L.sort [" aSource))
+          unicodeOffset = Text.length (fst (Text.breakOn "unicodeValue =" aSource)) + Text.length "unicodeValue = \"😀\" ++ "
+      local <- queryWithEngine engine documents (DocumentId "A") (PositionQuery CompletionQuery (localOffset + 2)) >>= either (fail . show) pure
+      assert "local completion respects the typed lexical scope" (any ((== "input") . (.completionLabel)) local.resultCompletions)
+      outside <- queryWithEngine engine documents (DocumentId "A") (PositionQuery CompletionQuery 0) >>= either (fail . show) pure
+      assert "local binders do not leak to module scope" (not (any ((== "input") . (.completionLabel)) outside.resultCompletions))
+      qualified <- queryWithEngine engine documents (DocumentId "A") (PositionQuery CompletionQuery (qualifiedOffset + 4)) >>= either (fail . show) pure
+      assert "completion preserves import aliases" (any ((== "L.sort") . (.completionLabel)) qualified.resultCompletions)
+      unicode <- queryWithEngine engine documents (DocumentId "A") (PositionQuery HoverQuery unicodeOffset) >>= either (fail . show) pure
+      assert "hover uses scalar ranges after a non-BMP character on the same line" $
+        maybe False (\info -> info.hoverName == "value" && info.hoverStart == unicodeOffset && info.hoverLength == 5) unicode.resultHover
+      switched <- queryWithEngine engine documents (DocumentId "B")
+        (PositionQuery HoverQuery (Text.length (fst (Text.breakOn "value ::" bSource)))) >>= either (fail . show) pure
+      assert "queries refresh their typed context when switching open buffers" (switched.resultHover /= Nothing)
+      let shiftedB = snapshot (DocumentId "B") bPath (TextRevision 2) ("-- shifted unsaved dependency\n" <> bSource)
+          shiftedDocuments = Map.insert (DocumentId "B") shiftedB documents
+      shiftedDefinition <- queryWithEngine engine shiftedDocuments (DocumentId "A") (PositionQuery DefinitionQuery valueOffset) >>= either (fail . show) pure
+      assert "dependency edits cannot mix an old definition range with a new content hash" $
+        any (\target -> target.definitionContentHash == shiftedB.snapshotContentHash && target.definitionRange.sourceRangeStart.sourceLine == 3)
+          shiftedDefinition.resultDefinitions
       let semanticsNamed name =
             [ semantics
             | declaration <- analyzed.analysisDeclarations
@@ -339,6 +403,25 @@ analyzeThroughWorker fixture aSnapshot bSnapshot arguments = do
           | actual >= workerGeneration
           , AnalysisCompleted analysis <- envelope.envelopePayload -> Just (actual, analysis)
         _ -> Nothing
+      let query = PositionQuery HoverQuery (Text.length (fst (Text.breakOn "value\n" aSnapshot.snapshotText)))
+          request = RequestId 902
+          queryEnvelope = (documentEnvelope generation workspace aSnapshot (QueryPosition query))
+            { envelopeRequestId = Just request, envelopeSession = Just (snd firstAnalysis).analysisSession }
+      sendAnalysisMessage client queryEnvelope
+      queryResponse <- awaitMatching events $ \case
+        AnalysisWorkerMessage _ response
+          | response.envelopeRequestId == Just request
+          , PositionQueryCompleted answer <- response.envelopePayload -> Just answer
+        _ -> Nothing
+      assert "position queries traverse the real worker protocol with request identity" $
+        queryResponse.resultQuery == query && queryResponse.resultHover /= Nothing
+      sendAnalysisMessage client queryEnvelope {envelopeRequestId = Just (RequestId 903), envelopeRevision = Just (TextRevision 999)}
+      staleRejected <- awaitMatching events $ \case
+        AnalysisWorkerMessage _ response
+          | response.envelopeRequestId == Just (RequestId 903)
+          , WorkerRequestFailed _ rejected <- response.envelopePayload -> Just rejected.requestFailureCode
+        _ -> Nothing
+      assert "the worker rejects a cursor query for an obsolete snapshot" (staleRejected == "stale-query")
       let warmRevision = TextRevision (bSnapshot.snapshotRevision.unTextRevision + 1)
           warmSnapshot =
             snapshot

@@ -449,6 +449,237 @@ typedef NS_ENUM(NSInteger, HaskeLUIDrawingCommandKind) {
 - (void)performAction:(id)sender;
 @end
 
+// A portable text-query hook realized through native hover and completion UI.
+// Character positions cross the bridge as Unicode scalar offsets.
+@interface HaskeLUICompletionTable : NSTableView
+@end
+@implementation HaskeLUICompletionTable
+- (BOOL)acceptsFirstResponder { return NO; }
+@end
+
+@interface HaskeLUIAssistedTextView : NSTextView <NSTableViewDataSource, NSTableViewDelegate>
+@property(nonatomic) BOOL assistanceEnabled;
+@property(nonatomic) uint64_t assistanceRevision;
+@property(nonatomic) uint64_t querySequence;
+@property(nonatomic) int currentQueryKind;
+@property(nonatomic) uint64_t shownHover;
+@property(nonatomic) uint64_t shownCompletion;
+@property(nonatomic) NSUInteger hoverOffset;
+@property(nonatomic, strong) NSTrackingArea *assistanceTracking;
+@property(nonatomic, strong) NSPopover *assistancePopover;
+@property(nonatomic, copy) NSArray<NSString *> *completionWords;
+@property(nonatomic, copy) NSString *completionSource;
+@property(nonatomic) NSRange completionRange;
+@property(nonatomic, strong) NSTableView *completionTable;
+- (void)requestAssistance:(int)kind at:(NSUInteger)offset;
+- (void)invalidateAssistance;
+- (NSUInteger)assistanceOffsetAtPoint:(NSPoint)point;
+- (void)showAssistedCompletions;
+- (void)moveAssistedCompletion:(NSInteger)delta;
+- (void)chooseAssistedCompletion:(id)sender;
+@end
+
+@implementation HaskeLUIAssistedTextView
+- (void)invalidateAssistance {
+  self.querySequence += 1;
+  self.hoverOffset = NSNotFound;
+  [self.assistancePopover close];
+  self.assistancePopover = nil;
+  self.completionWords = nil;
+  self.completionSource = nil;
+  self.completionTable = nil;
+}
+- (void)updateTrackingAreas {
+  [super updateTrackingAreas];
+  if (self.assistanceTracking != nil) [self removeTrackingArea:self.assistanceTracking];
+  self.assistanceTracking = [[NSTrackingArea alloc] initWithRect:NSZeroRect
+      options:(NSTrackingMouseMoved | NSTrackingMouseEnteredAndExited | NSTrackingActiveInKeyWindow | NSTrackingInVisibleRect)
+      owner:self userInfo:nil];
+  [self addTrackingArea:self.assistanceTracking];
+}
+- (void)requestAssistance:(int)kind at:(NSUInteger)offset {
+  if (!self.assistanceEnabled || self.hasMarkedText || offset > self.string.length) return;
+  self.querySequence += 1;
+  [self.assistancePopover close];
+  self.assistancePopover = nil;
+  self.currentQueryKind = kind;
+  self.completionWords = nil;
+  self.completionSource = nil;
+  self.completionTable = nil;
+  HaskeLUIMacActionTarget *target = (HaskeLUIMacActionTarget *)self.delegate;
+  NSUInteger scalar = [[self.string substringToIndex:offset] lengthOfBytesUsingEncoding:NSUTF32LittleEndianStringEncoding] / 4;
+  NSString *payload = [NSString stringWithFormat:@"%llu %llu %lu %d",
+      (unsigned long long)self.querySequence, (unsigned long long)self.assistanceRevision,
+      (unsigned long)scalar, kind];
+  HaskeLUIEmit(HaskeLUIMacEventTextQuery, target.identity, payload);
+}
+- (void)mouseMoved:(NSEvent *)event {
+  [super mouseMoved:event];
+  if (!self.assistanceEnabled || self.completionWords != nil) return;
+  NSPoint point = [self convertPoint:event.locationInWindow fromView:nil];
+  NSUInteger offset = [self assistanceOffsetAtPoint:point];
+  if (offset == NSNotFound) {
+    if (self.hoverOffset != NSNotFound) {
+      [self requestAssistance:3 at:self.selectedRange.location];
+      [self invalidateAssistance];
+    }
+    return;
+  }
+  if (offset == self.hoverOffset) return;
+  self.hoverOffset = offset;
+  [self.assistancePopover close];
+  self.querySequence += 1;
+  uint64_t sequence = self.querySequence;
+  __weak HaskeLUIAssistedTextView *weakSelf = self;
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 350 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+    HaskeLUIAssistedTextView *view = weakSelf;
+    if (view != nil && view.querySequence == sequence && view.window.isKeyWindow)
+      [view requestAssistance:0 at:offset];
+  });
+}
+- (NSUInteger)assistanceOffsetAtPoint:(NSPoint)point {
+  point.x -= self.textContainerOrigin.x;
+  point.y -= self.textContainerOrigin.y;
+  NSUInteger glyph = [self.layoutManager glyphIndexForPoint:point inTextContainer:self.textContainer];
+  if (glyph >= self.layoutManager.numberOfGlyphs) return NSNotFound;
+  NSRect bounds = [self.layoutManager boundingRectForGlyphRange:NSMakeRange(glyph, 1) inTextContainer:self.textContainer];
+  if (!NSPointInRect(point, bounds)) return NSNotFound;
+  return [self.layoutManager characterIndexForGlyphAtIndex:glyph];
+}
+- (void)mouseExited:(NSEvent *)event {
+  [super mouseExited:event];
+  if (self.completionWords != nil) return;
+  if (self.currentQueryKind == 0) [self requestAssistance:3 at:self.selectedRange.location];
+  [self invalidateAssistance];
+}
+- (void)mouseDown:(NSEvent *)event {
+  if (self.assistanceEnabled && (event.modifierFlags & NSEventModifierFlagCommand)) {
+    NSUInteger offset = [self assistanceOffsetAtPoint:[self convertPoint:event.locationInWindow fromView:nil]];
+    if (offset != NSNotFound) [self requestAssistance:1 at:offset];
+    return;
+  }
+  [self requestAssistance:3 at:self.selectedRange.location];
+  [self invalidateAssistance];
+  [super mouseDown:event];
+}
+- (void)keyDown:(NSEvent *)event {
+  NSString *characters = event.charactersIgnoringModifiers;
+  if (self.assistanceEnabled && characters.length > 0) {
+    unichar character = [characters characterAtIndex:0];
+    if (self.completionTable != nil && self.assistancePopover.shown) {
+      if (character == NSUpArrowFunctionKey || character == NSDownArrowFunctionKey) {
+        [self moveAssistedCompletion:character == NSDownArrowFunctionKey ? 1 : -1];
+        return;
+      }
+      if (character == '\r' || character == '\t') {
+        [self chooseAssistedCompletion:nil];
+        return;
+      }
+      [self requestAssistance:3 at:self.selectedRange.location];
+      [self invalidateAssistance];
+      if (character == 0x1b) return;
+    } else if (self.completionWords != nil) {
+      [self invalidateAssistance];
+    }
+    if (character == NSF12FunctionKey) {
+      [self requestAssistance:1 at:self.selectedRange.location];
+      return;
+    }
+    if (character == ' ' && (event.modifierFlags & NSEventModifierFlagControl)) {
+      [self requestAssistance:2 at:self.selectedRange.location];
+      return;
+    }
+  }
+  [super keyDown:event];
+}
+- (void)complete:(id)sender {
+  if (self.assistanceEnabled) {
+    [self requestAssistance:2 at:self.selectedRange.location];
+  } else {
+    [super complete:sender];
+  }
+}
+- (NSInteger)numberOfRowsInTableView:(NSTableView *)tableView {
+  (void)tableView;
+  return self.completionWords.count;
+}
+- (NSView *)tableView:(NSTableView *)tableView viewForTableColumn:(NSTableColumn *)column row:(NSInteger)row {
+  (void)tableView; (void)column;
+  if (row < 0 || row >= (NSInteger)self.completionWords.count) return nil;
+  NSTextField *label = [NSTextField labelWithString:self.completionWords[row]];
+  label.font = [NSFont monospacedSystemFontOfSize:12 weight:NSFontWeightRegular];
+  label.lineBreakMode = NSLineBreakByTruncatingTail;
+  label.toolTip = self.completionWords[row];
+  return label;
+}
+- (void)showAssistedCompletions {
+  if (self.completionWords.count == 0 || self.window == nil) return;
+  CGFloat height = MIN(264, self.completionWords.count * 24 + 4);
+  NSTableView *table = [[HaskeLUICompletionTable alloc] initWithFrame:NSMakeRect(0, 0, 340, height)];
+  NSTableColumn *column = [[NSTableColumn alloc] initWithIdentifier:@"completion"];
+  column.width = 340;
+  [table addTableColumn:column];
+  table.headerView = nil;
+  table.rowHeight = 22;
+  table.dataSource = self;
+  table.delegate = self;
+  table.target = self;
+  table.action = @selector(chooseAssistedCompletion:);
+  table.doubleAction = @selector(chooseAssistedCompletion:);
+  table.allowsEmptySelection = NO;
+  table.accessibilityLabel = @"GHC completions";
+  NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 340, height)];
+  scroll.hasVerticalScroller = YES;
+  scroll.autohidesScrollers = YES;
+  scroll.documentView = table;
+  NSViewController *controller = [[NSViewController alloc] init];
+  controller.view = scroll;
+  NSPopover *popover = [[NSPopover alloc] init];
+  popover.contentViewController = controller;
+  popover.behavior = NSPopoverBehaviorSemitransient;
+  popover.animates = NO;
+  self.completionTable = table;
+  self.assistancePopover = popover;
+  [table selectRowIndexes:[NSIndexSet indexSetWithIndex:0] byExtendingSelection:NO];
+  NSRange glyphs = [self.layoutManager glyphRangeForCharacterRange:self.completionRange actualCharacterRange:NULL];
+  NSRect rect = [self.layoutManager boundingRectForGlyphRange:glyphs inTextContainer:self.textContainer];
+  rect.origin.x += self.textContainerOrigin.x;
+  rect.origin.y += self.textContainerOrigin.y;
+  [popover showRelativeToRect:rect ofView:self preferredEdge:NSRectEdgeMaxY];
+}
+- (void)moveAssistedCompletion:(NSInteger)delta {
+  if (self.completionWords.count == 0) return;
+  NSInteger row = MAX(0, MIN((NSInteger)self.completionWords.count - 1, self.completionTable.selectedRow + delta));
+  [self.completionTable selectRowIndexes:[NSIndexSet indexSetWithIndex:row] byExtendingSelection:NO];
+  [self.completionTable scrollRowToVisible:row];
+}
+- (void)chooseAssistedCompletion:(id)sender {
+  (void)sender;
+  NSInteger row = self.completionTable.selectedRow;
+  if (row >= 0 && row < (NSInteger)self.completionWords.count)
+    [self insertCompletion:self.completionWords[row] forPartialWordRange:self.completionRange movement:NSReturnTextMovement isFinal:YES];
+}
+- (NSRange)rangeForUserCompletion {
+  if (self.assistanceEnabled && self.completionWords != nil) return self.completionRange;
+  return [super rangeForUserCompletion];
+}
+- (void)insertCompletion:(NSString *)word forPartialWordRange:(NSRange)range
+                movement:(NSInteger)movement isFinal:(BOOL)isFinal {
+  if (!self.assistanceEnabled) {
+    [super insertCompletion:word forPartialWordRange:range movement:movement isFinal:isFinal];
+    return;
+  }
+  // Do not mutate the buffer for temporary menu previews. Final insertion uses
+  // NSTextView's ordinary editing path, preserving native undo and IME state.
+  if (isFinal && movement != NSCancelTextMovement && self.completionSource != nil &&
+      [self.string isEqualToString:self.completionSource] && NSEqualRanges(range, self.completionRange) &&
+      !self.hasMarkedText && self.selectedRange.length == 0 && self.selectedRange.location == NSMaxRange(range)) {
+    [self insertText:word replacementRange:range];
+  }
+  if (isFinal) [self invalidateAssistance];
+}
+@end
+
 @implementation HaskeLUIMacActionTarget
 - (void)performAction:(id)sender {
   NSString *payload = self.fixedPayload ?: @"";
@@ -499,7 +730,29 @@ typedef NS_ENUM(NSInteger, HaskeLUIDrawingCommandKind) {
 
 - (void)textDidChange:(NSNotification *)notification {
   NSTextView *editor = notification.object;
+  if ([editor isKindOfClass:HaskeLUIAssistedTextView.class])
+    [(HaskeLUIAssistedTextView *)editor invalidateAssistance];
   HaskeLUIEmit(HaskeLUIMacEventTextChanged, self.identity, editor.string);
+}
+- (void)textViewDidChangeSelection:(NSNotification *)notification {
+  NSTextView *editor = notification.object;
+  if ([editor isKindOfClass:HaskeLUIAssistedTextView.class]) {
+    HaskeLUIAssistedTextView *view = (HaskeLUIAssistedTextView *)editor;
+    if (view.assistanceEnabled && (view.completionWords == nil ||
+        view.selectedRange.length != 0 || view.selectedRange.location != NSMaxRange(view.completionRange))) {
+      [view requestAssistance:3 at:view.selectedRange.location];
+      [view invalidateAssistance];
+    }
+  }
+}
+- (NSArray<NSString *> *)textView:(NSTextView *)view completions:(NSArray<NSString *> *)words
+             forPartialWordRange:(NSRange)range indexOfSelectedItem:(NSInteger *)index {
+  if ([view isKindOfClass:HaskeLUIAssistedTextView.class] &&
+      ((HaskeLUIAssistedTextView *)view).assistanceEnabled) {
+    if (index != NULL) *index = 0;
+    return ((HaskeLUIAssistedTextView *)view).completionWords ?: @[];
+  }
+  return words;
 }
 @end
 
@@ -2104,7 +2357,7 @@ HaskeLUIMacControlRef haskelui_macos_text_editor_create(
   scrollView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
 
   NSRect editorFrame = NSMakeRect(0, 0, frame->width, frame->height);
-  NSTextView *editor = [[NSTextView alloc] initWithFrame:editorFrame];
+  NSTextView *editor = [[HaskeLUIAssistedTextView alloc] initWithFrame:editorFrame];
   editor.string = HaskeLUIString(utf8_text);
   editor.delegate = target;
   editor.richText = NO;
@@ -4338,6 +4591,66 @@ int32_t haskelui_macos_text_editor_navigate(
   return 1;
 }
 
+void haskelui_macos_text_editor_assistance(HaskeLUIMacControlRef reference, int32_t enabled, uint64_t revision) {
+  HaskeLUIAssertMainThread();
+  NSTextView *editor = (NSTextView *)HaskeLUIControl(reference).focusView;
+  if (![editor isKindOfClass:HaskeLUIAssistedTextView.class]) return;
+  HaskeLUIAssistedTextView *view = (HaskeLUIAssistedTextView *)editor;
+  if (view.assistanceRevision != revision || view.assistanceEnabled != (enabled != 0))
+    [view invalidateAssistance];
+  view.assistanceRevision = revision;
+  view.assistanceEnabled = enabled != 0;
+}
+
+void haskelui_macos_text_editor_hover(HaskeLUIMacControlRef reference, uint64_t key,
+    uint64_t location, uint64_t length, const char *text) {
+  HaskeLUIAssertMainThread();
+  NSTextView *editor = (NSTextView *)HaskeLUIControl(reference).focusView;
+  if (![editor isKindOfClass:HaskeLUIAssistedTextView.class]) return;
+  HaskeLUIAssistedTextView *view = (HaskeLUIAssistedTextView *)editor;
+  if (!view.assistanceEnabled || key != view.querySequence || key == view.shownHover ||
+      location > view.string.length || length > view.string.length - location || view.window == nil) return;
+  NSString *message = HaskeLUIString(text);
+  if (message.length == 0) return;
+  view.shownHover = key;
+  NSViewController *controller = [[NSViewController alloc] init];
+  NSTextField *label = [NSTextField wrappingLabelWithString:message];
+  label.font = [NSFont monospacedSystemFontOfSize:12 weight:NSFontWeightRegular];
+  NSSize size = [label sizeThatFits:NSMakeSize(480, CGFLOAT_MAX)];
+  label.frame = NSMakeRect(12, 10, 480, MAX(24, MIN(300, size.height)));
+  NSView *content = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 504, label.frame.size.height + 20)];
+  [content addSubview:label];
+  controller.view = content;
+  NSPopover *popover = [[NSPopover alloc] init];
+  popover.contentViewController = controller;
+  popover.behavior = NSPopoverBehaviorSemitransient;
+  popover.animates = NO;
+  NSRange glyphs = [view.layoutManager glyphRangeForCharacterRange:NSMakeRange(location, length) actualCharacterRange:NULL];
+  NSRect rect = [view.layoutManager boundingRectForGlyphRange:glyphs inTextContainer:view.textContainer];
+  rect.origin.x += view.textContainerOrigin.x;
+  rect.origin.y += view.textContainerOrigin.y;
+  view.assistancePopover = popover;
+  [popover showRelativeToRect:rect ofView:view preferredEdge:NSRectEdgeMaxY];
+}
+
+void haskelui_macos_text_editor_completions(HaskeLUIMacControlRef reference, uint64_t key,
+    uint64_t location, uint64_t length, const char *items) {
+  HaskeLUIAssertMainThread();
+  NSTextView *editor = (NSTextView *)HaskeLUIControl(reference).focusView;
+  if (![editor isKindOfClass:HaskeLUIAssistedTextView.class]) return;
+  HaskeLUIAssistedTextView *view = (HaskeLUIAssistedTextView *)editor;
+  if (!view.assistanceEnabled || key != view.querySequence || key == view.shownCompletion ||
+      location > view.string.length || length > view.string.length - location || view.hasMarkedText ||
+      view.selectedRange.location != location + length || view.selectedRange.length != 0) return;
+  view.shownCompletion = key;
+  NSString *list = HaskeLUIString(items);
+  if (list.length == 0) return;
+  view.completionRange = NSMakeRange(location, length);
+  view.completionSource = view.string;
+  view.completionWords = [list componentsSeparatedByString:@"\n"];
+  [view showAssistedCompletions];
+}
+
 void haskelui_macos_text_editor_end_presentation(HaskeLUIMacControlRef reference) {
   HaskeLUIAssertMainThread();
   HaskeLUIMacControlHandle *handle = HaskeLUIControl(reference);
@@ -5527,6 +5840,57 @@ void haskelui_macos_test_schedule_text_editor_script(
         HaskeLUITestFail(@"Unicode scalar ranges were not translated to the highlighted AppKit range");
       }
     }
+    // Exercise assistance on the actual Unicode editor without emitting edits
+    // into the fixture model. Completion must remain an ordinary undoable edit.
+    HaskeLUIAssistedTextView *assisted = (HaskeLUIAssistedTextView *)editor;
+    id savedDelegate = editor.delegate;
+    NSString *originalSource = [editor.string copy];
+    editor.delegate = nil;
+    haskelui_macos_text_editor_assistance((__bridge HaskeLUIMacControlRef)editorHandle, 1, 7);
+    assisted.querySequence = 700;
+    editor.selectedRange = NSMakeRange(9, 0);
+    haskelui_macos_text_editor_hover((__bridge HaskeLUIMacControlRef)editorHandle, 699, 3, 6, "module :: fixture");
+    haskelui_macos_text_editor_completions((__bridge HaskeLUIMacControlRef)editorHandle, 699, 3, 6, "import");
+    if (assisted.assistancePopover != nil || assisted.completionWords != nil) {
+      HaskeLUITestFail(@"stale native assistance was not discarded");
+    }
+    haskelui_macos_text_editor_hover((__bridge HaskeLUIMacControlRef)editorHandle, 700, 3, 6, "module :: fixture");
+    if (assisted.assistancePopover == nil || !NSEqualRanges(editor.selectedRange, NSMakeRange(9, 0)) ||
+        ![editor.string isEqualToString:originalSource]) {
+      HaskeLUITestFail(@"native hover changed source/selection or did not appear");
+    }
+    [assisted invalidateAssistance];
+    [editor.undoManager removeAllActions];
+    assisted.querySequence = 701;
+    haskelui_macos_text_editor_completions((__bridge HaskeLUIMacControlRef)editorHandle, 701, 3, 6, "import\nmodule");
+    [assisted moveAssistedCompletion:1];
+    if (assisted.completionTable.selectedRow != 1 || ![editor.string isEqualToString:originalSource]) {
+      HaskeLUITestFail(@"completion navigation changed the buffer or lost the selected suggestion");
+    }
+    [assisted moveAssistedCompletion:-1];
+    [assisted chooseAssistedCompletion:nil];
+    [editor breakUndoCoalescing];
+    if (![editor.string isEqualToString:@"😀 import Initial where\n"] || !editor.undoManager.canUndo) {
+      HaskeLUITestFail(@"completion did not replace the Unicode-adjusted range as an undoable native edit");
+    }
+    [editor.undoManager undo];
+    if (![editor.string isEqualToString:originalSource]) {
+      HaskeLUITestFail(@"native undo did not restore the completion source");
+    }
+    assisted.completionSource = originalSource;
+    assisted.completionWords = @[@"import"];
+    assisted.completionRange = NSMakeRange(3, 6);
+    editor.selectedRange = NSMakeRange(0, 0);
+    [assisted insertCompletion:@"import" forPartialWordRange:NSMakeRange(3, 6) movement:NSReturnTextMovement isFinal:YES];
+    if (![editor.string isEqualToString:originalSource]) HaskeLUITestFail(@"completion inserted after the caret moved");
+    assisted.querySequence = 800;
+    haskelui_macos_text_editor_assistance((__bridge HaskeLUIMacControlRef)editorHandle, 1, 8);
+    haskelui_macos_text_editor_hover((__bridge HaskeLUIMacControlRef)editorHandle, 800, 3, 6, "old revision");
+    if (assisted.assistancePopover != nil) HaskeLUITestFail(@"hover survived a revision change");
+    haskelui_macos_text_editor_assistance((__bridge HaskeLUIMacControlRef)editorHandle, 0, 0);
+    [editor.undoManager removeAllActions];
+    editor.delegate = savedDelegate;
+
     NSRange requestedNavigation = NSMakeRange(3, 6);
     if (!haskelui_macos_text_editor_navigate(
             (__bridge HaskeLUIMacControlRef)editorHandle,
@@ -5867,7 +6231,7 @@ void haskelui_macos_test_schedule_drawing_script(
         control.kind != HaskeLUIMacControlKindDrawing ||
         ![control.view isKindOfClass:HaskeLUIDrawingView.class]) {
       HaskeLUITestFail(@"drawing gallery did not create its native drawing surface");
-      [NSApplication.sharedApplication stop:nil];
+      haskelui_macos_stop();
       return;
     }
     HaskeLUIDrawingView *view = (HaskeLUIDrawingView *)control.view;
@@ -5935,7 +6299,7 @@ void haskelui_macos_test_schedule_drawing_script(
       if (view.drawingPresentationGeneration <= initialGeneration) {
         HaskeLUITestFail(@"native drawing pointer input did not update the Haskell model and display list");
       }
-      [NSApplication.sharedApplication stop:nil];
+      haskelui_macos_stop();
     });
   });
 }

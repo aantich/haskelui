@@ -30,6 +30,7 @@ library:
     - VisualHaskell.Analysis.Service
     - VisualHaskell.Diagnostics
     - VisualHaskell.Highlighting
+    - VisualHaskell.FunctionCanvas
     - VisualHaskell.Logging
     - VisualHaskell.Paths
     - VisualHaskell.TrustState

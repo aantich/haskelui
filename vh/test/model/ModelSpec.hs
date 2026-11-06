@@ -23,6 +23,7 @@ import VisualHaskell.Highlighting
   )
 import qualified VisualHaskell.Diagnostics as Diagnostics
 import qualified VisualHaskell.Semantic as Semantic
+import qualified VisualHaskell.FunctionCanvas as FunctionCanvas
 import VisualHaskell.TextMate (defaultTextMateConfiguration)
 import VisualHaskell.WorkspaceState
   ( WorkspaceState (..)
@@ -36,6 +37,27 @@ import HaskeLUI.Core
 
 main :: IO ()
 main = do
+  let firstFunction = Semantic.DeclarationId "function:first"
+      secondFunction = Semantic.DeclarationId "function:second"
+      canvas = FunctionCanvas.connectFunctions 1 2
+        (FunctionCanvas.addFunction secondFunction (FunctionCanvas.addFunction firstFunction FunctionCanvas.emptyFunctionCanvas))
+      nodes = [Semantic.FunctionNode firstFunction "first" () "Int -> String" "Int" "String",
+               Semantic.FunctionNode secondFunction "second" () "String -> Int" "String" "Int"]
+  assertEqual "visual composition follows output-to-input order" (Right [firstFunction, secondFunction]) (FunctionCanvas.compositionChain canvas)
+  assertEqual "cyclic connections do not mutate the chain" canvas.canvasEdges
+    (FunctionCanvas.connectFunctions 2 1 canvas).canvasEdges
+  let retained = FunctionCanvas.retainFunctions [firstFunction] canvas
+  assertEqual "removing a source declaration removes its card" [(1,firstFunction)] retained.canvasNodes
+  assertEqual "removing a source declaration removes dangling wires" [] retained.canvasEdges
+  case FunctionCanvas.functionCanvasSurface (ElementKey 900) LightColorScheme nodes (Just True) canvas of
+    DrawingSurface surface -> do
+      assertEqual "function canvas drawing is valid" [] (validateDrawing surface.drawingSurfaceDrawing)
+      assertEqual "function canvas hit regions are valid" [] (validateDrawingHitTest surface.drawingSurfaceHitTest)
+      case FunctionCanvas.functionCanvasSurface (ElementKey 900) LightColorScheme nodes (Just False) canvas of
+        DrawingSurface rejected -> assert "async compatibility changes invalidate the drawing cache"
+          (surface.drawingSurfaceRevision /= rejected.drawingSurfaceRevision)
+        _ -> error "expected rejected function drawing surface"
+    _ -> error "expected function drawing surface"
   let workspaceState =
         WorkspaceState
           { workspaceOpenFiles = ["src/Main.hs", "README.md"]
@@ -169,12 +191,13 @@ main = do
     )
   assertEqual
     "the inspector exposes document, problems, types, and functions tabs"
-    ["Document", "Problems (0)", "Types", "Functions"]
+    ["Outline", "Document", "Problems (0)", "Types", "Functions"]
     (inspectorTabTitles initialView.appWindows)
   assert
     "every inspector tab has one shared portable layout root"
     ( case inspectorTabControlForests initialView.appWindows of
         [ [LayoutContainer {}]
+          , [LayoutContainer {}]
           , [LayoutContainer {}]
           , [LayoutContainer {}]
           , [LayoutContainer {}]
@@ -259,7 +282,7 @@ main = do
           (inspectorTabControls "Functions" (application.appView functionsDebugModel).appWindows)
   assert
     "Functions pane debug mode is independent and exposes its honest preview contract"
-    ( "function-universe/preview"
+    ( "function-universe/v1"
         `Text.isInfixOf` attributedTextValue functionsDebugProjection.richTextValue
         && null
           [ richText

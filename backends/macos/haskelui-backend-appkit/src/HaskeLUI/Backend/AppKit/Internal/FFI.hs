@@ -44,6 +44,9 @@ module HaskeLUI.Backend.AppKit.Internal.FFI
   , c_textEditorBeginPresentation
   , c_textEditorEndPresentation
   , c_textEditorNavigate
+  , c_textEditorAssistance
+  , c_textEditorHover
+  , c_textEditorCompletions
   , c_textEditorSetBaseStyle
   , c_createButton
   , c_createLabel
@@ -663,6 +666,13 @@ foreign import ccall unsafe "haskelui_macos_text_editor_end_presentation"
 
 foreign import ccall unsafe "haskelui_macos_text_editor_navigate"
   c_textEditorNavigate :: Ptr MacControlHandle -> Word64 -> Word64 -> CInt -> CInt -> IO CInt
+
+foreign import ccall unsafe "haskelui_macos_text_editor_assistance"
+  c_textEditorAssistance :: Ptr MacControlHandle -> CInt -> Word64 -> IO ()
+foreign import ccall unsafe "haskelui_macos_text_editor_hover"
+  c_textEditorHover :: Ptr MacControlHandle -> Word64 -> Word64 -> Word64 -> CString -> IO ()
+foreign import ccall safe "haskelui_macos_text_editor_completions"
+  c_textEditorCompletions :: Ptr MacControlHandle -> Word64 -> Word64 -> Word64 -> CString -> IO ()
 
 foreign import ccall unsafe "haskelui_macos_control_set_frame"
   c_controlSetFrame :: Ptr MacControlHandle -> Ptr CMacRect -> IO ()

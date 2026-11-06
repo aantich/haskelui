@@ -17,7 +17,7 @@ import System.IO
   , openBinaryTempFile
   )
 import VisualHaskell.Analysis.Protocol
-import VisualHaskell.Semantic (WorkspaceGeneration (..))
+import VisualHaskell.Semantic (DeclarationId (..), WorkspaceGeneration (..))
 
 main :: IO ()
 main = do
@@ -30,6 +30,15 @@ main = do
           )
   assertEqual "client hello semantic golden" (decode fixture :: Maybe Value) (decode (encode message))
   assertEqual "client hello JSON round trip" (Just message) (decode (encode message))
+  let query = QueryPosition (PositionQuery CompletionQuery 17)
+      result = PositionQueryCompleted (PositionResult (PositionQuery HoverQuery 5)
+        (Just (HoverInfo "map" "(a -> b) -> [a] -> [b]" (Just "Prelude") 4 3)) [] [] 4 0)
+  assertEqual "position query wire round trip" (Just query) (decode (encode query))
+  assertEqual "position result wire round trip" (Just result) (decode (encode result))
+  let composition = CompositionQuery [DeclarationId "first", DeclarationId "second"]
+      checked = CompositionChecked (CompositionResult composition True (Just "Int -> String") Nothing)
+  assertEqual "composition request wire round trip" (Just (CheckComposition composition)) (decode (encode (CheckComposition composition)))
+  assertEqual "composition result wire round trip" (Just checked) (decode (encode checked))
   assertEqual
     "unknown capabilities survive minor-version negotiation"
     (Just (UnsupportedCapability "future-capability"))

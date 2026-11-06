@@ -8,6 +8,8 @@ module VisualHaskell.Analysis.Ghc910
   , discoverCompilerInvocation
   , startAnalysisEngine
   , stopAnalysisEngine
+  , queryWithEngine
+  , checkCompositionWithEngine
   ) where
 
 import VisualHaskell.Analysis.Ghc910.Compat

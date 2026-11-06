@@ -27,6 +27,7 @@ library:
     - VisualHaskell.Semantic.Coordinates
     - VisualHaskell.Semantic.TypeUniverse
     - VisualHaskell.Semantic.Types
+    - VisualHaskell.Semantic.FunctionUniverse
 
 tests:
   visual-haskell-semantic-model-test:

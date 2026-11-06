@@ -26,6 +26,7 @@ library:
     - VisualHaskell.Analysis.Protocol
     - VisualHaskell.Analysis.Protocol.Framing
     - VisualHaskell.Analysis.Protocol.Types
+    - VisualHaskell.Analysis.Protocol.Queries
 
 extra-source-files:
   - test/fixtures/client-hello.json

@@ -63,6 +63,8 @@ main = do
                 , DiagnosticsCapability
                 , DocumentDeclarationsCapability
                 , StructuredTypesCapability
+                , PositionQueriesCapability
+                , CompositionChecksCapability
                 ]
             , workerMaximumFrameBytes = maximumFrameBytes defaultFrameLimits
             }
@@ -125,6 +127,40 @@ loop options state = do
           crashOnceIfRequested options
           updated <- analyze options envelope state document
           loop options updated
+        QueryPosition query -> do
+          case (envelope.envelopeDocument, state.workerAnalysisEngine) of
+            (Just document, Just engine)
+              | envelope.envelopeWorkspace == state.workerWorkspace
+              , Just snapshot <- Map.lookup document state.workerDocuments
+              , envelope.envelopeRevision == Just snapshot.snapshotRevision
+              , envelope.envelopeContentHash == Just snapshot.snapshotContentHash
+              , Just component <- state.workerComponent
+              , envelope.envelopeSession == Just component.componentSession -> do
+                  attempted <- try (queryWithEngine engine state.workerDocuments document query)
+                  case attempted of
+                    Left (exception :: SomeException) ->
+                      sendFailure envelope "query-exception" (Text.pack (displayException exception)) True
+                    Right (Left failure) ->
+                      sendFailure envelope failure.failureCode failure.failureMessage failure.failureRecoverable
+                    Right (Right result) -> send envelope (PositionQueryCompleted result)
+            _ -> sendFailure envelope "stale-query" "The queried document or compiler session has changed" True
+          loop options state
+        CheckComposition query -> do
+          case (envelope.envelopeDocument, state.workerAnalysisEngine) of
+            (Just document, Just engine)
+              | envelope.envelopeWorkspace == state.workerWorkspace
+              , Just snapshot <- Map.lookup document state.workerDocuments
+              , envelope.envelopeRevision == Just snapshot.snapshotRevision
+              , envelope.envelopeContentHash == Just snapshot.snapshotContentHash
+              , Just component <- state.workerComponent
+              , envelope.envelopeSession == Just component.componentSession -> do
+                  attempted <- try (checkCompositionWithEngine engine state.workerDocuments document query)
+                  case attempted of
+                    Left (exception :: SomeException) -> sendFailure envelope "composition-exception" (Text.pack (displayException exception)) True
+                    Right (Left failure) -> sendFailure envelope failure.failureCode failure.failureMessage failure.failureRecoverable
+                    Right (Right result) -> send envelope (CompositionChecked result)
+            _ -> sendFailure envelope "stale-composition" "The composed document or session changed" True
+          loop options state
         CancelRequest _ -> do
           sendFailure envelope "cancellation-unsupported" "This feasibility worker completes one request at a time" True
           loop options state
@@ -334,6 +370,8 @@ clientMessageFields message =
     UpdateDocumentSnapshot snapshot -> snapshotFields "update-document" snapshot
     CloseDocument document -> [("kind", "close-document"), ("document", document.unDocumentId)]
     AnalyzeDocument document -> [("kind", "analyze-document"), ("document", document.unDocumentId)]
+    QueryPosition query -> [("kind", "query-position"), ("query", Text.pack (show query))]
+    CheckComposition query -> [("kind", "check-composition"), ("query", Text.pack (show query))]
     CancelRequest request -> [("kind", "cancel-request"), ("request", Text.pack (show request))]
     ReloadConfiguration -> [("kind", "reload-configuration")]
     ShutdownWorker -> [("kind", "shutdown-worker")]

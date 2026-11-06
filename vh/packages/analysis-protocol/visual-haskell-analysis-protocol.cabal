@@ -28,6 +28,7 @@ library
       VisualHaskell.Analysis.Protocol
       VisualHaskell.Analysis.Protocol.Framing
       VisualHaskell.Analysis.Protocol.Types
+      VisualHaskell.Analysis.Protocol.Queries
   other-modules:
       Paths_visual_haskell_analysis_protocol
   autogen-modules:

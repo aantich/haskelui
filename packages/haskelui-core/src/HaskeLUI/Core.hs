@@ -103,6 +103,11 @@ module HaskeLUI.Core
   , TextLayerKey (..)
   , TextNavigationKey (..)
   , TextNavigationRequest (..)
+  , TextQueryKind (..)
+  , TextQueryRequest (..)
+  , TextAssistance (..)
+  , TextHoverPresentation (..)
+  , TextCompletionPresentation (..)
   , TextRange (..)
   , TextRevision (..)
   , TextRun (..)
@@ -399,6 +404,40 @@ data TextNavigationRequest = TextNavigationRequest
   }
   deriving stock (Eq, Show)
 
+-- | Optional language-neutral editor assistance. Transient pointer/caret
+-- state stays native; requests and responses identify one exact interaction.
+data TextQueryKind = TextHoverQuery | TextDefinitionQuery | TextCompletionQuery | TextDismissQuery
+  deriving stock (Eq, Ord, Show)
+
+data TextQueryRequest = TextQueryRequest
+  { textQueryKey :: !Word64
+  , textQueryRevision :: !TextRevision
+  , textQueryOffset :: !Int
+  , textQueryKind :: !TextQueryKind
+  }
+  deriving stock (Eq, Show)
+
+data TextHoverPresentation = TextHoverPresentation
+  { textHoverKey :: !Word64
+  , textHoverRange :: !TextRange
+  , textHoverContent :: !Text
+  }
+  deriving stock (Eq, Show)
+
+data TextCompletionPresentation = TextCompletionPresentation
+  { textCompletionKey :: !Word64
+  , textCompletionRange :: !TextRange
+  , textCompletionItems :: ![Text]
+  }
+  deriving stock (Eq, Show)
+
+data TextAssistance = TextAssistance
+  { textAssistanceRevision :: !TextRevision
+  , textAssistanceHover :: !(Maybe TextHoverPresentation)
+  , textAssistanceCompletion :: !(Maybe TextCompletionPresentation)
+  }
+  deriving stock (Eq, Show)
+
 data TextEditorSpec = TextEditorSpec
   { textEditorKey :: !ElementKey
   , textEditorFrame :: !Rect
@@ -407,6 +446,7 @@ data TextEditorSpec = TextEditorSpec
   , textEditorBaseStyle :: !TextStyle
   , textEditorLayers :: ![TextLayer]
   , textEditorNavigation :: !(Maybe TextNavigationRequest)
+  , textEditorAssistance :: !(Maybe TextAssistance)
   , textEditorFocused :: !Bool
   }
   deriving stock (Eq, Show)
@@ -1828,6 +1868,7 @@ resolveAppViewLayoutsWithAllocations measurements allocations desiredView =
 data UIEvent
   = CommandInvoked !CommandId
   | TextChanged !ElementKey !Text
+  | TextQueryRequested !ElementKey !TextQueryRequest
   | ControlInvoked !ElementKey
   | ToggleChanged !ElementKey !ToggleValue
   | ChoiceChanged !ElementKey !(Maybe ChoiceKey)

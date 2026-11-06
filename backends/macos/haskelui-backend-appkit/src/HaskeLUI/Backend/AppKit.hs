@@ -217,6 +217,16 @@ receiveEvent dispatch drainRuntime _ eventKind identity textPointer =
       payload <- decodeText textPointer
       forM_ (decodePaneState payload) $ \paneState ->
         dispatch (PaneStateChanged (PaneKey identity) paneState)
+    23 -> do
+      payload <- decodeText textPointer
+      case Text.words payload of
+        [keyText, revisionText, offsetText, kindText]
+          | Just key <- readText keyText
+          , Just revision <- readText revisionText
+          , Just offset <- readText offsetText
+          , Just kind <- lookup kindText [("0", TextHoverQuery), ("1", TextDefinitionQuery), ("2", TextCompletionQuery), ("3", TextDismissQuery)] ->
+              dispatch (TextQueryRequested (ElementKey identity) (TextQueryRequest key (TextRevision revision) offset kind))
+        _ -> pure ()
     _ -> pure ()
 
 receiveDrawingInput
@@ -1615,11 +1625,13 @@ textEditorPresentationChanged (TextEditor old) (TextEditor new) =
     || old.textEditorRevision /= new.textEditorRevision
     || old.textEditorBaseStyle /= new.textEditorBaseStyle
     || old.textEditorLayers /= new.textEditorLayers
+    || old.textEditorAssistance /= new.textEditorAssistance
 textEditorPresentationChanged (RichTextEditor old) (RichTextEditor new) =
   old.textEditorText /= new.textEditorText
     || old.textEditorRevision /= new.textEditorRevision
     || old.textEditorBaseStyle /= new.textEditorBaseStyle
     || old.textEditorLayers /= new.textEditorLayers
+    || old.textEditorAssistance /= new.textEditorAssistance
 textEditorPresentationChanged _ _ = False
 
 textEditorNavigationChanged :: Control -> Control -> Bool
@@ -1633,6 +1645,7 @@ textEditorNavigationChanged _ _ = False
 
 applyTextEditorPresentation :: Ptr MacControlHandle -> TextEditorSpec -> IO ()
 applyTextEditorPresentation handle editor = do
+  applyTextEditorAssistance handle editor
   c_textEditorBeginPresentation handle
   withCTextStyle editor.textEditorBaseStyle (c_textEditorSetBaseStyle handle)
   let scalarLength = Text.length editor.textEditorText
@@ -1665,6 +1678,30 @@ applyTextEditorPresentation handle editor = do
   where
     advanceUtf16 offset character =
       offset + if ord character > 0xFFFF then 2 else 1
+
+applyTextEditorAssistance :: Ptr MacControlHandle -> TextEditorSpec -> IO ()
+applyTextEditorAssistance handle editor = do
+  let current = case editor.textEditorAssistance of
+        Just assistance | assistance.textAssistanceRevision == editor.textEditorRevision -> Just assistance
+        _ -> Nothing
+  c_textEditorAssistance handle (booleanInt (current /= Nothing)) editor.textEditorRevision.unTextRevision
+  forM_ current $ \assistance -> do
+    forM_ assistance.textAssistanceHover $ \hover ->
+      withRange hover.textHoverRange $ \start lengthValue ->
+        withText hover.textHoverContent (c_textEditorHover handle hover.textHoverKey start lengthValue)
+    forM_ assistance.textAssistanceCompletion $ \completion ->
+      withRange completion.textCompletionRange $ \start lengthValue ->
+        withText (Text.intercalate "\n" completion.textCompletionItems)
+          (c_textEditorCompletions handle completion.textCompletionKey start lengthValue)
+  where
+    offsets = Map.fromDistinctAscList (zip [0 :: Int ..] (scanl (\offset c -> offset + if ord c > 0xFFFF then 2 else 1) 0 (Text.unpack editor.textEditorText)))
+    withRange :: TextRange -> (Word64 -> Word64 -> IO ()) -> IO ()
+    withRange range operation
+      | range.textRangeStart < 0 || range.textRangeLength < 0 = pure ()
+      | otherwise =
+          case (Map.lookup range.textRangeStart offsets, Map.lookup (range.textRangeStart + range.textRangeLength) offsets) of
+            (Just start, Just end) | end >= start -> operation start (end - start)
+            _ -> pure ()
 
 applyTextEditorNavigation :: Ptr MacControlHandle -> TextEditorSpec -> IO ()
 applyTextEditorNavigation handle editor =

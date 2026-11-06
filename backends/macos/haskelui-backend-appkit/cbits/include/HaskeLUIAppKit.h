@@ -33,7 +33,8 @@ typedef enum HaskeLUIMacEventKind {
   /* Backend-private wakeup; it is never exposed as a HaskeLUI UIEvent. */
   HaskeLUIMacEventRuntimeWake = 20,
   HaskeLUIMacEventSystemColorSchemeChanged = 21,
-  HaskeLUIMacEventPaneStateChanged = 22
+  HaskeLUIMacEventPaneStateChanged = 22,
+  HaskeLUIMacEventTextQuery = 23
 } HaskeLUIMacEventKind;
 
 typedef enum HaskeLUIMacCatalogControlKind {
@@ -422,6 +423,9 @@ int32_t haskelui_macos_text_editor_navigate(
     int32_t select_range,
     int32_t focus_editor);
 void haskelui_macos_text_editor_end_presentation(HaskeLUIMacControlRef control);
+void haskelui_macos_text_editor_assistance(HaskeLUIMacControlRef control, int32_t enabled, uint64_t revision);
+void haskelui_macos_text_editor_hover(HaskeLUIMacControlRef control, uint64_t key, uint64_t location, uint64_t length, const char *text);
+void haskelui_macos_text_editor_completions(HaskeLUIMacControlRef control, uint64_t key, uint64_t location, uint64_t length, const char *items);
 void haskelui_macos_control_measure(
     HaskeLUIMacControlRef control,
     double maximum_width,

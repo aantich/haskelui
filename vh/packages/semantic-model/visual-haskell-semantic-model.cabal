@@ -27,6 +27,7 @@ library
       VisualHaskell.Semantic.Coordinates
       VisualHaskell.Semantic.TypeUniverse
       VisualHaskell.Semantic.Types
+      VisualHaskell.Semantic.FunctionUniverse
   other-modules:
       Paths_visual_haskell_semantic_model
   autogen-modules:

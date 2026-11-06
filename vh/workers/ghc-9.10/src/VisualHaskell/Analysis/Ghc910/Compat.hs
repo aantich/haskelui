@@ -12,6 +12,8 @@ module VisualHaskell.Analysis.Ghc910.Compat
   , analysisEngineIsRunning
   , startAnalysisEngine
   , stopAnalysisEngine
+  , queryWithEngine
+  , checkCompositionWithEngine
   ) where
 
 import Control.Concurrent.Async
@@ -33,7 +35,7 @@ import Control.Concurrent.STM
   , takeTMVar
   , writeTQueue
   )
-import Control.Exception (bracket, displayException)
+import Control.Exception (bracket, displayException, try, IOException)
 import Control.Monad (forM, forM_, void)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (State, execState, get, modify')
@@ -44,14 +46,22 @@ import Data.IORef
   , readIORef
   , writeIORef
   )
-import Data.List (find)
+import Data.List (find, sortOn)
+import Data.Char (isAlphaNum)
+import qualified Data.Set as Set
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (catMaybes)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.IO as TextIO
 import Data.Time.Clock (UTCTime, getCurrentTime)
 import qualified GHC
+import qualified GHC.Iface.Ext.Ast as Hie
+import qualified GHC.Iface.Ext.Types as Hie
+import qualified GHC.Iface.Ext.Utils as Hie
+import qualified GHC.Tc.Types as Tc
+import qualified GHC.Types.Name.Reader as Reader
 import GHC.Builtin.Types (listTyCon)
 import GHC.Core.Class (classMethods, classSCTheta)
 import GHC.Core.ConLike (ConLike (..))
@@ -84,6 +94,7 @@ import GHC.Core.Type
   , splitTyConAppNoView_maybe
   )
 import GHC.Data.StringBuffer (stringToStringBuffer)
+import qualified GHC.Data.Strict as Strict
 import GHC.Driver.Monad (pushLogHookM)
 import GHC.Types.Error
   ( DiagnosticCode
@@ -144,9 +155,10 @@ import HIE.Bios.Environment (initSession)
 import HIE.Bios.Types (ComponentOptions (..))
 import Language.Haskell.Syntax.Basic (FieldLabelString (..))
 import Language.Haskell.Syntax.Module.Name (moduleNameString)
-import System.FilePath (normalise)
+import System.FilePath (isAbsolute, normalise, (</>))
 import VisualHaskell.Analysis.Ghc910.Types
 import VisualHaskell.Semantic
+import VisualHaskell.Analysis.Protocol.Queries
 
 -- | A single component-scoped GHC session. The worker thread owns the Ghc
 -- monad for its entire lifetime; callers communicate through typed requests.
@@ -162,6 +174,18 @@ data EngineRequest = EngineRequest
   , requestDocument :: !DocumentId
   , requestGeneration :: !WorkspaceGeneration
   , requestResponse :: !(TMVar (Either GhcAnalysisFailure (AnalysisSnapshot RevisionedSourceRange)))
+  }
+  | EngineQuery !(Map DocumentId DocumentSnapshot) !DocumentId !PositionQuery
+      !(TMVar (Either GhcAnalysisFailure PositionResult))
+  | EngineComposition !(Map DocumentId DocumentSnapshot) !DocumentId !CompositionQuery
+      !(TMVar (Either GhcAnalysisFailure CompositionResult))
+
+data QueryContext = QueryContext
+  { contextDocument :: !DocumentSnapshot
+  , contextVersions :: !(Map DocumentId (FilePath, TextRevision, ContentHash))
+  , contextOccurrences :: ![(Int, Int, Name, Maybe Type)]
+  , contextCandidates :: ![CompletionCandidate]
+  , contextLocals :: ![(CompletionCandidate, [(Int, Int)])]
   }
 
 data TargetVersion = TargetVersion
@@ -197,7 +221,7 @@ startAnalysisEngine invocation = do
         captureReference <- liftIO (newIORef Nothing)
         pushLogHookM (const (captureCurrentLog captureReference))
         liftIO (atomically (putTMVar ready ()))
-        engineLoop invocation captureReference requests Map.empty
+        engineLoop invocation captureReference requests Map.empty Nothing
   startup <- race (atomically (takeTMVar ready)) (waitCatch worker)
   case startup of
     Left () ->
@@ -271,19 +295,226 @@ engineLoop
   -> IORef DiagnosticCapture
   -> TQueue EngineRequest
   -> TargetCache
+  -> Maybe QueryContext
   -> GHC.Ghc ()
-engineLoop invocation captureReference requests targetCache = do
+engineLoop invocation captureReference requests targetCache queryContext = do
   request <- liftIO (atomically (readTQueue requests))
-  (result, updatedTargetCache) <-
-    analyzeInCurrentSession
-      invocation
-      captureReference
-      targetCache
-      request.requestDocuments
-      request.requestDocument
-      request.requestGeneration
-  liftIO (atomically (putTMVar request.requestResponse result))
-  engineLoop invocation captureReference requests updatedTargetCache
+  case request of
+    EngineComposition documents document query response -> do
+      (currentContext, updatedTargets) <- prepareQueryContext invocation captureReference targetCache documents document False queryContext
+      result <- answerComposition documents document query currentContext
+      liftIO (atomically (putTMVar response result))
+      engineLoop invocation captureReference requests updatedTargets currentContext
+    EngineQuery documents document query response -> do
+      (currentContext, updatedTargets) <- prepareQueryContext invocation captureReference targetCache documents document (query.queryKind == CompletionQuery) queryContext
+      result <- answerQuery invocation.invocationComponentRoot documents document query currentContext
+      liftIO (atomically (putTMVar response result))
+      engineLoop invocation captureReference requests updatedTargets currentContext
+    EngineRequest {} -> do
+      (result, updatedTargetCache) <-
+        analyzeInCurrentSession invocation captureReference targetCache
+          request.requestDocuments request.requestDocument request.requestGeneration
+      freshContext <- case result of
+        Right snapshot | snapshot.analysisCompleteness == Typechecked ->
+          case Map.lookup request.requestDocument request.requestDocuments of
+            Just document -> GHC.handleSourceError (const (pure Nothing)) (buildQueryContext request.requestDocuments document)
+            Nothing -> pure Nothing
+        _ -> pure Nothing
+      let retained = case freshContext of
+            Just context -> Just context
+            Nothing -> queryContext
+      liftIO (atomically (putTMVar request.requestResponse result))
+      engineLoop invocation captureReference requests updatedTargetCache retained
+
+-- Queries can target another open buffer than the last background analysis.
+-- Reuse the same GHC session, but refresh its context before answering. Tracking
+-- every open target also prevents a definition span from being combined with
+-- the hash of a newer, unsaved dependency.
+prepareQueryContext
+  :: CompilerInvocation -> IORef DiagnosticCapture -> TargetCache
+  -> Map DocumentId DocumentSnapshot -> DocumentId -> Bool -> Maybe QueryContext
+  -> GHC.Ghc (Maybe QueryContext, TargetCache)
+prepareQueryContext invocation capture targets documents document allowLastGood context
+  | Just current <- context
+  , current.contextDocument.snapshotDocumentId == document
+  , allowLastGood || current.contextVersions == documentVersions documents = pure (context, targets)
+  | otherwise = do
+      (result, updatedTargets) <- analyzeInCurrentSession invocation capture targets documents document (WorkspaceGeneration 0)
+      fresh <- case (result, Map.lookup document documents) of
+        (Right analysis, Just snapshot) | analysis.analysisCompleteness == Typechecked ->
+          GHC.handleSourceError (const (pure Nothing)) (buildQueryContext documents snapshot)
+        _ -> pure Nothing
+      pure (case fresh of Just value -> Just value; Nothing -> context, updatedTargets)
+
+documentVersions :: Map DocumentId DocumentSnapshot -> Map DocumentId (FilePath, TextRevision, ContentHash)
+documentVersions = Map.map (\snapshot -> (snapshot.snapshotPath, snapshot.snapshotRevision, snapshot.snapshotContentHash))
+
+queryWithEngine
+  :: AnalysisEngine -> Map DocumentId DocumentSnapshot -> DocumentId -> PositionQuery
+  -> IO (Either GhcAnalysisFailure PositionResult)
+queryWithEngine engine documents document query = do
+  response <- newEmptyTMVarIO
+  atomically (writeTQueue engine.engineRequests (EngineQuery documents document query response))
+  completed <- race (atomically (takeTMVar response)) (waitCatch engine.engineWorker)
+  pure $ case completed of
+    Left result -> result
+    Right _ -> Left (failure "ghc-session-terminated" "Compiler query session stopped" True)
+
+checkCompositionWithEngine
+  :: AnalysisEngine -> Map DocumentId DocumentSnapshot -> DocumentId -> CompositionQuery
+  -> IO (Either GhcAnalysisFailure CompositionResult)
+checkCompositionWithEngine engine documents document query = do
+  response <- newEmptyTMVarIO
+  atomically (writeTQueue engine.engineRequests (EngineComposition documents document query response))
+  completed <- race (atomically (takeTMVar response)) (waitCatch engine.engineWorker)
+  pure $ case completed of
+    Left result -> result
+    Right _ -> Left (failure "ghc-session-terminated" "Compiler composition session stopped" True)
+
+answerComposition
+  :: Map DocumentId DocumentSnapshot -> DocumentId -> CompositionQuery -> Maybe QueryContext
+  -> GHC.Ghc (Either GhcAnalysisFailure CompositionResult)
+answerComposition documents document query context = case (Map.lookup document documents, context) of
+  (Just snapshot, Just current)
+    | current.contextDocument == snapshot
+    , current.contextVersions == documentVersions documents
+    , length query.compositionFunctions >= 2
+    , length query.compositionFunctions <= 32 -> do
+        graph <- GHC.getModuleGraph
+        case find (\summary -> fmap normalise (GHC.ml_hs_file (GHC.ms_location summary)) == Just (normalise snapshot.snapshotPath)) (GHC.mgModSummaries graph) of
+          Nothing -> pure unavailable
+          Just summary -> do
+            info <- GHC.getModuleInfo (GHC.ms_mod summary)
+            let names = maybe [] (maybe [] id . GHC.modInfoTopLevelScope) info
+                declared = Map.fromList
+                  [(DeclarationId ("ghc:" <> stableNameIdentity name), nameText name) | name <- names,
+                    sourceRangeFor snapshot (nameSrcSpan name) /= Nothing]
+            case traverse (`Map.lookup` declared) query.compositionFunctions of
+              Nothing -> pure unavailable
+              Just functions -> GHC.handleSourceError
+                (\exception -> pure (Right (CompositionResult query False Nothing (Just (Text.pack (show exception)))))) $ do
+                  GHC.setContext [GHC.IIModule (GHC.ms_mod_name summary)]
+                  let body = foldl (\input function -> "(" <> function <> ") (" <> input <> ")") "vhInput" functions
+                  inferred <- GHC.exprType GHC.TM_Inst (Text.unpack ("(\\vhInput -> " <> body <> ")"))
+                  pure (Right (CompositionResult query True (Just (renderType inferred)) Nothing))
+  _ -> pure unavailable
+  where
+    unavailable = Left (failure "composition-unavailable" "Composition requires current, successfully typechecked function declarations" True)
+
+buildQueryContext :: Map DocumentId DocumentSnapshot -> DocumentSnapshot -> GHC.Ghc (Maybe QueryContext)
+buildQueryContext documents snapshot = do
+  graph <- GHC.getModuleGraph
+  case find (\s -> fmap normalise (GHC.ml_hs_file (GHC.ms_location s)) == Just (normalise snapshot.snapshotPath)) (GHC.mgModSummaries graph) of
+    Nothing -> pure Nothing
+    Just summary -> do
+      parsed <- GHC.parseModule summary
+      typed <- GHC.typecheckModule parsed
+      case GHC.tm_renamed_source typed of
+        Nothing -> pure Nothing
+        Just renamed -> do
+          let (environment, _) = GHC.tm_internals_ typed
+              asts = Hie.enrichHie (GHC.tm_typechecked_source typed) renamed
+                (Tc.tcg_ev_binds environment) (Tc.tcg_insts environment) (Tc.tcg_tcs environment)
+              index = buildCoordinateIndex snapshot.snapshotRevision snapshot.snapshotText
+              collect node =
+                let info = Hie.nodeInfo node
+                    range = realSourceRange snapshot.snapshotRevision (Hie.nodeSpan node)
+                    offsets = (,) <$> positionToScalarOffset index range.sourceRangeStart
+                                  <*> positionToScalarOffset index range.sourceRangeEnd
+                    here = case offsets of
+                      Right (start, end) ->
+                        [ (start, end, name, Hie.identType details)
+                        | (Right name, details) <- Map.toList (Hie.nodeIdentifiers info)
+                        , not (Set.null (Hie.identInfo details))
+                        ]
+                      Left _ -> []
+                 in here <> concatMap collect (Hie.nodeChildren node)
+              occurrences = concatMap collect (Map.elems (Hie.getAsts asts))
+          moduleInfo <- GHC.getModuleInfo (GHC.ms_mod summary)
+          let globals = maybe [] (maybe [] Reader.globalRdrEnvElts . GHC.modInfoRdrEnv) moduleInfo
+          candidates <- forM globals $ \entry -> do
+            thing <- GHC.lookupName (Reader.greName entry)
+            let signature = maybe "" (maybe "" renderType . typeOfThing) thing
+            pure [CompletionCandidate (Text.pack (showSDocUnsafe (ppr reader))) signature | reader <- Reader.greRdrNames entry]
+          let scopeRanges Hie.ModuleScope = [(0, Text.length snapshot.snapshotText)]
+              scopeRanges (Hie.LocalScope spanValue) = case sourceRangeFor snapshot (RealSrcSpan spanValue Strict.Nothing) of
+                Just range -> case (,) <$> positionToScalarOffset index range.sourceRangeStart <*> positionToScalarOffset index range.sourceRangeEnd of
+                  Right offsets -> [offsets]
+                  Left _ -> []
+                Nothing -> []
+              scopeRanges Hie.NoScope = []
+              bindingScopes context = case context of
+                Hie.ValBind _ scope _ -> scopeRanges scope
+                Hie.PatternBind first second _ -> scopeRanges first <> scopeRanges second
+                Hie.TyVarBind scope _ -> scopeRanges scope
+                _ -> []
+              localCandidates node =
+                [ (CompletionCandidate (Text.pack (occNameString (nameOccName name))) (maybe "" renderType (Hie.identType details)), ranges)
+                | (Right name, details) <- Map.toList (Hie.nodeIdentifiers (Hie.nodeInfo node))
+                , let ranges = concatMap bindingScopes (Set.toList (Hie.identInfo details))
+                , not (null ranges)
+                ] <> concatMap localCandidates (Hie.nodeChildren node)
+              locals = concatMap localCandidates (Map.elems (Hie.getAsts asts))
+          pure (Just (QueryContext snapshot (documentVersions documents) occurrences (concat candidates) locals))
+
+answerQuery
+  :: FilePath -> Map DocumentId DocumentSnapshot -> DocumentId -> PositionQuery -> Maybe QueryContext
+  -> GHC.Ghc (Either GhcAnalysisFailure PositionResult)
+answerQuery root documents document query context = case (Map.lookup document documents, context) of
+  (Just snapshot, Just current)
+    | current.contextDocument.snapshotDocumentId == document
+    , query.queryOffset >= 0 && query.queryOffset <= Text.length snapshot.snapshotText
+    , query.queryKind == CompletionQuery || (current.contextDocument == snapshot && current.contextVersions == documentVersions documents) -> do
+        let offset = query.queryOffset
+            prefix = Text.takeWhileEnd identifierChar (Text.take offset snapshot.snapshotText)
+            start = offset - Text.length prefix
+            at point = [o | o@(a,b,_,_) <- current.contextOccurrences, a <= point, point < b]
+            directMatches = at offset
+            matches = sortOn (\(a,b,_,_) -> b-a)
+              (if null directMatches && query.queryKind == DefinitionQuery && offset > 0 then at (offset - 1) else directMatches)
+        hovered <- case matches of
+          (a,b,name,ty) : _ -> do
+            thing <- GHC.lookupName name
+            let inferred = case ty of
+                  Just value -> Just value
+                  Nothing -> thing >>= typeOfThing
+            pure (Just (HoverInfo (Text.pack (occNameString (nameOccName name)))
+              (maybe "" renderType inferred) (Text.pack . moduleNameString . moduleName <$> nameModule_maybe name) a (b-a)))
+          [] -> pure Nothing
+        definitions <- case (query.queryKind, matches) of
+          (DefinitionQuery, (_,_,name,_) : _) -> liftIO (definitionForName root documents name)
+          _ -> pure []
+        let completions = take 200 . Map.elems . Map.fromList $
+              [ (candidate.completionLabel, candidate)
+              | candidate <- current.contextCandidates <>
+                  [candidate | (candidate, ranges) <- current.contextLocals, any (\(a,b) -> a <= offset && offset <= b) ranges]
+              , prefix `Text.isPrefixOf` candidate.completionLabel
+              , candidate.completionLabel /= prefix
+              , not ("$" `Text.isPrefixOf` candidate.completionLabel)
+              ]
+        pure (Right (PositionResult query
+          (if query.queryKind == HoverQuery then hovered else Nothing)
+          definitions (if query.queryKind == CompletionQuery then completions else [])
+          start (Text.length prefix)))
+  _ -> pure (Left (failure "query-unavailable" "Wait for a successful analysis of this document" True))
+  where
+    identifierChar character = isAlphaNum character || character `elem` ("_'." :: String)
+
+definitionForName :: FilePath -> Map DocumentId DocumentSnapshot -> Name -> IO [DefinitionTarget]
+definitionForName root documents name = case nameSrcSpan name of
+  RealSrcSpan spanValue _ -> do
+    let sourcePath = unpackFS (srcSpanFile spanValue)
+        path = normalise (if isAbsolute sourcePath then sourcePath else root </> sourcePath)
+        open = find ((== path) . normalise . snapshotPath) (Map.elems documents)
+    content <- case open of
+      Just snapshot -> pure (Right (snapshot.snapshotRevision, snapshot.snapshotContentHash))
+      Nothing -> do
+        readResult <- try (TextIO.readFile path) :: IO (Either IOException Text)
+        pure (fmap (\source -> (TextRevision 0, contentHash source)) readResult)
+    pure $ case content of
+      Right (revision, hashValue) -> [DefinitionTarget path (realSourceRange revision spanValue) hashValue]
+      Left _ -> []
+  _ -> pure []
 
 analyzeWithGhc910
   :: CompilerInvocation
@@ -523,7 +754,7 @@ declarationFor snapshot name thing = do
       declarationTypeValue = typeOfThing thing
   pure
     ( Declaration
-        { declarationId = declarationIdFor declarationNameValue range
+        { declarationId = DeclarationId ("ghc:" <> stableNameIdentity name)
         , declarationName = declarationNameValue
         , declarationKind = declarationKindFor thing
         , declarationRange = range
@@ -537,10 +768,6 @@ declarationFor snapshot name thing = do
         ATyCon constructor -> Just constructor
         _ -> Nothing
     )
-
-declarationIdFor :: Text -> RevisionedSourceRange -> DeclarationId
-declarationIdFor name range =
-  DeclarationId ("ghc:" <> name <> ":" <> Text.pack (show range))
 
 declarationKindFor :: TyThing -> DeclarationKind
 declarationKindFor = \case
@@ -674,11 +901,7 @@ typeMethodSemanticsFor
   -> TypeMethodSemantics RevisionedSourceRange
 typeMethodSemanticsFor snapshot method =
   TypeMethodSemantics
-    { typeMethodSemanticDeclaration =
-        maybe
-          (DeclarationId ("ghc:" <> stableNameIdentity methodName))
-          (declarationIdFor (nameText methodName))
-          methodRange
+    { typeMethodSemanticDeclaration = DeclarationId ("ghc:" <> stableNameIdentity methodName)
     , typeMethodSemanticName = nameText methodName
     , typeMethodSemanticType = Just (typeIdentity methodType)
     , typeMethodSemanticSignatureText = Just (renderType methodType)

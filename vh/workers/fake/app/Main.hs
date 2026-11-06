@@ -89,6 +89,12 @@ loop configuration state = do
               send envelope (AnalysisCompleted (analyze workspace session envelope.envelopeWorkspaceGeneration snapshot))
             _ -> sendFailure envelope "document-unavailable" "Document is not open in a ready workspace"
           loop configuration state
+        QueryPosition _ -> do
+          sendFailure envelope "query-unsupported" "The deterministic fake worker does not provide position queries"
+          loop configuration state
+        CheckComposition _ -> do
+          sendFailure envelope "composition-unsupported" "The deterministic fake worker does not provide composition checks"
+          loop configuration state
         CancelRequest _ -> loop configuration state
         ReloadConfiguration -> do
           send envelope (WorkerHealthChanged WorkerHealthy)

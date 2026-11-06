@@ -923,6 +923,7 @@ editorSpec key frame model focused =
             ]
         ]
     , textEditorNavigation = Nothing
+    , textEditorAssistance = Nothing
     , textEditorFocused = focused
     }
 

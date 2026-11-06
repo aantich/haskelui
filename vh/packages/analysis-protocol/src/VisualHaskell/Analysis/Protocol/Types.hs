@@ -34,6 +34,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Word (Word32, Word64)
 import VisualHaskell.Semantic
+import VisualHaskell.Analysis.Protocol.Queries
 
 data ProtocolVersion = ProtocolVersion
   { protocolMajor :: !Word32
@@ -85,6 +86,8 @@ data AnalysisCapability
   | SemanticSpansCapability
   | DefinitionLocationsCapability
   | CancellationCapability
+  | PositionQueriesCapability
+  | CompositionChecksCapability
   | UnsupportedCapability !Text
   deriving stock (Eq, Ord, Show)
 
@@ -123,6 +126,8 @@ data ClientMessage
   | UpdateDocumentSnapshot !DocumentSnapshot
   | CloseDocument !DocumentId
   | AnalyzeDocument !DocumentId
+  | QueryPosition !PositionQuery
+  | CheckComposition !CompositionQuery
   | CancelRequest !RequestId
   | ReloadConfiguration
   | ShutdownWorker
@@ -148,6 +153,8 @@ data WorkerMessage
   | ComponentDiscovered !ComponentInfo
   | ComponentSelected !ComponentInfo
   | AnalysisCompleted !(AnalysisSnapshot RevisionedSourceRange)
+  | PositionQueryCompleted !PositionResult
+  | CompositionChecked !CompositionResult
   | WorkerRequestFailed !(Maybe RequestId) !RequestFailure
   | WorkerHealthChanged !WorkerHealth
   deriving stock (Eq, Show)
@@ -255,6 +262,8 @@ instance ToJSON ClientMessage where
     UpdateDocumentSnapshot snapshot -> tagged "update-document" ["snapshot" .= snapshot]
     CloseDocument document -> tagged "close-document" ["document" .= document]
     AnalyzeDocument document -> tagged "analyze-document" ["document" .= document]
+    QueryPosition query -> tagged "query-position" ["query" .= query]
+    CheckComposition query -> tagged "check-composition" ["query" .= query]
     CancelRequest request -> tagged "cancel-request" ["request" .= request]
     ReloadConfiguration -> tagged "reload-configuration" []
     ShutdownWorker -> tagged "shutdown" []
@@ -271,6 +280,8 @@ instance FromJSON ClientMessage where
       "update-document" -> UpdateDocumentSnapshot <$> value .: "snapshot"
       "close-document" -> CloseDocument <$> value .: "document"
       "analyze-document" -> AnalyzeDocument <$> value .: "document"
+      "query-position" -> QueryPosition <$> value .: "query"
+      "check-composition" -> CheckComposition <$> value .: "query"
       "cancel-request" -> CancelRequest <$> value .: "request"
       "reload-configuration" -> pure ReloadConfiguration
       "shutdown" -> pure ShutdownWorker
@@ -309,6 +320,8 @@ instance ToJSON WorkerMessage where
     ComponentDiscovered component -> tagged "component-discovered" ["component" .= component]
     ComponentSelected component -> tagged "component-selected" ["component" .= component]
     AnalysisCompleted snapshot -> tagged "analysis-completed" ["snapshot" .= snapshot]
+    PositionQueryCompleted result -> tagged "position-query-completed" ["result" .= result]
+    CompositionChecked result -> tagged "composition-checked" ["result" .= result]
     WorkerRequestFailed request failure -> tagged "request-failed" ["request" .= request, "failure" .= failure]
     WorkerHealthChanged health -> tagged "worker-health" ["health" .= health]
     where tagged messageType fields = object (("type" .= (messageType :: Text)) : fields)
@@ -324,6 +337,8 @@ instance FromJSON WorkerMessage where
       "component-discovered" -> ComponentDiscovered <$> value .: "component"
       "component-selected" -> ComponentSelected <$> value .: "component"
       "analysis-completed" -> AnalysisCompleted <$> value .: "snapshot"
+      "position-query-completed" -> PositionQueryCompleted <$> value .: "result"
+      "composition-checked" -> CompositionChecked <$> value .: "result"
       "request-failed" -> WorkerRequestFailed <$> value .:? "request" <*> value .: "failure"
       "worker-health" -> WorkerHealthChanged <$> value .: "health"
       _ -> fail ("unknown worker message " <> Text.unpack messageType)
@@ -339,11 +354,13 @@ capabilityText capability = case capability of
   SemanticSpansCapability -> "semantic-spans"
   DefinitionLocationsCapability -> "definition-locations"
   CancellationCapability -> "cancellation"
+  PositionQueriesCapability -> "position-queries"
+  CompositionChecksCapability -> "composition-checks"
   UnsupportedCapability name -> name
 
 allCapabilities :: [AnalysisCapability]
 allCapabilities =
   [ WorkspaceLoadingCapability, ComponentDiscoveryCapability, FullDocumentSnapshotsCapability, DiagnosticsCapability
   , DocumentDeclarationsCapability, StructuredTypesCapability, SemanticSpansCapability
-  , DefinitionLocationsCapability, CancellationCapability
+  , DefinitionLocationsCapability, CancellationCapability, PositionQueriesCapability, CompositionChecksCapability
   ]

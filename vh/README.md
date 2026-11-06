@@ -158,6 +158,28 @@ model.
 
 ## Semantic universe inspectors
 
+The **Outline** tab lists current compiler declarations and their signatures in
+source order. Selecting a declaration reveals its exact source range. In a
+trusted, successfully analyzed Haskell document:
+
+- Pause over an identifier for its GHC-inferred type and defining module.
+- Command-click an identifier, or press F12 at the caret, to go to its source
+  definition, including unsaved definitions in another open module.
+- Press F5 (or Control-Space when not reserved by macOS) for scope-aware completion.
+  Use Up/Down and Return/Tab, click a suggestion, or Escape to dismiss.
+  Completion uses the native
+  editor's normal insertion/undo path and never previews edits into the buffer.
+
+Queries use GHC's enriched typed syntax tree and reader environment inside the
+existing worker. No HLS, LSP server, or additional compiler process is involved.
+Every response is tied to a request, document revision/hash, component session,
+and worker/workspace generation. Moving away, editing, or changing the caret
+invalidates transient assistance. Completion can use the last successful scope
+while the current buffer is incomplete; new imports and bindings become
+available after the next successful analysis. Navigation to installed package
+source is available only when GHC supplies a readable source location; there
+is not yet a package source index or Haddock documentation browser.
+
 The inspector includes independent **Types** and **Functions** tabs. Each tab
 owns a **Debug mode** switch: the switch changes only that pane and never
 changes compiler or document state. The Types tab also selects **Current File**
@@ -236,9 +258,25 @@ declarations are identified, but family equations are deferred until the
 semantic contract can represent open families, closed ordered equations, and
 imported instances without conflating them.
 
-Functions Debug mode is presently a preview over the same universe's value
-declaration type usages. A dedicated function-universe contract will replace
-that preview when work begins on the Functions visual surface.
+The **Functions** tab consumes a dedicated, compiler-independent `FunctionNode`
+model derived from current typed value declarations, not the type-universe
+preview. Select a function and choose **Add function**, then drag or click its
+output circle onto another card's input. Cards can be moved, scroll pans, and
+Command-/Control-scroll zooms. Double-click a card to reveal its declaration.
+Widen the inspector using its divider to give the canvas more room.
+
+Connections form a linear composition (up to 32 cards). Each wire represents
+one Haskell application, retaining any curried arguments in the output type.
+GHC checks the complete chain, including polymorphism, typeclass constraints,
+and type synonyms, and returns its inferred type or a type mismatch. Wires are
+green for a valid composition, red for a rejected one, and gray while unchecked.
+Types are never compared by string equality. Debug mode shows the exact
+function identities, signatures, and ports. **Clear** starts a fresh canvas.
+
+This first canvas is an exploratory, current-file workspace: it does not
+execute functions, rewrite source, or persist its layout. Branching graphs,
+imported-function palettes, named multi-argument ports, graph editing/undo,
+transformer-stack views, and Arrow-notation authoring remain separate steps.
 
 To inspect it, open and trust a Haskell workspace, wait for a current GHC
 result, select **Types**, and switch between the two scopes. Enable **Debug

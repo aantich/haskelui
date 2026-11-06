@@ -1248,6 +1248,7 @@ uiEventTraceFields event =
     case event of
       CommandInvoked key -> [("command", Text.pack (show key.unCommandId))]
       TextChanged key value -> keyFields key <> [("characters", Text.pack (show (Text.length value)))]
+      TextQueryRequested key _ -> keyFields key
       ControlInvoked key -> keyFields key
       ToggleChanged key value -> keyFields key <> [("value", Text.pack (show value))]
       ChoiceChanged key value -> keyFields key <> [("value", Text.pack (show value))]
@@ -1301,6 +1302,7 @@ uiEventKind event =
   case event of
     CommandInvoked {} -> "command-invoked"
     TextChanged {} -> "text-changed"
+    TextQueryRequested {} -> "text-query"
     ControlInvoked {} -> "control-invoked"
     ToggleChanged {} -> "toggle-changed"
     ChoiceChanged {} -> "choice-changed"

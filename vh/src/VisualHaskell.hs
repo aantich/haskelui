@@ -17,6 +17,12 @@ module VisualHaskell
   , openFolderCommand
   , projectTreeKey
   , saveCommand
+  , outlineInspectorTabKey
+  , outlineListKey
+  , functionsListKey
+  , functionCanvasKey
+  , addFunctionCommand
+  , clearFunctionsCommand
   , workspaceWindowKey
   ) where
 
@@ -54,6 +60,7 @@ import VisualHaskell.Highlighting
   , haskellSyntaxLayer
   )
 import qualified VisualHaskell.Diagnostics as Diagnostics
+import qualified VisualHaskell.FunctionCanvas as FunctionCanvas
 import VisualHaskell.TrustState
   ( TrustRegistry (..)
   , decodeTrustRegistry
@@ -101,6 +108,8 @@ data Document = Document
   , documentSyntaxLayer :: !(Maybe TextLayer)
   , documentLanguage :: !(Maybe LanguageId)
   , documentNavigation :: !(Maybe TextNavigationRequest)
+  , documentAssistance :: !(Maybe TextAssistance)
+  , documentQuery :: !(Maybe (AnalysisProtocol.RequestId, TextQueryRequest))
   }
   deriving stock (Eq, Generic, Show)
 
@@ -135,8 +144,17 @@ data EditorModel = EditorModel
   , typesInspectorScope :: !TypeInspectorScope
   , typeDiagramState :: !TypeDiagram.TypeDiagramState
   , functionsInspectorDebug :: !Bool
+  , selectedFunction :: !(Maybe Semantic.DeclarationId)
+  , functionCanvas :: !FunctionCanvas.FunctionCanvas
+  , functionCanvasDocument :: !(Maybe Semantic.DocumentId)
+  , functionCanvasRequest :: !(Maybe (AnalysisProtocol.RequestId, Semantic.DocumentSnapshot, AnalysisProtocol.CompositionQuery))
+  , functionCanvasResult :: !(Maybe AnalysisProtocol.CompositionResult)
+  , functionCanvasStatus :: !Text
   , selectedProblem :: !(Maybe CollectionItemKey)
   , nextNavigationIdentity :: !Word64
+  , nextQueryIdentity :: !Word64
+  , selectedOutline :: !(Maybe Semantic.DeclarationId)
+  , pendingDefinition :: !(Maybe AnalysisProtocol.DefinitionTarget)
   , workspacePersistencePhase :: !WorkspacePersistencePhase
   , workspaceRestorePendingFiles :: !(Set FilePath)
   , workspaceRestoreActiveFile :: !(Maybe FilePath)
@@ -203,6 +221,14 @@ saveCommand = CommandId 11
 openFolderCommand = CommandId 12
 trustWorkspaceCommand = CommandId 13
 
+addFunctionCommand, clearFunctionsCommand :: CommandId
+addFunctionCommand = CommandId 14
+clearFunctionsCommand = CommandId 15
+
+functionsListKey, functionCanvasKey :: ElementKey
+functionsListKey = ElementKey 260
+functionCanvasKey = ElementKey 263
+
 projectTreeKey :: ElementKey
 projectTreeKey = ElementKey 100
 
@@ -227,6 +253,12 @@ documentInspectorTabKey = TabKey 9000001
 problemsInspectorTabKey = TabKey 9000002
 typesInspectorTabKey = TabKey 9000003
 functionsInspectorTabKey = TabKey 9000004
+
+outlineInspectorTabKey :: TabKey
+outlineInspectorTabKey = TabKey 9000005
+
+outlineListKey :: ElementKey
+outlineListKey = ElementKey 251
 
 problemsListKey :: ElementKey
 problemsListKey = ElementKey 210
@@ -376,8 +408,17 @@ initialModel =
     , typesInspectorScope = CurrentFileTypeScope
     , typeDiagramState = TypeDiagram.initialTypeDiagramState
     , functionsInspectorDebug = False
+    , selectedFunction = Nothing
+    , functionCanvas = FunctionCanvas.emptyFunctionCanvas
+    , functionCanvasDocument = Nothing
+    , functionCanvasRequest = Nothing
+    , functionCanvasResult = Nothing
+    , functionCanvasStatus = "Add functions, then connect output to input"
     , selectedProblem = Nothing
     , nextNavigationIdentity = 1
+    , nextQueryIdentity = 1
+    , selectedOutline = Nothing
+    , pendingDefinition = Nothing
     , workspacePersistencePhase = WorkspacePersistenceReady
     , workspaceRestorePendingFiles = Set.empty
     , workspaceRestoreActiveFile = Nothing
@@ -424,6 +465,8 @@ render model =
         [ CommandSpec openCommand "Open File…" (Just "o") True
         , CommandSpec openFolderCommand "Open Folder…" Nothing True
         , CommandSpec saveCommand "Save" (Just "s") (maybe False documentDirty activeDocument)
+        , CommandSpec addFunctionCommand "Add Function to Canvas" Nothing (model.selectedFunction /= Nothing)
+        , CommandSpec clearFunctionsCommand "Clear Function Canvas" Nothing (not (null model.functionCanvas.canvasNodes))
         , CommandSpec
             trustWorkspaceCommand
             "Trust Workspace for Haskell Analysis"
@@ -518,6 +561,14 @@ inspectorPane model =
 inspectorTabs :: EditorModel -> [WorkspaceTabSpec]
 inspectorTabs model =
   [ WorkspaceTabSpec
+      { workspaceTabKey = outlineInspectorTabKey
+      , workspaceTabDocument = Nothing
+      , workspaceTabTitle = "Outline"
+      , workspaceTabModified = False
+      , workspaceTabCloseable = False
+      , workspaceTabControls = inspectorTabRoot (ElementKey 249) (outlineItems model)
+      }
+  , WorkspaceTabSpec
       { workspaceTabKey = documentInspectorTabKey
       , workspaceTabDocument = Nothing
       , workspaceTabTitle = "Document"
@@ -579,6 +630,12 @@ documentTab model tabKey = do
                 , textEditorBaseStyle = codeEditorBaseStyle
                 , textEditorLayers = documentPresentation model document
                 , textEditorNavigation = document.documentNavigation
+                , textEditorAssistance =
+                    if isHaskellDocument document && model.analysisWorkspaceTrusted && model.analysisComponent /= Nothing
+                      then Just (case document.documentAssistance of
+                        Just assistance | assistance.textAssistanceRevision == document.documentRevision -> assistance
+                        _ -> TextAssistance document.documentRevision Nothing Nothing)
+                      else Nothing
                 , textEditorFocused = model.selectedTab == Just tabKey
                 }
           ]
@@ -758,6 +815,67 @@ inspectorItems model =
           )
       ]
 
+outlineDeclarations :: EditorModel -> [(Document, Semantic.Declaration Semantic.RevisionedSourceRange)]
+outlineDeclarations model = case selectedDocument model of
+  Just document
+    | documentAnalysisIsCurrent model document
+    , Just snapshot <- Map.lookup (analysisDocumentId document) model.analysisSnapshots
+    , snapshot.analysisFreshness == Semantic.CurrentAnalysis ->
+        [(document, declaration) | declaration <- sortOn (.declarationSelectionRange.sourceRangeStart) snapshot.analysisDeclarations]
+  _ -> []
+
+outlineItemKey :: Semantic.Declaration Semantic.RevisionedSourceRange -> CollectionItemKey
+outlineItemKey declaration = CollectionItemKey (stableTextIdentity declaration.declarationId.unDeclarationId)
+
+outlineItems :: EditorModel -> [InspectorTabItem]
+outlineItems model =
+  [ topStretchInspectorItem 12 12 12 (Label (ElementKey 250) (Rect 0 0 240 40) coverage)
+  , fillInspectorItem 62 0 0 0
+      ( ListView CollectionControlSpec
+          { collectionControlKey = outlineListKey
+          , collectionControlFrame = Rect 0 0 270 650
+          , collectionControlItems =
+              [ CollectionItem (outlineItemKey declaration) declaration.declarationName
+                  (Text.pack (show declaration.declarationKind) <> maybe "" (" · " <>) declaration.declarationSignatureText)
+                  Nothing 0 False False
+              | (_, declaration) <- entries
+              ]
+          , collectionControlSelectionMode = SingleCollectionSelection
+          , collectionControlSelection = [outlineItemKey d | (_,d) <- entries, Just d.declarationId == model.selectedOutline]
+          , collectionControlRowSizing = ContentSizedRows
+          , collectionControlEnabled = True
+          }
+      )
+  ]
+  where
+    entries = outlineDeclarations model
+    coverage = case selectedDocument model of
+      Nothing -> "Open a Haskell document"
+      Just document
+        | not (isHaskellDocument document) -> "No Haskell declarations"
+        | not (documentAnalysisIsCurrent model document) -> "Waiting for current declarations…"
+        | Just snapshot <- Map.lookup (analysisDocumentId document) model.analysisSnapshots ->
+            Text.pack (show snapshot.analysisCompleteness) <> " · " <> Text.pack (show (length entries)) <> " declarations"
+        | otherwise -> "No compiler data"
+
+selectOutline :: CollectionItemKey -> EditorModel -> Transaction EditorModel
+selectOutline key model = case find ((== key) . outlineItemKey . snd) (outlineDeclarations model) of
+  Just (document, declaration) ->
+    transactionWithEffects "Reveal declaration" NoUndo [] $ \current ->
+      (revealSource document declaration.declarationSelectionRange current)
+        { selectedOutline = Just declaration.declarationId }
+  Nothing -> noTransaction
+
+revealSource :: Document -> Semantic.RevisionedSourceRange -> EditorModel -> EditorModel
+revealSource document range model = case semanticTextRange document range of
+  Nothing -> model
+  Just selection -> model
+    { documents = Map.adjust (\d -> d {documentNavigation = Just
+        (TextNavigationRequest (TextNavigationKey model.nextNavigationIdentity) d.documentRevision selection True True)}) document.documentKey model.documents
+    , selectedTab = Just document.documentTabKey
+    , nextNavigationIdentity = model.nextNavigationIdentity + 1
+    }
+
 problemsItems :: EditorModel -> [EditorProblem] -> [InspectorTabItem]
 problemsItems model problems =
   [ fillInspectorItem 0 0 0 0
@@ -901,17 +1019,49 @@ functionsInspectorItems model =
             (debugTextControl 235 (functionsInspectorDebugText model))
         ]
       else
-        [ topStretchInspectorItem 122 16 16
-            ( InlineNotice
-                MessageControlSpec
-                  { messageControlKey = ElementKey 234
-                  , messageControlFrame = Rect 0 0 238 112
-                  , messageControlTitle = "Visual inspector"
-                  , messageControlMessage =
-                      "A visual map of function signatures, composition, calls, and data flow will appear here."
-                  }
-            )
+        [ topStretchInspectorItem 122 12 12
+            (setControlFrame (Rect 0 0 250 90) (debugTextControl 234 (functionCanvasMessage model)))
+        , topStretchInspectorItem 222 12 12
+            ( ListView CollectionControlSpec
+                { collectionControlKey = functionsListKey
+                , collectionControlFrame = Rect 0 0 250 132
+                , collectionControlItems = [CollectionItem (functionItemKey node) node.functionName node.functionSignature Nothing 0 False False | node <- functionsFor model]
+                , collectionControlSelectionMode = SingleCollectionSelection
+                , collectionControlSelection = [functionItemKey node | node <- functionsFor model, Just node.functionIdentity == model.selectedFunction]
+                , collectionControlRowSizing = ContentSizedRows
+                , collectionControlEnabled = True
+                })
+        , fixedInspectorItem 12 364 (Button (ElementKey 261) (Rect 0 0 136 30) "Add function" addFunctionCommand
+            (any (\node -> Just node.functionIdentity == model.selectedFunction) (functionsFor model)))
+        , fixedInspectorItem 160 364 (Button (ElementKey 262) (Rect 0 0 100 30) "Clear" clearFunctionsCommand (not (null model.functionCanvas.canvasNodes)))
+        , fillInspectorItem 406 8 8 8
+            (FunctionCanvas.functionCanvasSurface functionCanvasKey model.systemColorScheme (functionsFor model)
+              (if currentComposition model then AnalysisProtocol.compositionValid <$> model.functionCanvasResult else Nothing) model.functionCanvas)
         ]
+
+functionsFor :: EditorModel -> [Semantic.FunctionNode Semantic.RevisionedSourceRange]
+functionsFor model = case selectedDocument model of
+  Just document | documentAnalysisIsCurrent model document
+    , Just snapshot <- Map.lookup (analysisDocumentId document) model.analysisSnapshots
+    , snapshot.analysisCompleteness == Semantic.Typechecked -> Semantic.buildFunctionUniverse snapshot
+  _ -> []
+
+functionItemKey :: Semantic.FunctionNode range -> CollectionItemKey
+functionItemKey node = CollectionItemKey (stableTextIdentity node.functionIdentity.unDeclarationId)
+
+currentComposition :: EditorModel -> Bool
+currentComposition model = case (selectedDocument model, model.functionCanvasRequest) of
+  (Just document, Just (_,snapshot,query)) ->
+    snapshot == analysisDocumentSnapshot document
+      && FunctionCanvas.compositionChain model.functionCanvas == Right query.compositionFunctions
+      && documentAnalysisIsCurrent model document
+  _ -> False
+
+functionCanvasMessage :: EditorModel -> Text
+functionCanvasMessage model
+  | not (Text.null model.functionCanvas.canvasNotice) = model.functionCanvas.canvasNotice
+  | not (currentComposition model) = "Connect output to input. Each wire composes one application; remaining arguments stay curried."
+  | otherwise = model.functionCanvasStatus
 
 universeHeaderItems :: Word64 -> Text -> Text -> [InspectorTabItem]
 universeHeaderItems identity symbol title =
@@ -956,29 +1106,7 @@ typesInspectorDebugText model =
 
 functionsInspectorDebugText :: EditorModel -> Text
 functionsInspectorDebugText model =
-  Text.unlines
-    ( [ "function-universe/preview"
-      , "source: TypeUniverse.type-usages"
-      , "functions: " <> Text.pack (show (length functions))
-      ]
-        <> concatMap renderFunction functions
-    )
-  where
-    universe = typeUniverseFor model
-    functions =
-      filter
-        ((== Semantic.ValueDeclaration) . (.typeUsageDeclarationKind))
-        universe.typeUniverseUsages
-    renderFunction
-      :: Semantic.TypeUsage Semantic.RevisionedSourceRange
-      -> [Text]
-    renderFunction usage =
-      [ "  - name: " <> usage.typeUsageName
-      , "    declaration: " <> usage.typeUsageDeclaration.unDeclarationId
-      , "    document: " <> usage.typeUsageDocument.unDocumentId
-      , "    signature: "
-          <> maybe "none" (Text.unwords . Text.lines) usage.typeUsageSignatureText
-      ]
+  Semantic.renderFunctionUniverseDebug (functionsFor model) <> "\n" <> functionCanvasMessage model
 
 typeUniverseFor
   :: EditorModel
@@ -1211,7 +1339,7 @@ handleEventWithServices
   -> EditorModel
   -> Transaction EditorModel
 handleEventWithServices textMateEndpoint analysisEndpoint event model =
-  appendRuntimeCommands runtimeCommands update
+  completeSemanticUpdate analysisEndpoint model (appendRuntimeCommands runtimeCommands update)
   where
     initialUpdate = handleEvent event model
     initiallyUpdated = applyTransaction initialUpdate model
@@ -1226,6 +1354,7 @@ handleEventWithServices textMateEndpoint analysisEndpoint event model =
           []
           (\endpoint -> analysisCommandsForTransition endpoint model updatedModel)
           analysisEndpoint
+        <> maybe [] (\endpoint -> positionCommandsForTransition endpoint model updatedModel) analysisEndpoint
 
 prepareAnalysisWorkspaceTransition
   :: EditorModel
@@ -1257,6 +1386,9 @@ prepareAnalysisWorkspaceTransition oldModel newModel update
         { analysisWorkspaceGeneration = nextWorkspaceGeneration current.analysisWorkspaceGeneration
         , analysisComponent = Nothing
         , analysisSnapshots = Map.empty
+        , functionCanvasRequest = Nothing
+        , functionCanvasResult = Nothing
+        , pendingDefinition = Nothing
         , analysisStatus =
             if current.analysisWorkspaceTrusted
               then "GHC: loading workspace"
@@ -1605,7 +1737,7 @@ applyAnalysisServiceEvent
   -> EditorModel
   -> Transaction EditorModel
 applyAnalysisServiceEvent endpoint serviceEvent model =
-  case serviceEvent of
+  completeSemanticUpdate (Just endpoint) model $ case serviceEvent of
     AnalysisServiceChanged status ->
       let statusUpdate =
             analysisStatusTransaction
@@ -1700,11 +1832,214 @@ applyAnalysisWorkerMessage generation envelope model
             )
         AnalysisProtocol.AnalysisCompleted snapshot ->
           acceptAnalysisResult generation snapshot model
-        AnalysisProtocol.WorkerRequestFailed _ failure -> analysisFailureTransaction failure
+        AnalysisProtocol.PositionQueryCompleted result ->
+          acceptPositionResult envelope result model
+        AnalysisProtocol.CompositionChecked result ->
+          acceptCompositionResult envelope result model
+        AnalysisProtocol.WorkerRequestFailed (Just request) failure ->
+          if maybe False (\(identity,_,_) -> identity == request) model.functionCanvasRequest
+            then transactionWithEffects "Report composition check failure" NoUndo []
+              (\current -> current {functionCanvasStatus = AnalysisProtocol.requestFailureMessage failure})
+          else if any (maybe False ((== request) . fst) . (.documentQuery)) (Map.elems model.documents)
+            then transactionWithEffects "Report editor query failure" NoUndo []
+              (\current -> current {workspaceMessage = AnalysisProtocol.requestFailureMessage failure})
+            else noTransaction
+        AnalysisProtocol.WorkerRequestFailed Nothing failure -> analysisFailureTransaction failure
         AnalysisProtocol.WorkerHealthChanged AnalysisProtocol.WorkerHealthy ->
           analysisStatusTransaction "GHC: healthy"
         AnalysisProtocol.WorkerHealthChanged (AnalysisProtocol.WorkerDegraded message) ->
           analysisStatusTransaction ("GHC degraded: " <> message)
+
+beginPositionQuery :: ElementKey -> TextQueryRequest -> EditorModel -> Transaction EditorModel
+beginPositionQuery key request model =
+  case find ((== key) . (.documentEditorKey)) (Map.elems model.documents) of
+    Just document | request.textQueryKind == TextDismissQuery ->
+      transactionWithEffects "Dismiss editor intelligence" NoUndo []
+        (updateDocument document.documentKey (\d -> d {documentQuery = Nothing, documentAssistance = Nothing}))
+    Just document
+      | model.analysisWorkspaceTrusted
+      , model.selectedTab == Just document.documentTabKey
+      , model.analysisComponent /= Nothing
+      , isHaskellDocument document
+      , request.textQueryRevision == document.documentRevision
+      , request.textQueryOffset >= 0
+      , request.textQueryOffset <= Text.length document.documentContents ->
+          transactionWithEffects "Request editor intelligence" NoUndo [] $ \current ->
+            updateDocument document.documentKey
+              (\d -> d {documentQuery = Just (AnalysisProtocol.RequestId current.nextQueryIdentity, request), documentAssistance = Nothing})
+              current {nextQueryIdentity = current.nextQueryIdentity + 1}
+    _ -> noTransaction
+
+positionCommandsForTransition
+  :: ServiceEndpoint AnalysisCommand -> EditorModel -> EditorModel -> [RuntimeCommand EditorModel]
+positionCommandsForTransition endpoint previous model =
+  [ sendService endpoint (RequestPositionQuery model.analysisWorkspaceGeneration (analysisWorkspaceId model)
+      component.componentSession (analysisDocumentSnapshot document) identity
+      (AnalysisProtocol.PositionQuery (queryKindFor request.textQueryKind) request.textQueryOffset))
+  | document <- Map.elems model.documents
+  , Just (identity, request) <- [document.documentQuery]
+  , (Map.lookup document.documentKey previous.documents >>= (.documentQuery)) /= document.documentQuery
+  , Just component <- [model.analysisComponent]
+  ]
+
+queryKindFor :: TextQueryKind -> AnalysisProtocol.QueryKind
+queryKindFor TextHoverQuery = AnalysisProtocol.HoverQuery
+queryKindFor TextDefinitionQuery = AnalysisProtocol.DefinitionQuery
+queryKindFor TextCompletionQuery = AnalysisProtocol.CompletionQuery
+queryKindFor TextDismissQuery = AnalysisProtocol.HoverQuery
+
+acceptPositionResult
+  :: AnalysisProtocol.ProtocolEnvelope AnalysisProtocol.WorkerMessage
+  -> AnalysisProtocol.PositionResult -> EditorModel -> Transaction EditorModel
+acceptPositionResult envelope result model = case AnalysisProtocol.envelopeDocument envelope >>= (`findAnalysisDocument` model) of
+  Just document
+    | Just (identity, request) <- document.documentQuery
+    , AnalysisProtocol.envelopeRequestId envelope == Just identity
+    , AnalysisProtocol.envelopeWorkspace envelope == Just (analysisWorkspaceId model)
+    , AnalysisProtocol.envelopeSession envelope == analysisSession model
+    , AnalysisProtocol.envelopeRevision envelope == Just (semanticRevision document.documentRevision)
+    , AnalysisProtocol.envelopeContentHash envelope == Just (Semantic.contentHash document.documentContents)
+    , model.selectedTab == Just document.documentTabKey
+    , result.resultQuery == AnalysisProtocol.PositionQuery (queryKindFor request.textQueryKind) request.textQueryOffset ->
+        let cleared = updateDocument document.documentKey (\d -> d {documentQuery = Nothing}) model
+            key = request.textQueryKey
+            assistance = TextAssistance document.documentRevision
+              (fmap (\hover -> TextHoverPresentation key (TextRange hover.hoverStart hover.hoverLength)
+                (hover.hoverName <> (if Text.null hover.hoverSignature then "" else " :: " <> hover.hoverSignature)
+                  <> maybe "" ("\n" <>) hover.hoverModule)) result.resultHover)
+              (if request.textQueryKind == TextCompletionQuery
+                then Just (TextCompletionPresentation key (TextRange result.resultReplacementStart result.resultReplacementLength)
+                  (fmap (.completionLabel) result.resultCompletions)) else Nothing)
+         in if request.textQueryKind == TextDefinitionQuery
+              then case result.resultDefinitions of
+                target : _ -> navigateDefinition target cleared
+                [] -> transactionWithEffects "Definition unavailable" NoUndo []
+                  (const cleared {workspaceMessage = "No source definition is available for this symbol"})
+              else transactionWithEffects "Present current editor intelligence" NoUndo []
+                (const (updateDocument document.documentKey (\d -> d {documentAssistance = Just assistance}) cleared))
+  _ -> noTransaction
+
+navigateDefinition :: AnalysisProtocol.DefinitionTarget -> EditorModel -> Transaction EditorModel
+navigateDefinition target model = case findDocumentByPath target.definitionPath model of
+  Just document -> transactionWithEffects "Go to definition" NoUndo []
+    (const (revealDefinitionTarget target document model))
+  Nothing -> transactionWithEffects "Open definition source" NoUndo [ReadTextFile target.definitionPath]
+    (const model {pendingDefinition = Just target})
+
+revealDefinitionTarget :: AnalysisProtocol.DefinitionTarget -> Document -> EditorModel -> EditorModel
+revealDefinitionTarget target document model
+  | Semantic.contentHash document.documentContents /= target.definitionContentHash =
+      model {workspaceMessage = "Definition source changed; request its location again"}
+  | otherwise = revealSource document
+      target.definitionRange {Semantic.sourceRangeRevision = semanticRevision document.documentRevision} model
+
+finishDefinitionRead :: FilePath -> Either Text Text -> EditorModel -> Transaction EditorModel
+finishDefinitionRead path result model =
+  transactionWithEffects "Load definition source" NoUndo [] $ \current ->
+    let cleared = current {pendingDefinition = Nothing}
+     in case (result, model.pendingDefinition) of
+       (Right source, Just target)
+         | Semantic.contentHash source == target.definitionContentHash ->
+             let opened = insertDocument path source cleared
+              in maybe opened (\document -> revealDefinitionTarget target document opened) (findDocumentByPath path opened)
+         | otherwise -> cleared {workspaceMessage = "Definition source changed; request its location again"}
+       (Left message, _) -> cleared {workspaceMessage = "Could not open definition: " <> message}
+       _ -> cleared
+
+completeSemanticUpdate
+  :: Maybe (ServiceEndpoint AnalysisCommand) -> EditorModel -> Transaction EditorModel -> Transaction EditorModel
+completeSemanticUpdate endpoint previous initial =
+  case (endpoint, selectedDocument updated, FunctionCanvas.compositionChain updated.functionCanvas) of
+    (Just serviceEndpoint, Just document, Right chain)
+      | length chain >= 2
+      , documentAnalysisIsCurrent updated document
+      , Just snapshot <- Map.lookup (analysisDocumentId document) updated.analysisSnapshots
+      , snapshot.analysisCompleteness == Semantic.Typechecked
+      , Just component <- updated.analysisComponent
+      , all (\identifier -> any ((== identifier) . (.functionIdentity)) (functionsFor updated)) chain
+      , let query = AnalysisProtocol.CompositionQuery chain
+      , let documentSnapshot = analysisDocumentSnapshot document
+      , not (maybe False (\(_,oldSnapshot,oldQuery) -> oldSnapshot == documentSnapshot && oldQuery == query) updated.functionCanvasRequest) ->
+          let identity = AnalysisProtocol.RequestId updated.nextQueryIdentity
+              change current = current
+                { functionCanvasRequest = Just (identity, documentSnapshot, query)
+                , functionCanvasResult = Nothing
+                , functionCanvasStatus = "GHC is checking the complete composition…"
+                , nextQueryIdentity = current.nextQueryIdentity + 1
+                }
+              command = sendService serviceEndpoint (RequestCompositionCheck updated.analysisWorkspaceGeneration
+                (analysisWorkspaceId updated) component.componentSession documentSnapshot identity query)
+           in appendRuntimeCommands [command] update
+                { transactionAction = batchActions "Check function composition"
+                    [update.transactionAction, action "Await composition result" change] }
+    _ -> update
+  where
+    rawUpdated = applyTransaction initial previous
+    retainedCanvas = case selectedDocument rawUpdated of
+      Just currentDocument
+        | documentAnalysisIsCurrent rawUpdated currentDocument
+        , Just snapshot <- Map.lookup (analysisDocumentId currentDocument) rawUpdated.analysisSnapshots
+        , snapshot.analysisCompleteness == Semantic.Typechecked ->
+            FunctionCanvas.retainFunctions (fmap (.functionIdentity) (functionsFor rawUpdated)) rawUpdated.functionCanvas
+      _ -> rawUpdated.functionCanvas
+    initiallyUpdated = rawUpdated {functionCanvas = retainedCanvas}
+    prepared = if retainedCanvas == rawUpdated.functionCanvas then initial
+      else initial {transactionAction = batchActions "Reconcile function declarations"
+        [initial.transactionAction, action "Remove obsolete function cards" (\current -> current {functionCanvas = retainedCanvas})]}
+    document = analysisDocumentId <$> selectedDocument initiallyUpdated
+    changedDocument = document /= initiallyUpdated.functionCanvasDocument
+    reset current = current
+      { functionCanvasDocument = document
+      , functionCanvas = FunctionCanvas.emptyFunctionCanvas {FunctionCanvas.canvasRevision = current.functionCanvas.canvasRevision + 1}
+      , functionCanvasRequest = Nothing
+      , functionCanvasResult = Nothing
+      , selectedFunction = Nothing
+      }
+    appearanceChanged = functionsFor previous /= functionsFor initiallyUpdated
+      || previous.systemColorScheme /= initiallyUpdated.systemColorScheme
+      || currentComposition previous /= currentComposition initiallyUpdated
+    refresh current = current
+      {functionCanvas = current.functionCanvas {FunctionCanvas.canvasRevision = current.functionCanvas.canvasRevision + 1}}
+    update = if changedDocument
+      then prepared {transactionAction = batchActions "Select function workspace" [prepared.transactionAction, action "Reset document function canvas" reset]}
+      else if appearanceChanged
+        then prepared {transactionAction = batchActions "Refresh function presentation" [prepared.transactionAction, action "Invalidate function drawing" refresh]}
+        else prepared
+    updated = applyTransaction update previous
+
+acceptCompositionResult
+  :: AnalysisProtocol.ProtocolEnvelope AnalysisProtocol.WorkerMessage
+  -> AnalysisProtocol.CompositionResult -> EditorModel -> Transaction EditorModel
+acceptCompositionResult envelope result model =
+  case model.functionCanvasRequest of
+    Just (identity, snapshot, query)
+      | envelope.envelopeRequestId == Just identity
+      , envelope.envelopeWorkspace == Just (analysisWorkspaceId model)
+      , envelope.envelopeSession == analysisSession model
+      , envelope.envelopeDocument == Just snapshot.snapshotDocumentId
+      , envelope.envelopeRevision == Just snapshot.snapshotRevision
+      , envelope.envelopeContentHash == Just snapshot.snapshotContentHash
+      , query == result.compositionQuery
+      , currentComposition model ->
+          transactionWithEffects "Accept GHC composition check" NoUndo [] $ \current -> current
+            { functionCanvasResult = Just result
+            , functionCanvasStatus =
+                if result.compositionValid
+                  then "✓ Composes :: " <> maybe "" id result.compositionSignature
+                  else "Type mismatch\n" <> maybe "GHC rejected this connection" id result.compositionError
+            , functionCanvas = current.functionCanvas {FunctionCanvas.canvasRevision = current.functionCanvas.canvasRevision + 1}
+            }
+    _ -> noTransaction
+
+handleFunctionsCanvasInput :: DrawingInput -> EditorModel -> Transaction EditorModel
+handleFunctionsCanvasInput input model
+  | null (functionsFor model) = noTransaction
+  | otherwise = transactionWithEffects "Interact with function composition" NoUndo [] $ \current ->
+      let (canvas, activated) = FunctionCanvas.handleFunctionCanvasInput input current.functionCanvas
+          moved = current {functionCanvas = canvas}
+       in case (activated >>= (\identity -> find ((== identity) . (.functionIdentity)) (functionsFor model)), selectedDocument model) of
+         (Just node, Just document) -> revealSource document node.functionRange moved
+         _ -> moved
 
 acceptAnalysisResult
   :: AnalysisClient.WorkerGeneration
@@ -1788,6 +2123,9 @@ analysisGenerationTransaction generation message =
         [ editorProperties.analysisWorkerGeneration .= Just generation
         , editorProperties.analysisComponent .= Nothing
         , editorProperties.analysisSnapshots .= Map.empty
+        , modify editorProperties.documents (Map.map (\document -> document {documentQuery = Nothing, documentAssistance = Nothing}))
+        , editorProperties.functionCanvasRequest .= Nothing
+        , editorProperties.functionCanvasResult .= Nothing
         , editorProperties.analysisStatus .= message
         ]
     )
@@ -1916,6 +2254,15 @@ handleEventWithoutPersistence event model =
             NoUndo
             (editorProperties.systemColorScheme .= scheme)
     CommandInvoked command
+      | command == addFunctionCommand ->
+          case model.selectedFunction of
+            Just identifier | any ((== identifier) . (.functionIdentity)) (functionsFor model) ->
+              transactionWithEffects "Add function card" NoUndo []
+                (\current -> current {functionCanvas = FunctionCanvas.addFunction identifier current.functionCanvas})
+            _ -> noTransaction
+      | command == clearFunctionsCommand ->
+          transactionWithEffects "Clear function canvas" NoUndo []
+            (\current -> current {functionCanvas = FunctionCanvas.emptyFunctionCanvas {FunctionCanvas.canvasRevision = current.functionCanvas.canvasRevision + 1}, functionCanvasRequest = Nothing, functionCanvasResult = Nothing})
       | command == openCommand ->
           requestEffect "Choose text files" RequestOpenTextFiles
       | command == openFolderCommand ->
@@ -1960,7 +2307,9 @@ handleEventWithoutPersistence event model =
     TextFileChosen chosenPath ->
       openFilePath chosenPath model
     TextFileRead readPath result ->
-      if Set.member (normalise readPath) model.workspaceRestorePendingFiles
+      if maybe False ((== normalise readPath) . normalise . AnalysisProtocol.definitionPath) model.pendingDefinition
+        then finishDefinitionRead readPath result model
+      else if Set.member (normalise readPath) model.workspaceRestorePendingFiles
         then handleRestoredDocumentRead (normalise readPath) result model
         else
           case result of
@@ -1984,6 +2333,7 @@ handleEventWithoutPersistence event model =
             EditCommitted _ committed -> markAnalysisPending document model committed
             DraftStaged _ -> noTransaction
             DraftInvalid _ _ -> noTransaction
+    TextQueryRequested key request -> beginPositionQuery key request model
     ToggleChanged key value
       | key == typesInspectorDebugKey ->
           transactionFromAction
@@ -2004,9 +2354,14 @@ handleEventWithoutPersistence event model =
             _ -> noTransaction
     DrawingInputReceived key input
       | key == typesInspectorDiagramKey -> handleTypesDiagramInput input model
+      | key == functionCanvasKey -> handleFunctionsCanvasInput input model
     CollectionSelectionChanged key [selectedKey]
       | key == projectTreeKey -> selectProjectEntry selectedKey model
       | key == problemsListKey -> selectProblem selectedKey model
+      | key == outlineListKey -> selectOutline selectedKey model
+      | key == functionsListKey ->
+          transactionWithEffects "Select function" NoUndo []
+            (\current -> current {selectedFunction = Semantic.functionIdentity <$> find ((== selectedKey) . functionItemKey) (functionsFor model)})
     CollectionExpansionChanged key itemKey expanded
       | key == projectTreeKey -> setProjectExpansion itemKey expanded model
     TabSelected tabKey
@@ -2015,6 +2370,7 @@ handleEventWithoutPersistence event model =
                  , problemsInspectorTabKey
                  , typesInspectorTabKey
                  , functionsInspectorTabKey
+                 , outlineInspectorTabKey
                  ] ->
           transactionFromAction
             "Select inspector tab"
@@ -2067,6 +2423,12 @@ markAnalysisPending document model update
             batchActions
               "Edit text and await compiler analysis"
               [ update.transactionAction
+              , action "Invalidate dependency-sensitive editor intelligence"
+                  (\current -> current
+                    { documents = Map.map (\open -> open {documentQuery = Nothing, documentAssistance = Nothing}) current.documents
+                    , functionCanvasRequest = Nothing
+                    , functionCanvasResult = Nothing
+                    })
               , editorProperties.analysisStatus .= "GHC: analyzing current revision"
               ]
         }
@@ -3063,6 +3425,8 @@ insertDocument documentPath initialContents model =
         , documentSyntaxLayer = Nothing
         , documentLanguage = Nothing
         , documentNavigation = Nothing
+        , documentAssistance = Nothing
+        , documentQuery = Nothing
         }
 
 documentPresentation :: EditorModel -> Document -> [TextLayer]
