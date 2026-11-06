@@ -16,7 +16,7 @@ dependencies:
   - directory
   - filepath
   - ghc == 9.10.3
-  - hie-bios >= 0.18 && < 0.19
+  - hie-bios >= 0.21 && < 0.22
   - mtl
   - stm
   - text
@@ -46,6 +46,18 @@ executables:
       - visual-haskell-analysis-ghc910
     ghc-options:
       - -threaded
+  visual-haskell-project-loading-spike:
+    main: Main.hs
+    source-dirs: spike
+    dependencies:
+      - aeson
+      - bytestring
+      - ghc-boot
+      - process
+      - temporary
+      - visual-haskell-analysis-ghc910
+    ghc-options:
+      - -threaded
 
 tests:
   visual-haskell-analysis-ghc-910-test:
@@ -62,3 +74,7 @@ extra-source-files:
   - test/fixtures/two-module/hie.yaml
   - test/fixtures/two-module/A.hs
   - test/fixtures/two-module/B.hs
+  - test/fixtures/project-loading/**/*.cabal
+  - test/fixtures/project-loading/**/*.hs
+  - test/fixtures/project-loading/cabal.project
+  - test/fixtures/project-loading/stack.yaml

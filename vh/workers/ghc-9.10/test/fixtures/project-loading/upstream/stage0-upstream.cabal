@@ -1,0 +1,11 @@
+cabal-version: 3.0
+name: stage0-upstream
+version: 0.1.0.0
+build-type: Simple
+
+library
+  exposed-modules: Upstream
+  hs-source-dirs: src
+  cpp-options: -DSTAGE0_UPSTREAM
+  build-depends: base >= 4.20 && < 4.21
+  default-language: Haskell2010

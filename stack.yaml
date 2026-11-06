@@ -24,4 +24,4 @@ install-ghc: false
 compiler-check: match-exact
 
 extra-deps:
-  - hie-bios-0.18.0@sha256:aee2aed918a5864367efef2aeae632885a0e08bbc1849ee3d2e803adcf5de478,14161
+  - hie-bios-0.21.0@sha256:759726c51f31b51c5b198b1f6076e290228360299b4d7356bd84a4271012217f,10268

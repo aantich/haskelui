@@ -283,11 +283,24 @@ result, select **Types**, and switch between the two scopes. Enable **Debug
 mode** to compare the diagram with its complete textual semantic foundation.
 
 The GHC worker is a sibling executable and the `vh` build target includes it
-automatically. It uses `hie-bios` 0.18 for explicit or implicit project flags,
+automatically. It uses `hie-bios` 0.21 for explicit or implicit project flags,
 requires a trusted workspace, and keeps every direct `ghc` import inside its
 GHC-9.10 compatibility namespace. The UI process never links GHC. This
 repository includes an explicit multi-component `hie.yaml`, which avoids
 ambiguous `stack repl` selection in the self-hosting workspace.
+
+Project-loading Stage 0 has a separate research harness:
+
+```console
+tests/visual-haskell/validate-project-loading-stage0.sh
+```
+
+It copies two-package fixtures into temporary directories, exercises implicit
+and explicit Stack/Cabal environments, and tests unit-preserving unsaved edits.
+This is not yet general multi-component loading in the editor: product routing,
+component selection, dependency freshness, and configuration watching remain the
+next implementation stages. See the Stage 0 findings in
+[`visual-haskell-analysis-spine.md`](../docs/design/visual-haskell-analysis-spine.md#10-project-loading-stage-0).
 
 The worker discovers the active component and initializes one persistent
 `runGhc` session on the first analysis. Later full document snapshots update

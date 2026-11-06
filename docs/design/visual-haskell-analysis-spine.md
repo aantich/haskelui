@@ -180,7 +180,7 @@ graph to invalidate the changed target and affected dependents.
 
 ## 7. Direct GHC 9.10.3 worker
 
-`vh/workers/ghc-9.10` uses `hie-bios` 0.18 to load explicit or implicit
+`vh/workers/ghc-9.10` uses `hie-bios` 0.21 to load explicit or implicit
 cradles. The repository's checked-in multi-component `hie.yaml` maps source
 trees to exact Stack targets, avoiding ambiguous executable `Main` selection.
 The worker rejects untrusted workspaces and any compiler other than GHC 9.10.3.
@@ -266,3 +266,122 @@ Next slice:
 Cancellation, concurrent scheduling, incremental invalidation, HIE indexing,
 and cross-workspace caches remain later performance/indexing work. They should
 be added only after profiling the current correct full-snapshot path.
+
+## 10. Project-loading Stage 0
+
+Investigation date: 2026-11-06.
+
+The compatibility investigation upgrades the pinned dependency from
+`hie-bios-0.18.0` to `hie-bios-0.21.0` and adapts discovery to
+`TargetWithContext` / `LoadFileWithContext`. Existing product session routing
+is deliberately unchanged. This is a research gate, not a claim that general
+Stack/Cabal project loading is implemented in the UI.
+
+### Reproduction
+
+```console
+stack test visual-haskell-semantic-model visual-haskell-analysis-protocol \
+  visual-haskell-analysis-client visual-haskell-analysis-ghc910 \
+  visual-haskell:vh-analysis-service-test visual-haskell:vh-model-test \
+  visual-haskell:vh-workspace-persistence-test --fast --jobs 1
+tests/visual-haskell/validate-analysis-self-host.sh
+tests/visual-haskell/validate-project-loading-stage0.sh
+```
+
+The new runner first builds `visual-haskell-project-loading-spike`, then runs
+the binary after the enclosing Stack build has released its lock. Optional
+`cabal` or `stack` arguments select one half of the investigation. Fixtures are
+copied to canonical temporary roots; no probe saves source edits into the
+repository or its copied fixture. Explicit cradle, raw-GHC interface and
+response-file caches live with the temporary project and are removed when
+that probe finishes. The production-engine check still uses its ordinary
+hie-bios interface cache; build tools may also populate their normal
+dependency and wrapper caches. Each build-tool probe has a five-minute limit.
+
+### Environment and baseline
+
+Investigation environment: macOS aarch64, GHC 9.10.3, Stack 3.11.1,
+cabal-install 3.16.1.0, and Stack's GHC-bundled Cabal library 3.12.1.0.
+Fixture dependencies are only `base` and the other local package.
+
+Before the dependency upgrade, all five focused suites and the real Stack
+self-hosting check passed. Self-hosting measured 16 ms engine startup,
+909 ms first analysis and 46 ms warm edit. The two-module fixture measured
+1–4 ms warm broken/recovered edits. These are diagnostic samples, not timing
+guarantees.
+
+After upgrading to 0.21.0, all seven focused analysis/model/persistence suites
+passed, as did the separate real Stack self-hosting check. Self-hosting measured
+15 ms startup, 880 ms first analysis and 45 ms warm edit. The added Cabal and
+Stack fixtures both passed explicit executable/test selection and the unsaved
+cross-package mismatch/recovery proof; Stack used build-info metadata for the
+multi-unit proof rather than its flattened repl environment.
+
+The final two-unit probe measured Cabal initial analysis at 375 ms, unsaved
+mismatch at 5 ms and recovery at 40 ms. Stack's build-info preparation took
+4596 ms, followed by 124 ms initial analysis, 4 ms unsaved mismatch and 35 ms
+recovery. These samples include only the tiny fixture, not a project-size or
+toolchain compatibility guarantee.
+
+Stage 0's decision is to retain the pinned 0.21.0 upgrade and proceed with
+project/context contracts. Cabal can use hie-bios unit environments directly;
+Stack needs a distinct per-unit build-metadata adapter for live local-package
+dependencies. Neither result makes the current UI component-aware by itself.
+
+### Loading strategy
+
+- Use `hie-bios` for explicit/implicit cradle environments and compiler
+  selection. Construct explicit cradles in memory with `getCradleWithConfig`;
+  do not write or overwrite a user's `hie.yaml` to select a target.
+- Cabal's `LoadUnitsFromCradle` produces separate `-unit @response-file`
+  environments. `initSession'` in 0.21 initialises those home units and returns
+  targets with their unit identities. `CradleRunConfig.cradleCacheDir` and
+  `initSession'` accept explicit IDE-owned cache roots.
+- Stack's ordinary single-component environments work, but its multi-component
+  `stack repl` environment merges flags/source paths. Merely upgrading hie-bios
+  or asking for all components does not provide unit-preserving Stack loading.
+- The Stack proof uses Cabal's generated `build-info.json` from the actual
+  Stack build. The fixture explicitly enables `--enable-build-info` through
+  `configure-options`. It yields real unit IDs, per-component compiler args,
+  modules and source files without a second solver or guessed package flags.
+  The spike validates the compiler and Cabal-library version before converting
+  those environments to GHC response files with `GHC.ResponseFile.escapeArgs`.
+
+Build-info's JSON format is experimental. The proof intentionally targets the
+tested Cabal 3.12 schema; a production adapter must validate versions and
+availability, handle multiple component kinds, and arrange explicit opt-in or a
+semantically equivalent IDE-owned configuration for build-info generation.
+It must not silently rewrite Stack configuration. Custom Setup, preprocessors,
+plugins and other compiler versions remain outside this small fixture's proof.
+
+### Required follow-up contracts
+
+1. Separate stable package/component IDs from live context/session identities.
+2. Represent selected component plus local home-unit dependency closure,
+   retaining exact ordered flags, working directories and configuration inputs.
+3. Retain returned unit-aware targets. The production worker currently discards
+   those targets and guesses new ones without explicit unit IDs; the spike does
+   not make that product path multi-unit safe.
+4. Keep all response files, generated macros and interface inputs alive for the
+   context lifetime. Do not treat a list of temporary argument paths as a
+   self-contained, indefinitely cacheable environment.
+5. Bind results to component/context, configuration generation and relevant
+   dependency-buffer generation as well as the existing revision/session checks.
+6. Resolve and prepare in cancellable helper processes after trust; query
+   compiler/version before launching the matching analysis worker. hie-bios
+   discovery can build dependencies and is not a read-only parser.
+
+The acceptance fixtures deliberately give executable and test components
+different CPP definitions, distinct `Main` modules, and one shared source file.
+The cross-package proof changes the upstream `Int` to an unsaved `String`,
+requires unchanged downstream analysis to fail, then supplies an unsaved
+downstream correction in the same GHC session and verifies neither file was
+saved. Counting distinct GHC target unit IDs prevents a flattened session from
+being mistaken for a valid multi-unit proof.
+
+Primary references:
+
+- [hie-bios changelog](https://github.com/haskell/hie-bios/blob/master/ChangeLog.md)
+- [GHC multiple home units and closure invariant](https://downloads.haskell.org/ghc/9.10.3/docs/users_guide/using.html#multiple-home-units)
+- [Cabal build-info JSON](https://cabal.readthedocs.io/en/3.12/cabal-commands.html)
+- [Stack maintainer discussion of build-info generation](https://github.com/commercialhaskell/stack/issues/6154)

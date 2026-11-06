@@ -1,0 +1,10 @@
+resolver: lts-24.50
+packages:
+  - upstream
+  - consumer
+system-ghc: true
+install-ghc: false
+compiler-check: match-exact
+configure-options:
+  $targets:
+    - --enable-build-info

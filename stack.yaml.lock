@@ -5,12 +5,12 @@
 
 packages:
 - completed:
-    hackage: hie-bios-0.18.0@sha256:aee2aed918a5864367efef2aeae632885a0e08bbc1849ee3d2e803adcf5de478,14161
+    hackage: hie-bios-0.21.0@sha256:759726c51f31b51c5b198b1f6076e290228360299b4d7356bd84a4271012217f,10268
     pantry-tree:
-      sha256: add1fa00d94f044ec0e78b773c4d4724bdc14f14f7bd71d9148a9f1ed2751779
-      size: 14684
+      sha256: 35fbb2e5b8b3b789089749c6e528b2717ece132ef97ead3c4adfddd48e4e5504
+      size: 16354
   original:
-    hackage: hie-bios-0.18.0@sha256:aee2aed918a5864367efef2aeae632885a0e08bbc1849ee3d2e803adcf5de478,14161
+    hackage: hie-bios-0.21.0@sha256:759726c51f31b51c5b198b1f6076e290228360299b4d7356bd84a4271012217f,10268
 snapshots:
 - completed:
     sha256: f9f775487e1678844b9f031919ed508a88097aa883002a970d3cd6fc6308b5d2

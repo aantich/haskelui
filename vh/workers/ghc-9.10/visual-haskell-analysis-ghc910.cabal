@@ -20,6 +20,15 @@ extra-source-files:
     test/fixtures/two-module/hie.yaml
     test/fixtures/two-module/A.hs
     test/fixtures/two-module/B.hs
+    test/fixtures/project-loading/consumer/stage0-consumer.cabal
+    test/fixtures/project-loading/upstream/stage0-upstream.cabal
+    test/fixtures/project-loading/consumer/app/Main.hs
+    test/fixtures/project-loading/consumer/shared/Component.hs
+    test/fixtures/project-loading/consumer/src/Downstream.hs
+    test/fixtures/project-loading/consumer/test/Main.hs
+    test/fixtures/project-loading/upstream/src/Upstream.hs
+    test/fixtures/project-loading/cabal.project
+    test/fixtures/project-loading/stack.yaml
 
 source-repository head
   type: git
@@ -43,7 +52,7 @@ library
     , directory
     , filepath
     , ghc ==9.10.3
-    , hie-bios ==0.18.*
+    , hie-bios ==0.21.*
     , mtl
     , stm
     , text
@@ -68,9 +77,40 @@ executable visual-haskell-analysis-ghc910
     , directory
     , filepath
     , ghc ==9.10.3
-    , hie-bios ==0.18.*
+    , hie-bios ==0.21.*
     , mtl
     , stm
+    , text
+    , time
+    , visual-haskell-analysis-ghc910
+    , visual-haskell-analysis-protocol
+    , visual-haskell-semantic-model
+  default-language: Haskell2010
+
+executable visual-haskell-project-loading-spike
+  main-is: Main.hs
+  other-modules:
+      Paths_visual_haskell_analysis_ghc910
+  autogen-modules:
+      Paths_visual_haskell_analysis_ghc910
+  hs-source-dirs:
+      spike
+  ghc-options: -Wall -Wcompat -threaded
+  build-depends:
+      aeson
+    , async
+    , base >=4.20.2 && <4.21
+    , bytestring
+    , containers
+    , directory
+    , filepath
+    , ghc ==9.10.3
+    , ghc-boot
+    , hie-bios ==0.21.*
+    , mtl
+    , process
+    , stm
+    , temporary
     , text
     , time
     , visual-haskell-analysis-ghc910
@@ -95,7 +135,7 @@ test-suite visual-haskell-analysis-ghc-910-test
     , directory
     , filepath
     , ghc ==9.10.3
-    , hie-bios ==0.18.*
+    , hie-bios ==0.21.*
     , mtl
     , stm
     , text

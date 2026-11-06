@@ -19,7 +19,7 @@ import HIE.Bios.Environment
   ( getRuntimeGhcLibDir
   , getRuntimeGhcVersion
   )
-import HIE.Bios.Types (LoadStyle (..))
+import HIE.Bios.Types (LoadMode (..), TargetWithContext (..))
 import VisualHaskell.Analysis.Ghc910.Types
 
 discoverCompilerInvocation
@@ -29,7 +29,7 @@ discoverCompilerInvocation
 discoverCompilerInvocation primary context = do
   configured <- findCradle primary
   cradle <- maybe (loadImplicitCradle mempty primary) (loadCradle mempty) configured
-  optionsResult <- getCompilerOptions primary (LoadWithContext context) cradle
+  optionsResult <- getCompilerOptions (TargetWithContext primary context) LoadFileWithContext cradle
   libDirResult <- getRuntimeGhcLibDir cradle
   versionResult <- getRuntimeGhcVersion cradle
   pure $ do
