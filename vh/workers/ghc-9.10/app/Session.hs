@@ -2,7 +2,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
-module Session (main) where
+module Session (main, withParentLifetime) where
 
 import Control.Exception (SomeException, displayException, try, IOException)
 import Control.Concurrent (threadDelay)
@@ -46,18 +46,22 @@ data WorkerOptions = WorkerOptions
   }
 
 main :: IO ()
-main = do
+main = withParentLifetime runSessionMain
+
+withParentLifetime :: IO () -> IO ()
+withParentLifetime action = do
   parent <- getParentProcessID
   own <- getProcessID
   let monitor = do
         threadDelay 1000000
         current <- getParentProcessID
-        if current == parent then monitor else do
+        if current == parent && parent /= 1 then monitor else do
           -- The coordinator may have been killed, not merely shut down. Each
-          -- compiler has its own process group; reap its subprocesses too.
+          -- compiler/preparation helper has its own process group; reap its
+          -- subprocesses too.
           void (try (signalProcessGroup sigKILL own) :: IO (Either IOException ()))
           exitImmediately (ExitFailure 87)
-  withAsync monitor (const runSessionMain)
+  withAsync monitor (const action)
 
 runSessionMain :: IO ()
 runSessionMain = do

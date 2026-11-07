@@ -434,7 +434,9 @@ unsaved analyses cannot contaminate Stack's build products.
 
 The outer worker is an asynchronous coordinator: trust, discovery, preparation,
 watch events and newest pending analysis are handled independently of compiler
-work. Tool stdout/stderr are drained concurrently with bounded output and a
+work. Preparation itself is a separate helper process, including hie-bios's
+internal Cabal/Setup invocations, so it has one cancellable process group.
+Tool stdout/stderr are drained concurrently with bounded output and a
 15-minute operation limit. Cancellation kills the whole tool/compiler process
 group. One live child GHC session and two cached prepared contexts are the
 initial memory budget. Switching context starts a fresh child/session nonce;
@@ -479,7 +481,8 @@ claim to sandbox Custom Setup, preprocessors, plugins or Template Haskell.
 `tests/visual-haskell/validate-project-loading.sh` builds the worker and real
 acceptance executable, releases Stack's outer lock, and runs copied fixtures
 under Cabal and Stack. It checks unsaved cross-package break/recovery, separate
-and shared Main/module contexts, compiler restart replay, cancel/retry,
+and shared Main/module contexts, compiler restart replay, in-flight preparation
+cancellation/retry,
 configuration atomic replacement, dependency close, Hpack, internal libraries,
 benchmarks, conditional flags/roots, named configurations, paths with spaces,
 Custom Setup-generated source and standalone `.cabal`. The `self-host` argument

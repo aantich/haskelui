@@ -62,6 +62,11 @@ protocolCheck root profile catalog = do
     check "restart restores project choice and all unsaved documents" (restored.analysisCompleteness == Typechecked && restored.analysisSession /= fixed.analysisSession)
     -- Test/executable contexts share Component.hs but give it DIFFERENT types.
     test <- maybe (fail "missing test descriptor") pure (find ((== TestComponent) . projectComponentKind) catalog.catalogComponents)
+    sendAnalysisMessage client (base (PrepareComponent test.projectComponentId))
+    _ <- await events (\message -> case message of ProjectProgress text | "Preparing " `T.isPrefixOf` text -> Just (); _ -> Nothing)
+    sendAnalysisMessage client (base (CancelRequest (RequestId 0)))
+    _ <- await events (\message -> case message of ProjectProgress text | "cancelled" `T.isInfixOf` text -> Just (); _ -> Nothing)
+    putStrLn "  ok: in-flight component preparation can be cancelled"
     let sharedPath = root </> "consumer/shared/Component.hs"
     sharedSource <- T.readFile sharedPath
     let shared = document "shared" sharedPath sharedSource

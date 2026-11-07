@@ -14,7 +14,10 @@ import Data.List (find, nub)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as TextEncoding
 import qualified Data.Text.IO as TextIO
+import Data.Aeson (encode, eitherDecodeStrict')
+import qualified Data.ByteString.Lazy as Bytes
 import System.Directory hiding (executable)
 import System.Environment
 import System.FilePath
@@ -23,7 +26,6 @@ import System.Timeout (timeout)
 import System.Exit (exitWith, ExitCode (ExitFailure))
 import qualified System.FSNotify as FS
 import VisualHaskell.Analysis.Client
-import VisualHaskell.Analysis.Ghc910 (prepareProjectContext)
 import VisualHaskell.Analysis.Protocol
 import VisualHaskell.Projects
 import VisualHaskell.Semantic
@@ -282,11 +284,17 @@ prepare events incoming component state = case state.catalog >>= find ((== compo
           Nothing -> pure started
       Nothing -> do
         cache <- cacheOf next
+        executable <- getExecutablePath
         let token = next.epoch
             progress message = atomically (writeTQueue events (Progress token incoming message))
+            contextCache = cache </> "contexts" </> show (unContentHash (contentHash component.unComponentId))
         worker <- async $ do
-          result <- try (prepareProjectContext (runTool progress) (cache </> "contexts" </> show (unContentHash (contentHash component.unComponentId)))
-            (fromMaybe emptyProjectCatalog next.catalog) descriptor)
+          result <- try $ do
+            createDirectoryIfMissing True contextCache
+            let request = contextCache </> "prepare-request.json"
+            Bytes.writeFile request (encode (contextCache, fromMaybe emptyProjectCatalog next.catalog, descriptor))
+            output <- runTool progress (rootOf next) executable ["--prepare-context", request]
+            either fail pure (eitherDecodeStrict' (TextEncoding.encodeUtf8 output))
           atomically (writeTQueue events (ContextReady token incoming result))
         respond incoming (ProjectProgress ("Preparing " <> descriptor.projectComponentTarget))
         pure next {job = Just worker}

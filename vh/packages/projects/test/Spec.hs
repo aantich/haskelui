@@ -81,6 +81,11 @@ main = withSystemTempDirectory "vh-project-contracts" $ \root -> do
         alive <- try (signalProcess nullSignal child) :: IO (Either IOException ())
         case alive of Left _ -> pure (); Right () -> threadDelay 10000 >> awaitExit (attempts - 1)
   awaitExit (100 :: Int)
+  logs <- newIORef []
+  _ <- runTool (\message -> modifyIORef' logs (message :)) root "sh"
+    ["-c", "printf 'pré' >&2; sleep 0.05; printf 'paration\\n' >&2"]
+  messages <- readIORef logs
+  check "fragmented tool stderr forms intact UTF-8 log lines" ("préparation" `elem` messages)
   missing <- try (runTool (const (pure ())) root "/definitely/missing/vh-tool" []) :: IO (Either IOException Text)
   check "missing tools fail without terminating the IDE" (case missing of Left _ -> True; _ -> False)
   putStrLn "Project discovery, trust, ownership and closure tests passed"

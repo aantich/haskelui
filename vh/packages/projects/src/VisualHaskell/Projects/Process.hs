@@ -51,22 +51,32 @@ runTool progress directory executable arguments = do
     drain isError (Just handle) = do
       chunks <- newIORef []
       retained <- newIORef (0 :: Int)
-      let loop = do
+      logBuffer <- newIORef BS.empty
+      let emitLines pending = case BS.break (== 10) pending of
+            (line, rest) | not (BS.null rest) ->
+              progress (Text.decodeUtf8With lenientDecode line) >> emitLines (BS.drop 1 rest)
+            _ | BS.length pending >= 4096 ->
+              progress (Text.decodeUtf8With lenientDecode (BS.take 4096 pending)) >> emitLines (BS.drop 4096 pending)
+            _ -> pure pending
+          loop = do
             bytes <- BS.hGetSome handle 4096
             unless (BS.null bytes) $ do
-              let message = Text.decodeUtf8With lenientDecode bytes
-              whenOutput isError message
+              if isError then do
+                previous <- readIORef logBuffer
+                remaining <- emitLines (previous <> bytes)
+                writeIORef logBuffer remaining
+              else pure ()
               count <- readIORef retained
               if count < 2 * 1024 * 1024
                 then modifyIORef' chunks (bytes :) >> modifyIORef' retained (+ BS.length bytes)
                 else modifyIORef' retained (+ BS.length bytes)
               loop
       loop
+      remaining <- readIORef logBuffer
+      unless (BS.null remaining) (progress (Text.decodeUtf8With lenientDecode remaining))
       count <- readIORef retained
       if count > 2 * 1024 * 1024
         then ioError (userError "Project tool output exceeded the 2 MiB safety limit; inspect the build-tool log")
         else Text.decodeUtf8With lenientDecode . BS.concat . reverse <$> readIORef chunks
-    whenOutput True message = progress (Text.take 4096 message)
-    whenOutput False _ = pure ()
     ignore :: IOException -> IO ()
     ignore _ = pure ()
