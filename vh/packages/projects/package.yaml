@@ -3,21 +3,27 @@ version: 0.1.0.0
 license: BSD-3-Clause
 github: aantich/haskelui
 dependencies:
-  - base >= 4.20.2 && < 4.21
+  - base >= 4.18.3 && < 4.21
   - aeson
   - async
   - bytestring
-  - Cabal-syntax
+  - Cabal-syntax >= 3.12 && < 3.13
   - containers
   - directory
   - filepath
+  - filelock
   - fsnotify
   - process
   - stm
   - text
+  - tar
+  - temporary
+  - template-haskell
   - time
   - unix
+  - zlib
   - visual-haskell-semantic-model
+  - visual-haskell-analysis-protocol
 ghc-options: [-Wall, -Wcompat]
 data-files: [data/BuildInfoHelper.hs]
 library:
@@ -25,7 +31,14 @@ library:
   exposed-modules:
     - VisualHaskell.Projects
     - VisualHaskell.Projects.Process
+    - VisualHaskell.Projects.Toolchains
   other-modules: [Paths_visual_haskell_projects]
+executables:
+  visual-haskell-project-coordinator:
+    main: Main.hs
+    source-dirs: app
+    dependencies: [visual-haskell-projects, visual-haskell-analysis-client]
+    ghc-options: [-threaded]
 tests:
   project-model-test:
     main: Spec.hs

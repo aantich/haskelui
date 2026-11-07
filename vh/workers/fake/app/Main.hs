@@ -4,11 +4,13 @@
 module Main (main) where
 
 import qualified Data.Map.Strict as Map
+import Control.Concurrent (threadDelay)
 import Data.Map.Strict (Map)
 import qualified Data.Text as Text
 import System.Directory (doesFileExist)
 import System.Environment (getArgs)
 import System.Exit (exitFailure)
+import System.Posix.Process (getProcessID)
 import System.IO
   ( BufferMode (NoBuffering)
   , hPutStrLn
@@ -29,6 +31,8 @@ data WorkerState = WorkerState
 
 data FakeConfiguration = FakeConfiguration
   { crashOnceMarker :: !(Maybe FilePath)
+  , stallBeforeHello :: !(Maybe FilePath)
+  , stallAfterHello :: !(Maybe FilePath)
   }
 
 main :: IO ()
@@ -40,6 +44,7 @@ main = do
   first <- readFrame defaultFrameLimits stdin
   case first of
     Right envelope@(ProtocolEnvelope {envelopePayload = ClientHelloMessage _}) -> do
+      stall configuration.stallBeforeHello
       send envelope $ WorkerHelloMessage
         WorkerHello
           { workerAcceptedProtocol = protocolV2
@@ -55,6 +60,7 @@ main = do
               ]
           , workerMaximumFrameBytes = maximumFrameBytes defaultFrameLimits
           }
+      stall configuration.stallAfterHello
       loop configuration (WorkerState Nothing Nothing Map.empty)
     Right _ -> failWorker "first frame was not ClientHello"
     Left failure -> failWorker ("could not read ClientHello: " <> show failure)
@@ -99,14 +105,27 @@ loop configuration state = do
         DiscoverProject _ -> send envelope (ProjectDiscovered emptyProjectCatalog) >> loop configuration state
         PrepareComponent _ -> sendFailure envelope "unsupported" "Fake worker has no project preparation" >> loop configuration state
         ConfigureContext _ -> sendFailure envelope "unsupported" "Fake worker has no compiler contexts" >> loop configuration state
+        RefreshToolchains -> send envelope (ToolchainsDiscovered emptyToolchainInventory) >> loop configuration state
+        SelectCompiler _ -> send envelope (ToolchainsDiscovered emptyToolchainInventory) >> loop configuration state
+        BuildAnalysisWorker -> sendFailure envelope "unsupported" "Fake worker does not build adapters" >> loop configuration state
+        OpenToolchainManager -> sendFailure envelope "unsupported" "Fake worker does not open external tools" >> loop configuration state
         ReloadConfiguration -> do
           send envelope (WorkerHealthChanged WorkerHealthy)
           loop configuration state
         ShutdownWorker -> pure ()
 
 parseArguments :: [String] -> FakeConfiguration
-parseArguments ["--crash-once", marker] = FakeConfiguration (Just marker)
-parseArguments _ = FakeConfiguration Nothing
+parseArguments ["--crash-once", marker] = FakeConfiguration (Just marker) Nothing Nothing
+parseArguments ["--stall-before-hello", marker] = FakeConfiguration Nothing (Just marker) Nothing
+parseArguments ["--stall-after-hello", marker] = FakeConfiguration Nothing Nothing (Just marker)
+parseArguments _ = FakeConfiguration Nothing Nothing Nothing
+
+stall :: Maybe FilePath -> IO ()
+stall Nothing = pure ()
+stall (Just marker) = do
+  process <- getProcessID
+  writeFile marker (show process)
+  threadDelay 60000000
 
 crashIfRequested :: FakeConfiguration -> IO ()
 crashIfRequested configuration =

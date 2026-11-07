@@ -4,15 +4,17 @@ module Main (main) where
 import Control.Monad (unless)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (async, cancel, waitCatch)
-import Control.Exception (try, IOException)
+import Control.Exception (try, IOException, bracket)
 import Data.IORef
 import Data.Text (Text)
 import System.Directory
 import System.FilePath
+import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.IO.Temp
 import System.Posix.Signals (nullSignal, signalProcess)
 import VisualHaskell.Projects
 import VisualHaskell.Semantic
+import ToolchainSpec (runToolchainChecks)
 
 main :: IO ()
 main = withSystemTempDirectory "vh-project-contracts" $ \root -> do
@@ -23,6 +25,9 @@ main = withSystemTempDirectory "vh-project-contracts" $ \root -> do
   let runner _ _ _ = modifyIORef' calls (+1) >> fail "ambiguous/untrusted discovery invoked a tool"
   catalog <- discoverProject True runner root Nothing (root </> "cache")
   check "both build tools require an explicit choice" (length catalog.catalogProfiles == 2 && catalog.catalogSelectedProfile == Nothing)
+  preview <- discoverProjectProfiles root (Just "stack:stack.yaml")
+  check "restored profile exposes alternatives before running tools"
+    (length preview.catalogProfiles == 2 && preview.catalogSelectedProfile == Just "stack:stack.yaml" && null preview.catalogComponents)
   untrusted <- discoverProject False runner root (Just "stack:stack.yaml") (root </> "cache")
   count <- readIORef calls
   check "untrusted project cannot invoke tools" (count == 0 && null untrusted.catalogComponents)
@@ -55,6 +60,11 @@ main = withSystemTempDirectory "vh-project-contracts" $ \root -> do
   writeFile (root </> "cabal.project.alternate.freeze") "constraints: base installed\n"
   profiles <- discoverProfiles root
   check "alternate local/freeze files are not selectable profiles" (length profiles == 3)
+  createDirectory (root </> "nested-cradle")
+  writeFile (root </> "nested-cradle/hie.yaml") "cradle:\n  direct:\n    arguments: [-isrc]\n"
+  nested <- discoverProfiles (root </> "nested-cradle")
+  check "nested explicit cradles do not inherit enclosing build-tool profiles"
+    (case nested of [value] -> value.profileTool == CradleProject; _ -> False)
   namedConfigurations <- configurationPaths (profile {profileConfiguration = Just (root </> "cabal.project.alternate")}) [package]
   check "named Cabal configurations watch their own local/freeze files and imports"
     (all (`elem` namedConfigurations) [root </> "cabal.project.alternate.local", root </> "cabal.project.alternate.freeze", root </> "alternate-extra.config"])
@@ -86,9 +96,19 @@ main = withSystemTempDirectory "vh-project-contracts" $ \root -> do
     ["-c", "printf 'pré' >&2; sleep 0.05; printf 'paration\\n' >&2"]
   messages <- readIORef logs
   check "fragmented tool stderr forms intact UTF-8 log lines" ("préparation" `elem` messages)
+  let withVariable key value action = bracket (lookupEnv key <* setEnv key value)
+        (maybe (unsetEnv key) (setEnv key)) (const action)
+  withVariable "GHC_PACKAGE_PATH" "stack-package-dbs" $
+    withVariable "GHC_ENVIRONMENT" "-" $
+      withVariable "VH_PROJECT_TEST_ENV" "retained" $ do
+        output <- runTool (const (pure ())) root "sh"
+          ["-c", "test -z \"${GHC_PACKAGE_PATH+x}\" && test -z \"${GHC_ENVIRONMENT+x}\" && printf '%s' \"$VH_PROJECT_TEST_ENV\""]
+        check "project tools discard inherited compiler overrides only" (output == "retained")
+        check "tool sanitation does not mutate parent environment" . (== Just "stack-package-dbs") =<< lookupEnv "GHC_PACKAGE_PATH"
   missing <- try (runTool (const (pure ())) root "/definitely/missing/vh-tool" []) :: IO (Either IOException Text)
   check "missing tools fail without terminating the IDE" (case missing of Left _ -> True; _ -> False)
   putStrLn "Project discovery, trust, ownership and closure tests passed"
+  runToolchainChecks
 
 check :: String -> Bool -> IO ()
 check message condition = unless condition (fail message)

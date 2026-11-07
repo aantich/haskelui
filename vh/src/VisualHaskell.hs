@@ -182,7 +182,14 @@ data EditorModel = EditorModel
   , analysisProjectOperation :: !(Maybe Bool)
   , analysisOperationIdentity :: !Word64
   , analysisProjectLog :: !Text
+  , analysisToolchains :: !Semantic.ToolchainInventory
+  , analysisCompilerOverride :: !(Maybe FilePath)
+  , analysisCompilerDraft :: !Text
+  , analysisToolchainOperation :: !(Maybe (Word64, ToolchainOperation))
   }
+  deriving stock (Eq, Generic, Show)
+
+data ToolchainOperation = RefreshInstalledToolchains | OpenGhcupManager | BuildSelectedWorker | BuildingSelectedWorker
   deriving stock (Eq, Generic, Show)
 
 data TypeInspectorScope
@@ -236,6 +243,16 @@ reloadProjectCommand = CommandId 16
 cancelProjectCommand = CommandId 17
 revokeTrustCommand :: CommandId
 revokeTrustCommand = CommandId 18
+
+refreshToolchainsCommand, manageToolchainsCommand, buildWorkerCommand, applyCompilerPathCommand :: CommandId
+refreshToolchainsCommand = CommandId 19
+manageToolchainsCommand = CommandId 20
+buildWorkerCommand = CommandId 21
+applyCompilerPathCommand = CommandId 22
+
+compilerChoiceKey, compilerPathKey :: ElementKey
+compilerChoiceKey = ElementKey 283
+compilerPathKey = ElementKey 284
 
 projectProfileKey, projectComponentKey :: ElementKey
 projectProfileKey = ElementKey 106
@@ -465,6 +482,10 @@ initialModel =
     , analysisProjectOperation = Nothing
     , analysisOperationIdentity = 0
     , analysisProjectLog = ""
+    , analysisToolchains = Semantic.emptyToolchainInventory
+    , analysisCompilerOverride = Nothing
+    , analysisCompilerDraft = ""
+    , analysisToolchainOperation = Nothing
     }
 
 editorApplication :: EditorModel -> App EditorModel
@@ -499,6 +520,10 @@ render model =
         , CommandSpec reloadProjectCommand "Reload / Retry Haskell Project" Nothing model.analysisWorkspaceTrusted
         , CommandSpec cancelProjectCommand "Cancel Project Operation" Nothing model.analysisWorkspaceTrusted
         , CommandSpec revokeTrustCommand "Revoke Workspace Analysis Trust" Nothing model.analysisWorkspaceTrusted
+        , CommandSpec manageToolchainsCommand "Open GHCup TUI…" Nothing True
+        , CommandSpec refreshToolchainsCommand "Refresh Installed Haskell Toolchains" Nothing True
+        , CommandSpec buildWorkerCommand "Build Matching Analysis Worker" Nothing (model.analysisWorkspaceTrusted && model.analysisToolchains.selectedCompiler /= Nothing)
+        , CommandSpec applyCompilerPathCommand "Apply Compiler Executable Path" Nothing model.analysisWorkspaceTrusted
         , CommandSpec
             trustWorkspaceCommand
             "Trust Workspace for Haskell Analysis"
@@ -643,13 +668,46 @@ inspectorTabs model =
       , workspaceTabTitle = "Project"
       , workspaceTabModified = False
       , workspaceTabCloseable = False
-      , workspaceTabControls = inspectorTabRoot (ElementKey 280)
-          [topStretchInspectorItem 16 12 12 (Label (ElementKey 281) (Rect 0 0 240 60) model.analysisStatus),
-           fillInspectorItem 84 12 12 12 (debugTextControl 282 model.analysisProjectLog)]
+      , workspaceTabControls = inspectorTabRoot (ElementKey 280) (toolchainInspectorItems model)
       }
   ]
   where
     problems = currentProblems model
+
+toolchainInspectorItems :: EditorModel -> [InspectorTabItem]
+toolchainInspectorItems model =
+  [ topStretchInspectorItem 12 12 12 (Label (ElementKey 281) (Rect 0 0 240 48) model.analysisStatus)
+  , topStretchInspectorItem 66 12 12 (Label (ElementKey 289) (Rect 0 0 240 42) identity)
+  , topStretchInspectorItem 116 12 12 (ChoicePicker (ChoiceControlSpec compilerChoiceKey (Rect 0 0 240 28)
+      (ChoiceItem (ChoiceKey 0) (ControlLabel "Use project compiler" Nothing) True :
+        [ChoiceItem key (ControlLabel ("GHC " <> compiler.compilerVersion <> " · " <> compiler.compilerOrigin) Nothing) True
+          | (key, compiler) <- compilerChoices model] <>
+        [ChoiceItem (compilerPathChoice path) (ControlLabel "Explicit compiler path" Nothing) True
+          | Just path <- [model.analysisCompilerOverride], all ((/= path) . (.compilerExecutable) . snd) (compilerChoices model)])
+      (Just (maybe (ChoiceKey 0) compilerPathChoice model.analysisCompilerOverride)) model.analysisWorkspaceTrusted))
+  , topStretchInspectorItem 152 12 12 (TextField compilerPathKey (Rect 0 0 240 28) model.analysisCompilerDraft "/absolute/path/to/ghc" False)
+  , topStretchInspectorItem 188 12 12 (Button (ElementKey 285) (Rect 0 0 240 28) "Apply compiler path" applyCompilerPathCommand model.analysisWorkspaceTrusted)
+  , topStretchInspectorItem 224 12 12 (Button (ElementKey 286) (Rect 0 0 240 28) "Open GHCup TUI…" manageToolchainsCommand True)
+  , topStretchInspectorItem 260 12 12 (Button (ElementKey 287) (Rect 0 0 240 28) "Refresh installed toolchains" refreshToolchainsCommand True)
+  , topStretchInspectorItem 296 12 12 (Button (ElementKey 288) (Rect 0 0 240 28) "Build matching analysis worker" buildWorkerCommand
+      (model.analysisWorkspaceTrusted && model.analysisToolchains.selectedCompiler /= Nothing))
+  , fillInspectorItem 336 12 12 12 (debugTextControl 282 (Text.intercalate "\n" model.analysisToolchains.toolchainWarnings <> "\n" <> model.analysisProjectLog))
+  ]
+  where
+    identity = case model.analysisToolchains.selectedCompiler of
+      Nothing -> "Compiler: project-selected\nNo compiler installation is owned by the IDE"
+      Just compiler -> "GHC " <> compiler.compilerVersion <> " · " <>
+        (if model.analysisToolchains.selectedWorker == Nothing then "analysis worker missing" else "analysis worker ready") <>
+        "\n" <> Text.pack compiler.compilerExecutable
+
+compilerPathChoice :: FilePath -> ChoiceKey
+compilerPathChoice = ChoiceKey . Semantic.unContentHash . Semantic.contentHash . Text.pack
+
+compilerChoices :: EditorModel -> [(ChoiceKey, Semantic.CompilerIdentity)]
+compilerChoices model = [(compilerPathChoice compiler.compilerExecutable, compiler) | compiler <- compilers]
+  where compilers = model.analysisToolchains.installedCompilers <>
+          [selected | Just selected <- [model.analysisToolchains.selectedCompiler],
+            all ((/= selected.compilerExecutable) . (.compilerExecutable)) model.analysisToolchains.installedCompilers]
 
 documentTab :: EditorModel -> TabKey -> Maybe WorkspaceTabSpec
 documentTab model tabKey = do
@@ -1552,12 +1610,25 @@ analysisCommandsForTransition
   -> EditorModel
   -> [RuntimeCommand EditorModel]
 analysisCommandsForTransition endpoint oldModel newModel
+  | oldModel.analysisToolchainOperation /= newModel.analysisToolchainOperation
+  , Just (_, operation) <- newModel.analysisToolchainOperation =
+      case operation of
+        OpenGhcupManager -> [sendService endpoint (OpenAnalysisToolchainManager generation workspace)]
+        -- Both operations start a new semantic generation and replay open
+        -- buffers. A build waits for that generation's compiler discovery;
+        -- the coordinator cannot build immediately after OpenWorkspace.
+        _ -> cancelTask analysisEditDebounceTaskKey : analysisCommandsForCurrentState endpoint newModel
   | oldModel.projectRoot /= newModel.projectRoot
       || oldModel.analysisWorkspaceTrusted /= newModel.analysisWorkspaceTrusted =
       cancelTask analysisEditDebounceTaskKey
         : analysisCommandsForCurrentState endpoint newModel
   | not newModel.analysisWorkspaceTrusted = []
   | newModel.projectRoot == Nothing = []
+  | oldModel.analysisCompilerOverride /= newModel.analysisCompilerOverride =
+      -- A compiler change is a new semantic authority. Reopen with a fresh
+      -- generation and all unsaved snapshots so already queued old-compiler
+      -- results cannot be accepted during the switch.
+      cancelTask analysisEditDebounceTaskKey : analysisCommandsForCurrentState endpoint newModel
   | oldModel.analysisProfileChoice /= newModel.analysisProfileChoice =
       [sendService endpoint (DiscoverAnalysisProject newModel.analysisWorkspaceGeneration (analysisWorkspaceId newModel) newModel.analysisProfileChoice)]
         <> analysisCommandsForSelected endpoint newModel
@@ -1575,6 +1646,8 @@ analysisCommandsForTransition endpoint oldModel newModel
         <> fmap (sendService endpoint . upsertCommand) changedDocuments
         <> analysisSchedulingCommands
   where
+    generation = newModel.analysisWorkspaceGeneration
+    workspace = analysisWorkspaceId newModel
     oldAnalysisDocuments = Map.filter isHaskellDocument oldModel.documents
     newAnalysisDocuments = Map.filter isHaskellDocument newModel.documents
     closedDocuments = Map.elems (oldAnalysisDocuments `Map.difference` newAnalysisDocuments)
@@ -1592,6 +1665,7 @@ analysisCommandsForTransition endpoint oldModel newModel
           any ((== selected.documentKey) . (.documentKey)) changedDocuments
     selectionChanged = oldModel.selectedTab /= newModel.selectedTab
     analysisSchedulingCommands
+      | adapterBuildPending newModel = []
       | null changedDocuments && null closedDocuments && not selectionChanged = []
       | Just selected <- selectedDocument newModel
       , isHaskellDocument selected
@@ -1694,8 +1768,9 @@ analysisCommandsForCurrentState
 analysisCommandsForCurrentState endpoint model =
   case (model.analysisWorkspaceTrusted, model.projectRoot) of
     (False, Just root) -> [sendService endpoint (ConfigureAnalysisWorkspace model.analysisWorkspaceGeneration
-      (AnalysisProtocol.WorkspaceRequest (analysisWorkspaceId model) root AnalysisProtocol.UntrustedWorkspace))]
-    (_, Nothing) -> []
+      (AnalysisProtocol.WorkspaceRequest (analysisWorkspaceId model) root AnalysisProtocol.UntrustedWorkspace)),
+      sendService endpoint (RefreshAnalysisToolchains model.analysisWorkspaceGeneration (analysisWorkspaceId model))]
+    (_, Nothing) -> [sendService endpoint (RefreshAnalysisToolchains model.analysisWorkspaceGeneration (analysisWorkspaceId model))]
     (True, Just root) ->
       sendService endpoint
         ( ConfigureAnalysisWorkspace
@@ -1706,8 +1781,9 @@ analysisCommandsForCurrentState endpoint model =
               , AnalysisProtocol.workspaceRequestTrust = AnalysisProtocol.TrustedWorkspace
               }
         )
-        : sendService endpoint (DiscoverAnalysisProject model.analysisWorkspaceGeneration workspace model.analysisProfileChoice)
-        : fmap (sendService endpoint . upsertCommand) documentsToAnalyze
+        : [sendService endpoint (SelectAnalysisCompiler model.analysisWorkspaceGeneration workspace (Just path)) | Just path <- [model.analysisCompilerOverride]]
+        <> [sendService endpoint (DiscoverAnalysisProject model.analysisWorkspaceGeneration workspace model.analysisProfileChoice)]
+        <> fmap (sendService endpoint . upsertCommand) documentsToAnalyze
           <> maybe [] (pure . sendService endpoint . analyzeCommand) selectedToAnalyze
       where
         workspace = analysisWorkspaceId model
@@ -1878,10 +1954,26 @@ applyAnalysisServiceEvent endpoint serviceEvent model =
    updated = applyTransaction initial model
    followup = case serviceEvent of
      AnalysisClientChanged (AnalysisClient.AnalysisWorkerMessage generation envelope)
+       | AnalysisProtocol.ToolchainsDiscovered inventory <- envelope.envelopePayload
+       , inventory.selectedCompiler /= Nothing
+       , Just (_, BuildSelectedWorker) <- model.analysisToolchainOperation
+       , model.analysisWorkerGeneration == Just generation
+       , envelope.envelopeWorkspaceGeneration == model.analysisWorkspaceGeneration
+       , model.analysisWorkspaceTrusted ->
+           [sendService endpoint (BuildAnalysisAdapter updated.analysisWorkspaceGeneration (analysisWorkspaceId updated))]
+     AnalysisClientChanged (AnalysisClient.AnalysisWorkerMessage generation envelope)
+       | AnalysisProtocol.ToolchainsDiscovered inventory <- envelope.envelopePayload
+       , inventory.selectedWorker /= Nothing
+       , model.analysisWorkerGeneration == Just generation
+       , envelope.envelopeWorkspaceGeneration == model.analysisWorkspaceGeneration
+       , model.analysisWorkspaceTrusted
+       , not (adapterBuildPending updated) -> analysisCommandsForSelected endpoint updated
+     AnalysisClientChanged (AnalysisClient.AnalysisWorkerMessage generation envelope)
        | AnalysisProtocol.ProjectDiscovered catalog <- envelope.envelopePayload
        , model.analysisWorkerGeneration == Just generation
        , envelope.envelopeWorkspaceGeneration == model.analysisWorkspaceGeneration
        , model.analysisWorkspaceTrusted
+       , not (adapterBuildPending updated)
        , catalog.catalogSelectedProfile /= Nothing ->
            [sendService endpoint (PrepareAnalysisComponent updated.analysisWorkspaceGeneration (analysisWorkspaceId updated) component)
              | Just component <- [updated.analysisComponentChoice], any ((== component) . (.projectComponentId)) catalog.catalogComponents]
@@ -1952,6 +2044,12 @@ applyAnalysisWorkerMessage generation envelope model
   , envelope.envelopeInputHash /= Just (analysisInputs model) = noTransaction
   | otherwise =
       case AnalysisProtocol.envelopePayload envelope of
+        AnalysisProtocol.ToolchainsDiscovered inventory -> transactionWithEffects "Update installed toolchains" NoUndo [] $ \current -> current
+          {analysisToolchains = inventory,
+           analysisToolchainOperation = case current.analysisToolchainOperation of
+             Just (nonce, BuildSelectedWorker) | inventory.selectedCompiler /= Nothing -> Just (nonce, BuildingSelectedWorker)
+             Just (_, BuildingSelectedWorker) -> Nothing
+             operation -> operation}
         AnalysisProtocol.ProjectDiscovered catalog -> transactionWithEffects "Update project inventory" NoUndo [] $ \current -> current
           { analysisProjectCatalog = catalog, analysisProfileChoice = catalog.catalogSelectedProfile
           , analysisStatus = if null catalog.catalogWarnings then "Project ready · select a component or open a Haskell file" else Text.intercalate "; " catalog.catalogWarnings
@@ -2269,7 +2367,8 @@ analysisFailureTransaction :: AnalysisProtocol.RequestFailure -> Transaction Edi
 analysisFailureTransaction failure =
   transactionWithEffects "Report project/compiler failure" NoUndo [] $ \current -> current
     {analysisStatus = prefix <> failure.requestFailureMessage,
-     analysisProjectLog = Text.takeEnd 65536 (current.analysisProjectLog <> "\n" <> failure.requestFailureCode <> ": " <> failure.requestFailureMessage)}
+     analysisProjectLog = Text.takeEnd 65536 (current.analysisProjectLog <> "\n" <> failure.requestFailureCode <> ": " <> failure.requestFailureMessage),
+     analysisToolchainOperation = if adapterBuildPending current then Nothing else current.analysisToolchainOperation}
   where
     prefix
       | failure.requestFailureCode == "incompatible-compiler" =
@@ -2437,10 +2536,18 @@ handleEventWithoutPersistence event model =
           trustAnalysisWorkspace model
       | command == revokeTrustCommand ->
           revokeAnalysisTrust model
+      | command == manageToolchainsCommand -> toolchainOperation OpenGhcupManager model
+      | command == refreshToolchainsCommand -> toolchainOperation RefreshInstalledToolchains model
+      | command == buildWorkerCommand, model.analysisWorkspaceTrusted -> toolchainOperation BuildSelectedWorker model
+      | command == applyCompilerPathCommand, model.analysisWorkspaceTrusted ->
+          let path = Text.unpack (Text.strip model.analysisCompilerDraft) in
+          if not (null path) && not (isAbsolute path)
+          then analysisStatusTransaction "Choose an absolute compiler executable path, or leave it empty to use the project compiler"
+          else setCompilerOverride (if null path then Nothing else Just path) model
       | command == reloadProjectCommand || command == cancelProjectCommand ->
           transactionWithEffects "Control project operation" NoUndo [] $ \current -> current
             {analysisProjectOperation = Just (command == reloadProjectCommand), analysisOperationIdentity = current.analysisOperationIdentity + 1,
-              analysisComponent = Nothing, analysisSnapshots = Map.empty}
+              analysisComponent = Nothing, analysisSnapshots = Map.empty, analysisToolchainOperation = Nothing}
       | command == saveCommand ->
           saveActiveDocument model
     ProjectFolderChosen chosenPath -> openProjectFolder chosenPath model
@@ -2497,6 +2604,8 @@ handleEventWithoutPersistence event model =
                 "Open text document"
                 NoUndo
                 (insertDocumentAction readPath readContents)
+    TextChanged changedKey changedContents | changedKey == compilerPathKey ->
+      transactionWithEffects "Edit compiler executable path" NoUndo [] (\current -> current {analysisCompilerDraft = changedContents})
     TextChanged changedKey changedContents ->
       case find ((== changedKey) . (.documentEditorKey)) (Map.elems model.documents) of
         Nothing -> noTransaction
@@ -2518,15 +2627,22 @@ handleEventWithoutPersistence event model =
             NoUndo
             (editorProperties.functionsInspectorDebug .= (value == ToggleOn))
     ChoiceChanged key selected
+      | key == compilerChoiceKey, model.analysisWorkspaceTrusted ->
+          case selected of
+            Just (ChoiceKey 0) -> setCompilerOverride Nothing model
+            Just choice | Just compiler <- lookup choice (compilerChoices model) -> setCompilerOverride (Just compiler.compilerExecutable) model
+            _ -> noTransaction
       | key == projectProfileKey
       , Just profile <- selected >>= (`lookup` profileChoices model) ->
           transactionWithEffects "Select project configuration" NoUndo [] $ \current -> current
             {analysisProfileChoice = Just profile.profileId, analysisComponentChoice = Nothing, analysisComponent = Nothing,
-              analysisProjectCatalog = current.analysisProjectCatalog {Semantic.catalogComponents = []}, analysisSnapshots = Map.empty}
+              analysisProjectCatalog = current.analysisProjectCatalog {Semantic.catalogComponents = []}, analysisSnapshots = Map.empty,
+              analysisToolchainOperation = Nothing}
       | key == projectComponentKey
       , Just component <- selected >>= (`lookup` componentChoices model) ->
           transactionWithEffects "Select project component" NoUndo [] $ \current -> current
             {analysisComponentChoice = Just component.projectComponentId, analysisComponent = Nothing, analysisSnapshots = Map.empty,
+              analysisToolchainOperation = Nothing,
               analysisFileContexts = maybe current.analysisFileContexts
                 (\document -> if componentOwnsPath component document.documentPath
                   then Map.insert document.documentPath component.projectComponentId current.analysisFileContexts else current.analysisFileContexts) (selectedDocument current)}
@@ -2581,6 +2697,7 @@ handleEventWithoutPersistence event model =
             "Remember inspector pane state"
             NoUndo
             (editorProperties.inspectorState .= paneState)
+    WindowActivated _ | Just (_, OpenGhcupManager) <- model.analysisToolchainOperation -> toolchainOperation RefreshInstalledToolchains model
     WindowCloseRequested key
       | key == workspaceWindowKey -> closeWorkspaceRequested model
     TextFileWritten writtenKey writtenPath writtenContents result ->
@@ -2620,6 +2737,40 @@ markAnalysisPending document model update
         }
   | otherwise = update
 
+adapterBuildPending :: EditorModel -> Bool
+adapterBuildPending model = case model.analysisToolchainOperation of
+  Just (_, BuildSelectedWorker) -> True
+  Just (_, BuildingSelectedWorker) -> True
+  _ -> False
+
+toolchainOperation :: ToolchainOperation -> EditorModel -> Transaction EditorModel
+toolchainOperation operation model = transactionWithEffects "Control existing Haskell toolchain" NoUndo [] $ \current -> current
+  {analysisToolchainOperation = Just (maybe 1 ((+ 1) . fst) model.analysisToolchainOperation, operation),
+   analysisWorkspaceGeneration = if invalidate then nextWorkspaceGeneration current.analysisWorkspaceGeneration else current.analysisWorkspaceGeneration,
+   analysisComponent = if invalidate then Nothing else current.analysisComponent,
+   analysisSnapshots = if invalidate then Map.empty else current.analysisSnapshots,
+   analysisToolchains = if invalidate then current.analysisToolchains {Semantic.selectedCompiler = Nothing, Semantic.selectedWorker = Nothing} else current.analysisToolchains,
+   functionCanvasRequest = if invalidate then Nothing else current.functionCanvasRequest,
+   functionCanvasResult = if invalidate then Nothing else current.functionCanvasResult,
+   functionCanvasStatus = if invalidate then "Waiting for current compiler analysis…" else current.functionCanvasStatus,
+   pendingDefinition = if invalidate then Nothing else current.pendingDefinition,
+   documents = if invalidate then Map.map (\document -> document {documentQuery = Nothing, documentAssistance = Nothing}) current.documents else current.documents,
+   analysisStatus = if invalidate then "Refreshing project toolchain; preserving open buffers…" else current.analysisStatus}
+  where invalidate = operation /= OpenGhcupManager
+
+setCompilerOverride :: Maybe FilePath -> EditorModel -> Transaction EditorModel
+setCompilerOverride path model
+  | path == model.analysisCompilerOverride = noTransaction
+  | otherwise = transactionWithEffects "Locate project compiler" NoUndo [] $ \current -> current
+      {analysisCompilerOverride = path, analysisCompilerDraft = maybe "" Text.pack path,
+       analysisToolchainOperation = Nothing,
+       analysisWorkspaceGeneration = nextWorkspaceGeneration current.analysisWorkspaceGeneration,
+       analysisStatus = "Switching project compiler; preserving open buffers…",
+       analysisComponent = Nothing, analysisSnapshots = Map.empty,
+       analysisToolchains = current.analysisToolchains {Semantic.selectedCompiler = Nothing, Semantic.selectedWorker = Nothing},
+       functionCanvasRequest = Nothing, functionCanvasResult = Nothing,
+       documents = Map.map (\document -> document {documentQuery = Nothing, documentAssistance = Nothing}) current.documents}
+
 revokeAnalysisTrust :: EditorModel -> Transaction EditorModel
 revokeAnalysisTrust model = transactionWithEffects "Revoke compiler execution trust" NoUndo
   [trustRegistryWriteEffect path registry | Just path <- [model.workspaceTrustRegistryPath]] $ \current -> current
@@ -2636,6 +2787,10 @@ projectPropertyIds =
   , propertyId editorProperties.analysisComponentChoice
   , propertyId editorProperties.analysisFileContexts
   , propertyId editorProperties.analysisProjectLog
+  , propertyId editorProperties.analysisToolchains
+  , propertyId editorProperties.analysisCompilerOverride
+  , propertyId editorProperties.analysisCompilerDraft
+  , propertyId editorProperties.analysisToolchainOperation
   , propertyId editorProperties.analysisWorkspaceTrusted
   , propertyId editorProperties.workspaceTrustRegistry
   , propertyId editorProperties.workspaceRequestedAnalysisTrust
@@ -2701,6 +2856,10 @@ setProjectRoot rootPath trusted model =
     , analysisComponentChoice = Nothing
     , analysisFileContexts = Map.empty
     , analysisProjectLog = ""
+    , analysisToolchains = Semantic.emptyToolchainInventory
+    , analysisCompilerOverride = Nothing
+    , analysisCompilerDraft = ""
+    , analysisToolchainOperation = Nothing
     , analysisWorkspaceTrusted = trusted
     , workspaceTrustRegistry =
         if trusted
@@ -2985,6 +3144,8 @@ restoreWorkspaceState root state =
         , propertyId editorProperties.analysisProfileChoice
         , propertyId editorProperties.analysisComponentChoice
         , propertyId editorProperties.analysisFileContexts
+        , propertyId editorProperties.analysisCompilerOverride
+        , propertyId editorProperties.analysisCompilerDraft
         , propertyId editorProperties.projectSelectedEntry
         , propertyId editorProperties.navigatorState
         , propertyId editorProperties.inspectorState
@@ -3023,6 +3184,8 @@ restoreWorkspaceState root state =
         , analysisProfileChoice = state.workspaceProjectProfile
         , analysisComponentChoice = state.workspaceProjectComponent
         , analysisFileContexts = Map.fromList [(path, component) | (relative, component) <- state.workspaceFileContexts, Just path <- [fromWorkspaceRelativePath root relative]]
+        , analysisCompilerOverride = state.workspaceCompilerOverride
+        , analysisCompilerDraft = maybe "" Text.pack state.workspaceCompilerOverride
         , projectSelectedEntry = explorerSelection
         , navigatorState = state.workspaceNavigatorPane
         , inspectorState = state.workspaceInspectorPane
@@ -3155,6 +3318,7 @@ workspaceStateFromModel model = do
       , workspaceAnalysisTrusted = model.analysisWorkspaceTrusted
       , workspaceProjectProfile = model.analysisProfileChoice
       , workspaceProjectComponent = model.analysisComponentChoice
+      , workspaceCompilerOverride = model.analysisCompilerOverride
       , workspaceFileContexts = [(relative, component) | (path, component) <- Map.toList model.analysisFileContexts, Just relative <- [toWorkspaceRelativePath root path]]
       }
 

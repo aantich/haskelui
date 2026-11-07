@@ -38,7 +38,7 @@ library
   ghc-options: -Wall -Wcompat
   build-depends:
       aeson
-    , base >=4.20.2 && <4.21
+    , base >=4.18.3 && <4.21
     , bytestring
     , text
     , visual-haskell-semantic-model
@@ -56,7 +56,7 @@ test-suite visual-haskell-analysis-protocol-test
   ghc-options: -Wall -Wcompat
   build-depends:
       aeson
-    , base >=4.20.2 && <4.21
+    , base >=4.18.3 && <4.21
     , bytestring
     , directory
     , filepath

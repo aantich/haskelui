@@ -29,6 +29,7 @@ library
       VisualHaskell.Semantic.Types
       VisualHaskell.Semantic.FunctionUniverse
       VisualHaskell.Semantic.Project
+      VisualHaskell.Semantic.Toolchain
   other-modules:
       Paths_visual_haskell_semantic_model
   autogen-modules:
@@ -38,7 +39,7 @@ library
   ghc-options: -Wall -Wcompat
   build-depends:
       aeson
-    , base >=4.20.2 && <4.21
+    , base >=4.18.3 && <4.21
     , bytestring
     , containers
     , text
@@ -56,7 +57,7 @@ test-suite visual-haskell-semantic-model-test
   ghc-options: -Wall -Wcompat
   build-depends:
       aeson
-    , base >=4.20.2 && <4.21
+    , base >=4.18.3 && <4.21
     , bytestring
     , containers
     , text

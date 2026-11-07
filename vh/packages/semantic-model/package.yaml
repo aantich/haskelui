@@ -11,7 +11,7 @@ copyright: 2026 Visual Haskell contributors
 
 dependencies:
   - aeson
-  - base >= 4.20.2 && < 4.21
+  - base >= 4.18.3 && < 4.21
   - bytestring
   - containers
   - text
@@ -29,6 +29,7 @@ library:
     - VisualHaskell.Semantic.Types
     - VisualHaskell.Semantic.FunctionUniverse
     - VisualHaskell.Semantic.Project
+    - VisualHaskell.Semantic.Toolchain
 
 tests:
   visual-haskell-semantic-model-test:

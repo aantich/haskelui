@@ -455,14 +455,20 @@ documentEnvelope generation workspace document payload =
     , envelopeContentHash = Just document.snapshotContentHash
     }
 
-awaitMatching :: TQueue event -> (event -> Maybe value) -> IO value
+awaitMatching :: TQueue AnalysisClientEvent -> (AnalysisClientEvent -> Maybe value) -> IO value
 awaitMatching events select = do
   result <- timeout 30000000 loop
   maybe (fail "timed out waiting for GHC worker event") pure result
   where
     loop = do
       event <- atomically (readTQueue events)
-      maybe loop pure (select event)
+      case select event of
+        Just value -> pure value
+        Nothing -> case event of
+          AnalysisWorkerProtocolFailure _ message -> fail (Text.unpack message)
+          AnalysisWorkerMessage _ envelope | WorkerRequestFailed _ failure <- envelope.envelopePayload ->
+            fail (Text.unpack failure.requestFailureCode <> ": " <> Text.unpack failure.requestFailureMessage)
+          _ -> loop
 
 assert :: String -> Bool -> IO ()
 assert message condition = unless condition (fail message)

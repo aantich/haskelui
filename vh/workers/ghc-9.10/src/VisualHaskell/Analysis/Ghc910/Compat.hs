@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE NamedFieldPuns #-}
@@ -119,7 +120,9 @@ import GHC.Types.Name
 import GHC.Types.Name.Occurrence
   ( NameSpace
   , isDataConNameSpace
+#if MIN_VERSION_ghc(9,8,0)
   , isFieldNameSpace
+#endif
   , isTcClsNameSpace
   , isVarNameSpace
   , occNameSpace
@@ -159,6 +162,7 @@ import GHC.Unit.Types
   , unitIdString
   )
 import HIE.Bios.Environment (initSession)
+import VisualHaskell.Analysis.Ghc910.Version (compilerVersionText)
 import HIE.Bios.Types (ComponentOptions (..))
 import Language.Haskell.Syntax.Basic (FieldLabelString (..))
 import Language.Haskell.Syntax.Module.Name (moduleNameString)
@@ -167,6 +171,20 @@ import System.IO (stderr)
 import VisualHaskell.Analysis.Ghc910.Types
 import VisualHaskell.Semantic
 import VisualHaskell.Analysis.Protocol.Queries
+
+#if !MIN_VERSION_ghc(9,8,0)
+-- Before GHC 9.8 record selectors share the ordinary variable namespace.
+isFieldNameSpace :: NameSpace -> Bool
+isFieldNameSpace _ = False
+#endif
+
+#if MIN_VERSION_ghc(9,8,0)
+readerName :: Reader.GlobalRdrEltX info -> Name
+readerName = Reader.greName
+#else
+readerName :: Reader.GlobalRdrElt -> Name
+readerName = Reader.greMangledName
+#endif
 
 -- Ask GHC to interpret the actual flags rather than guessing source roots from
 -- every conditional branch of a .cabal file. This does NOT load source code.
@@ -460,7 +478,7 @@ buildQueryContext invocation documents snapshot = do
           moduleInfo <- GHC.getModuleInfo (GHC.ms_mod summary)
           let globals = maybe [] (maybe [] Reader.globalRdrEnvElts . GHC.modInfoRdrEnv) moduleInfo
           candidates <- forM globals $ \entry -> do
-            thing <- GHC.lookupName (Reader.greName entry)
+            thing <- GHC.lookupName (readerName entry)
             let signature = maybe "" (maybe "" renderType . typeOfThing) thing
             pure [CompletionCandidate (Text.pack (showSDocUnsafe (ppr reader))) signature | reader <- Reader.greRdrNames entry]
           let scopeRanges Hie.ModuleScope = [(0, Text.length snapshot.snapshotText)]
@@ -744,7 +762,7 @@ diagnosticFor
 diagnosticFor snapshot logFlags severity code sourceSpan message = do
   range <- sourceRangeFor snapshot sourceSpan
   let rendered = Text.strip (Text.pack (renderWithContext logFlags.log_default_user_context message))
-      renderedCode = Text.pack . show <$> code
+      renderedCode = Text.pack . showSDocUnsafe . ppr <$> code
       identity =
         DiagnosticId
           ( "ghc:"
@@ -759,7 +777,7 @@ diagnosticFor snapshot logFlags severity code sourceSpan message = do
           SevError -> DiagnosticError
           SevWarning -> DiagnosticWarning
           SevIgnore -> DiagnosticInformation
-      , diagnosticSource = "GHC 9.10.3"
+      , diagnosticSource = "GHC " <> compilerVersionText
       , diagnosticCode = renderedCode
       , diagnosticMessage = rendered
       , diagnosticRange = range
@@ -1093,7 +1111,7 @@ invocationSession invocation =
   case invocation.invocationSessionIdentity of
    Just identity -> identity
    Nothing -> SessionId
-    ( "ghc-9.10.3:"
+    ( "ghc-" <> compilerVersionText <> ":"
         <> Text.pack (show (contentHash (Text.pack (invocation.invocationComponentRoot <> show invocation.invocationCompilerOptions))))
     )
 

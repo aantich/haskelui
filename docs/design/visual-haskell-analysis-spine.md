@@ -404,10 +404,23 @@ named configurations, stops at repository boundaries, and exposes stable
 profile/package/component identities. More than one possible profile requires
 explicit selection. Package inventory includes conditional candidate roots;
 these are not mistaken for the finalized analysis environment.
+Profiles are published before running the selected tool, so a failed restored
+profile cannot hide another configuration. Discovery never automatically
+switches tools after a failure.
 
 Cabal discovery reads an IDE-owned dry-run plan, including local dependencies,
-internal libraries and Custom Setup package nodes. Preparation constructs an
-in-memory explicit hie-bios Cabal cradle with the selected local dependency
+internal libraries and Custom Setup package nodes. Tests/benchmarks are not
+force-enabled in that inventory plan.
+Declared optional components remain selectable for on-demand preparation. An
+explicitly enabled optional stanza that prevents solving is retried disabled,
+with a catalog warning; required-component preparation carries that same
+override into the pinned hie-bios 0.21 Cabal invocation. Whole-package Custom
+Setup nodes retain declared library edges rather than dropping local units.
+If an older Custom Setup causes hie-bios to demote multi-repl to a single
+component, preparation re-queries each dependency's exact flags and assembles
+dependency-ordered home units with their original identities. Duplicate unit
+identities are rejected rather than silently using stale installed interfaces.
+Preparation constructs an in-memory explicit hie-bios Cabal cradle with the selected local dependency
 closure and requests `LoadUnitsFromCradle`. GHC interprets the returned flags
 to obtain actual finalized unit roots and directories. Standalone `.cabal`
 packages use Cabal's implicit project without creating `cabal.project`.
@@ -424,7 +437,8 @@ syntax. The selected analysis unit remains exact.
 The helper is compiled with the project's GHC and boot `Cabal` library and reads
 `setup-config` using Cabal's APIs. It exports real component unit IDs, compiler
 arguments, modules, entry points, finalized source roots and dependency unit
-IDs. Version checks currently require GHC 9.10.3/Cabal 3.12.x. Dependency-first
+IDs. The initial implementation required GHC 9.10.3/Cabal 3.12.x; the toolchain
+integration below extends that boundary. Dependency-first
 `-unit @response-file` environments preserve the local-library closure. Main
 source paths resolve against configured `hs-source-dirs`, not just the package
 directory. Interfaces/objects/HIE/stubs go into IDE-owned unit directories so
@@ -438,7 +452,12 @@ work. Preparation itself is a separate helper process, including hie-bios's
 internal Cabal/Setup invocations, so it has one cancellable process group.
 Tool stdout/stderr are drained concurrently with bounded output and a
 15-minute operation limit. Cancellation kills the whole tool/compiler process
-group. One live child GHC session and two cached prepared contexts are the
+group. Stop uses an out-of-band signal rather than the serial write queue, so
+handshake, replay and pipe backpressure cannot delay cancellation. The complete
+process lifetime is exception-bracketed, and cancellation waits for cleanup
+before acknowledgement. Project-tool environments remove inherited GHC package
+path/environment overrides (including those set by `stack exec`).
+One live child GHC session and two cached prepared contexts are the
 initial memory budget. Switching context starts a fresh child/session nonce;
 crashes replay the workspace, exact selected environment, latest open buffers
 and latest analysis intent.
@@ -499,8 +518,37 @@ analysis. Native regression counters finish with no live windows, controls,
 action targets or test failures. The retained legacy self-hosting path also
 passes (one observed warm in-memory edit: 63 ms; not a performance guarantee).
 
-Supported compiler compatibility is intentionally explicit: GHC 9.10.3 and the
-tested Stack/Cabal metadata boundary above, not every installed compiler. There
-is no automatic compiler download or HLS dependency. Windows process/watch
-adapters, additional compiler workers, a complete project-wide index, build/run
-commands, dependency installation UI and debugging remain separate work.
+Supported compiler compatibility is intentionally explicit, not every installed
+compiler. There is no automatic compiler download or HLS dependency. Windows
+process/watch adapters, a complete project-wide index, build/run commands and
+debugging remain separate work.
+
+### Existing toolchains and multi-GHC dispatch
+
+`visual-haskell-project-coordinator` now lives in the GHC-free `projects`
+package. GHCup is queried offline for installed versions/locations, with PATH
+and explicit executables as fallbacks. Cabal reports its configured compiler;
+Stack is tried in its own environment, then against existing installed GHCs
+using per-process `--system-ghc --no-install-ghc`. Snapshot/compiler checks are
+not disabled. No global selection or project configuration is rewritten.
+
+The worker's compile-time fingerprint includes exact patch version, platform,
+GHC API unit identity and ABI hash. It must match the project's installed GHC.
+The single legacy `workers/ghc-9.10` source tree now supports GHC 9.6.7 and
+9.10.3 using small API compatibility adapters. The native Project panel exposes
+compiler selection/path, refresh, external GHCup TUI and matching-worker build.
+Protocol 2.1 advertises toolchain management; compiler overrides join replay
+and workspace v4 persistence without granting trust.
+
+Only IDE adapter executables/builds are cached by compiler ABI/source version.
+Their builds use normal cabal-install and its existing shared store. Metadata
+helpers are compiled once per compiler/Cabal package/source identity; the
+single canonical helper is embedded for reliable copied-worker deployments,
+and Cabal validates its own configured metadata. Project contexts are separated
+by workspace and compiler fingerprint. Hackage indexes, library versions,
+Stack snapshots and package stores remain entirely owned by the build tools.
+
+Release source bundles are generated from canonical files with
+`tools/package-worker-sources.sh`, extracted safely/atomically into a shared
+cache, and contain no compilers or dependency-store copies. See `vh/README.md`
+for environment overrides, distribution requirements and acceptance commands.

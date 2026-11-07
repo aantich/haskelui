@@ -21,6 +21,7 @@ library
   exposed-modules:
       VisualHaskell.Projects
       VisualHaskell.Projects.Process
+      VisualHaskell.Projects.Toolchains
   other-modules:
       Paths_visual_haskell_projects
   autogen-modules:
@@ -29,27 +30,69 @@ library
       src
   ghc-options: -Wall -Wcompat
   build-depends:
-      Cabal-syntax
+      Cabal-syntax ==3.12.*
     , aeson
     , async
-    , base >=4.20.2 && <4.21
+    , base >=4.18.3 && <4.21
     , bytestring
     , containers
     , directory
+    , filelock
     , filepath
     , fsnotify
     , process
     , stm
+    , tar
+    , template-haskell
+    , temporary
     , text
     , time
     , unix
+    , visual-haskell-analysis-protocol
     , visual-haskell-semantic-model
+    , zlib
+  default-language: Haskell2010
+
+executable visual-haskell-project-coordinator
+  main-is: Main.hs
+  other-modules:
+      Paths_visual_haskell_projects
+  autogen-modules:
+      Paths_visual_haskell_projects
+  hs-source-dirs:
+      app
+  ghc-options: -Wall -Wcompat -threaded
+  build-depends:
+      Cabal-syntax ==3.12.*
+    , aeson
+    , async
+    , base >=4.18.3 && <4.21
+    , bytestring
+    , containers
+    , directory
+    , filelock
+    , filepath
+    , fsnotify
+    , process
+    , stm
+    , tar
+    , template-haskell
+    , temporary
+    , text
+    , time
+    , unix
+    , visual-haskell-analysis-client
+    , visual-haskell-analysis-protocol
+    , visual-haskell-projects
+    , visual-haskell-semantic-model
+    , zlib
   default-language: Haskell2010
 
 test-suite project-model-test
   type: exitcode-stdio-1.0
   main-is: Spec.hs
   other-modules:
+      ToolchainSpec
       Paths_visual_haskell_projects
   autogen-modules:
       Paths_visual_haskell_projects
@@ -57,21 +100,26 @@ test-suite project-model-test
       test
   ghc-options: -Wall -Wcompat
   build-depends:
-      Cabal-syntax
+      Cabal-syntax ==3.12.*
     , aeson
     , async
-    , base >=4.20.2 && <4.21
+    , base >=4.18.3 && <4.21
     , bytestring
     , containers
     , directory
+    , filelock
     , filepath
     , fsnotify
     , process
     , stm
+    , tar
+    , template-haskell
     , temporary
     , text
     , time
     , unix
+    , visual-haskell-analysis-protocol
     , visual-haskell-projects
     , visual-haskell-semantic-model
+    , zlib
   default-language: Haskell2010

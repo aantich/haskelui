@@ -1,7 +1,8 @@
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TemplateHaskell #-}
 module VisualHaskell.Projects
-  ( discoverProfiles, discoverProject, readPackageComponents
+  ( discoverProfiles, discoverProjectProfiles, discoverProject, readPackageComponents
   , ownersForPath, componentDependencyClosure, profileArguments, configurationPaths
   , PlanUnit (..), readCabalPlan, componentPlanName
   , buildInfoHelperSource
@@ -9,6 +10,7 @@ module VisualHaskell.Projects
   ) where
 
 import Control.Monad (filterM, forM)
+import Control.Exception (IOException, try)
 import Data.Aeson hiding (object)
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
@@ -18,6 +20,7 @@ import Data.Maybe (listToMaybe, maybeToList)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.IO as TextIO
 import qualified Distribution.PackageDescription as Cabal
 import Distribution.PackageDescription.Parsec (parseGenericPackageDescription)
 import Distribution.Fields.ParseResult (runParseResult)
@@ -30,12 +33,30 @@ import qualified Distribution.Compat.NonEmptySet as NonEmptySet
 import Distribution.Utils.Path (getSymbolicPath)
 import System.Directory
 import System.FilePath
+import Language.Haskell.TH (runIO, stringE)
+import Language.Haskell.TH.Syntax (addDependentFile)
+import System.FileLock (withFileLock, SharedExclusive (Exclusive))
+import System.IO.Temp (withTempDirectory)
 import VisualHaskell.Semantic
 import VisualHaskell.Projects.Process
-import Paths_visual_haskell_projects (getDataFileName)
 
 buildInfoHelperSource :: IO FilePath
-buildInfoHelperSource = getDataFileName "data/BuildInfoHelper.hs"
+buildInfoHelperSource = do
+  -- Embed the single canonical helper, so a Cabal-built/copied worker doesn't
+  -- depend on Cabal having installed this local package's data-files first.
+  let source = Text.pack $(do
+        addDependentFile "data/BuildInfoHelper.hs"
+        runIO (readFile "data/BuildInfoHelper.hs") >>= stringE)
+  base <- getXdgDirectory XdgCache "visual-haskell/metadata-sources"
+  createDirectoryIfMissing True base
+  let path = base </> show (unContentHash (contentHash source)) <.> "hs"
+  withFileLock (path <.> "lock") Exclusive $ \_ -> do
+    exists <- doesFileExist path
+    if exists then pure () else withTempDirectory base "source-" $ \temporary -> do
+      let staged = temporary </> "BuildInfoHelper.hs"
+      TextIO.writeFile staged source
+      renameFile staged path
+  pure path
 
 -- Nearest configurations win per tool; alternative named configurations at the
 -- selected root are exposed, and parent discovery stops at the repository edge.
@@ -50,7 +71,12 @@ discoverProfiles requested = do
           ("cabal.project." `isPrefixOf` file && not (any (`isSuffixOf` file) [".local", ".freeze"]))]
     pure ([makeProfile root StackProject directory (Just file) | file <- stackFiles]
       <> [makeProfile root CabalProject directory (Just file) | file <- cabalFiles])
-  if null found
+  localCradle <- doesFileExist (root </> "hie.yaml")
+  if localCradle && not (any ((== root) . profileRoot) found)
+    -- A nested, explicitly configured cradle must not accidentally inherit
+    -- unrelated Stack/Cabal configurations from its enclosing repository.
+    then pure [makeProfile root CradleProject root (Just (root </> "hie.yaml"))]
+    else if null found
     then do
       cabals <- cabalFilesAt root
       hie <- doesFileExist (root </> "hie.yaml")
@@ -84,37 +110,61 @@ profileArguments profile = case (profile.profileTool, profile.profileConfigurati
 
 discoverProject :: Bool -> ToolRunner -> FilePath -> Maybe Text -> FilePath -> IO ProjectCatalog
 discoverProject trusted runner root preferred cache = do
-  profiles <- discoverProfiles root
-  let selected = case preferred of
-        Just wanted -> listToMaybe (filter ((== wanted) . profileId) profiles)
-        Nothing -> case profiles of [one] -> Just one; _ -> Nothing
+  initial <- discoverProjectProfiles root preferred
+  let profiles = initial.catalogProfiles
+      selected = findProfile initial
   case (trusted, selected) of
     (False, _) -> pure (ProjectCatalog profiles Nothing [] [] ["Trust the workspace before running project tools"])
     (_, Nothing) -> pure (ProjectCatalog profiles Nothing [] [] ["Select a Stack or Cabal configuration"])
     (True, Just profile) -> do
-      (packageFiles, planUnits) <- case profile.profileTool of
+      (packageFiles, planUnits, warnings) <- case profile.profileTool of
         StackProject -> do
           output <- runner profile.profileRoot "stack" (profileArguments profile <> ["ide", "packages", "--stdout", "--cabal-files"])
           files <- traverse (absoluteAt profile.profileRoot . Text.unpack) (filter (not . Text.null) (Text.lines output))
-          pure (files, Nothing)
+          pure (files, Nothing, [])
         CabalProject -> do
           let buildDirectory = cache </> "inventory" </> show (unContentHash (contentHash profile.profileId))
           createDirectoryIfMissing True buildDirectory
-          _ <- runner profile.profileRoot "cabal" (profileArguments profile <>
-            ["build", "all", "--dry-run", "--enable-tests", "--enable-benchmarks", "--builddir=" <> buildDirectory])
+          let arguments = profileArguments profile <> ["build", "all", "--dry-run", "--builddir=" <> buildDirectory]
+          planned <- try (runner profile.profileRoot "cabal" arguments) :: IO (Either IOException Text)
+          warnings <- case planned of
+            Right _ -> pure []
+            -- Cabal writes a valid resolved plan, then reports that `all`
+            -- has no default targets for a test/benchmark-only package.
+            Left exception | "[Cabal-7127]" `Text.isInfixOf` Text.pack (show exception) -> pure []
+            Left _ -> do
+              -- A project's explicitly enabled optional components can fail to
+              -- solve even when its libraries/executables are usable. Keep the
+              -- usable plan; optional contexts are resolved only when selected.
+              _ <- runner profile.profileRoot "cabal" (arguments <> ["--disable-tests", "--disable-benchmarks"])
+              pure ["Optional component planning failed; libraries/executables remain available. Tests and benchmarks are resolved when selected."]
           plan <- LBS.readFile (buildDirectory </> "cache/plan.json") >>= either fail pure . eitherDecode
           directories <- parsePlanDirectories profile.profileRoot plan
           files <- concat <$> traverse cabalFilesAt directories
           units <- readCabalPlan (buildDirectory </> "cache/plan.json")
-          pure (files, Just units)
-        CradleProject -> pure ([], Nothing)
+          pure (files, Just units, warnings)
+        CradleProject -> pure ([], Nothing, [])
       declaredComponents <- if profile.profileTool == CradleProject
         then pure [ProjectComponent (ComponentId (profile.profileId <> ":default")) "Workspace" "Configured cradle" ""
           CradleComponent profile.profileRoot [profile.profileRoot] [] []]
         else concat <$> traverse (readPackageComponents profile) (nub packageFiles)
       let components = maybe declaredComponents (`effectiveComponents` declaredComponents) planUnits
       configs <- configurationPaths profile packageFiles
-      pure (ProjectCatalog profiles (Just profile.profileId) components configs [])
+      pure (ProjectCatalog profiles (Just profile.profileId) components configs warnings)
+
+-- Read-only profile discovery is published before any selected build tool is
+-- invoked, so a broken restored profile cannot hide healthy alternatives.
+discoverProjectProfiles :: FilePath -> Maybe Text -> IO ProjectCatalog
+discoverProjectProfiles root preferred = do
+  profiles <- discoverProfiles root
+  let selected = case preferred of
+        Just wanted -> listToMaybe (filter ((== wanted) . profileId) profiles)
+        Nothing -> case profiles of [one] -> Just one; _ -> Nothing
+  pure (ProjectCatalog profiles (profileId <$> selected) [] []
+    [if selected == Nothing then "Select a Stack or Cabal configuration" else "Discovering project components…"])
+
+findProfile :: ProjectCatalog -> Maybe ProjectProfile
+findProfile catalog = listToMaybe [profile | profile <- catalog.catalogProfiles, Just profile.profileId == catalog.catalogSelectedProfile]
 
 parsePlanDirectories :: FilePath -> Value -> IO [FilePath]
 parsePlanDirectories root = withPlan
@@ -167,17 +217,28 @@ effectiveComponents units declared = concatMap effective declared
     effective component = case findUnit component of
       Just unit -> [component {projectComponentDependencies =
         [dependency.projectComponentTarget | dependency <- declared,
-          Just dependencyUnit <- [findUnit dependency], dependencyUnit.planUnitId `elem` unit.planDependencies]}]
+          Just dependencyUnit <- [findDependencyUnit dependency], dependencyUnit.planUnitId `elem` unit.planDependencies,
+          dependencyUnit.planComponent /= Nothing || dependency.projectComponentTarget `elem` component.projectComponentDependencies]}]
       -- Custom Setup uses whole-package plan nodes, not per-component nodes.
       -- Keep its Cabal-parsed descriptors; hie-bios/Setup supply the actual
       -- selected-component environment during preparation.
-      Nothing | any (\unit -> unit.planPackage == component.projectComponentPackage &&
-                  unit.planComponent == Nothing && unit.planSourceRoot /= Nothing) units -> [component]
+      Nothing | findWholePackage component /= Nothing -> [component]
+      -- Inventory does not force optional dependencies to solve. The selected
+      -- test/benchmark's own cradle finalizes its flags, buildability and units.
+      Nothing | component.projectComponentKind `elem` [TestComponent, BenchmarkComponent] -> [component]
       Nothing -> []
     findUnit :: ProjectComponent -> Maybe PlanUnit
     findUnit component = listToMaybe [unit | unit <- units,
       unit.planPackage == component.projectComponentPackage,
+      unit.planSourceRoot /= Nothing,
       unit.planComponent == Just (componentPlanName component)]
+    findWholePackage :: ProjectComponent -> Maybe PlanUnit
+    findWholePackage component = listToMaybe [unit | unit <- units,
+      unit.planPackage == component.projectComponentPackage,
+      unit.planComponent == Nothing, unit.planSourceRoot /= Nothing]
+    findDependencyUnit component = case findUnit component of
+      Just unit -> Just unit
+      Nothing -> findWholePackage component
 
 configurationPaths :: ProjectProfile -> [FilePath] -> IO [FilePath]
 configurationPaths profile packageFiles = do

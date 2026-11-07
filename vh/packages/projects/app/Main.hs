@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-module Coordinator (main) where
+module Main (main) where
 
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async
@@ -22,17 +22,23 @@ import System.Directory hiding (executable)
 import System.Environment
 import System.FilePath
 import System.IO
-import System.Timeout (timeout)
 import System.Exit (exitWith, ExitCode (ExitFailure))
 import qualified System.FSNotify as FS
 import VisualHaskell.Analysis.Client
 import VisualHaskell.Analysis.Protocol
 import VisualHaskell.Projects
+import VisualHaskell.Projects.Toolchains
 import VisualHaskell.Semantic
 
 type Incoming = ProtocolEnvelope ClientMessage
 data Event = Input (Either FrameError Incoming)
+  | ProfilesReady Int Incoming ProjectCatalog
   | CatalogReady Int Incoming (Either SomeException ProjectCatalog)
+  | InventoryReady Int Incoming ToolchainInventory
+  | InventoryFailed Int Incoming Text
+  | WorkerBuilt Int Incoming (Either SomeException FilePath)
+  | ManagerOpened Int Incoming (Either SomeException ())
+  | CompilerUnavailable Int Incoming Text
   | ContextReady Int Incoming (Either SomeException ResolvedContext)
   | Progress Int Incoming Text
   | ChildEvent Int AnalysisClientEvent
@@ -47,13 +53,36 @@ data State = State
   , managedProject :: Bool
   , documentPaths :: Map DocumentId FilePath
   , diskDigests :: Map FilePath (Maybe ContentHash)
+  , toolchains :: ToolchainInventory
+  , compilerOverride :: Maybe FilePath
   }
+
+initialState :: State
+initialState = State Nothing Map.empty Nothing Nothing Nothing Map.empty Nothing Nothing 0 0 0 Nothing (pure ()) False Map.empty Map.empty emptyToolchainInventory Nothing
 
 -- One live compiler process is deliberately the initial memory budget. Prepared
 -- contexts (max two) are cached, but each component switch starts an isolated
 -- compiler session. No DynFlags/Name/Type values cross that process boundary.
 main :: IO ()
 main = do
+  args <- getArgs
+  case args of
+    ["--toolchains"] -> do
+      directory <- getCurrentDirectory
+      discoverToolchains (runToolWithEnvironment (TextIO.hPutStrLn stderr)) directory >>= Bytes.putStr . encode
+    ["--inspect-compiler", path] -> do
+      directory <- getCurrentDirectory
+      inspectCompiler (runToolWithEnvironment (TextIO.hPutStrLn stderr)) directory "Explicit" path >>= Bytes.putStr . encode
+    ["--build-worker", path] -> do
+      directory <- getCurrentDirectory
+      let progress = TextIO.hPutStrLn stderr
+      compiler <- inspectCompiler (runToolWithEnvironment progress) directory "Explicit" path
+      buildAnalysisWorker (runToolWithEnvironment progress) progress compiler >>= putStrLn
+    ["--open-ghcup-tui"] -> getCurrentDirectory >>= openGhcupTui (runToolWithEnvironment (TextIO.hPutStrLn stderr))
+    _ -> runCoordinator
+
+runCoordinator :: IO ()
+runCoordinator = do
   hSetBinaryMode stdin True
   hSetBinaryMode stdout True
   hSetBuffering stdout NoBuffering
@@ -61,7 +90,7 @@ main = do
   case first of
     Right hello@(ProtocolEnvelope {envelopePayload = ClientHelloMessage _}) -> do
       respond hello (WorkerHelloMessage (WorkerHello protocolV2 "visual-haskell-project-worker/0.2.0"
-        (Just (CompilerVersion "9.10.3")) [WorkspaceLoadingCapability, ComponentDiscoveryCapability,
+        Nothing [WorkspaceLoadingCapability, ComponentDiscoveryCapability, ToolchainManagementCapability,
           FullDocumentSnapshotsCapability, DiagnosticsCapability, DocumentDeclarationsCapability,
           StructuredTypesCapability, PositionQueriesCapability, CompositionChecksCapability]
         (maximumFrameBytes defaultFrameLimits)))
@@ -70,7 +99,7 @@ main = do
             frame <- readFrame defaultFrameLimits stdin
             atomically (writeTQueue events (Input frame))
             case frame of Right _ -> readInput; _ -> pure ()
-      withAsync readInput $ \_ -> loop events (State Nothing Map.empty Nothing Nothing Nothing Map.empty Nothing Nothing 0 0 0 Nothing (pure ()) False Map.empty Map.empty)
+      withAsync readInput $ \_ -> loop events initialState
     _ -> fail "Expected protocol v2 ClientHello"
 
 loop :: TQueue Event -> State -> IO ()
@@ -82,15 +111,40 @@ loop events state = do
      case incoming.envelopePayload of AnalyzeDocument _ -> crashOnce; _ -> pure ()
      case incoming.envelopePayload of
       ShutdownWorker -> cleanup state
+      _ | Just current <- state.workspace,
+          incoming.envelopeWorkspaceGeneration < current.envelopeWorkspaceGeneration -> loop events state
+      OpenWorkspace request | Just current <- state.workspace,
+          current.envelopePayload == OpenWorkspace request,
+          incoming.envelopeWorkspaceGeneration == current.envelopeWorkspaceGeneration -> do
+        -- Service startup/replay can repeat a configuration already sent by a
+        -- UI transition. Do not discard live buffers, inventory or compiler
+        -- sessions for an identical authority token.
+        loop events state
       OpenWorkspace request -> do
         cleanup state
-        let next = State (Just incoming) Map.empty Nothing Nothing Nothing Map.empty Nothing Nothing (state.epoch + 1) (state.childEpoch + 1) (state.watchEpoch + 1) Nothing (pure ()) False Map.empty Map.empty
+        let next = initialState {workspace = Just incoming, epoch = state.epoch + 1,
+              childEpoch = state.childEpoch + 1, watchEpoch = state.watchEpoch + 1}
         if request.workspaceRequestTrust == UntrustedWorkspace
           then respond incoming (WorkspaceFailed request.workspaceRequestId (RequestFailure "workspace-untrusted" "Trust this workspace to run Stack/Cabal, custom Setup, plugins and compiler code" True))
           else do
             respond incoming (WorkspaceLoading request.workspaceRequestId)
             respond incoming (WorkspaceReady request.workspaceRequestId (SessionId "workspace-coordinator"))
         loop events next
+      OpenToolchainManager -> do
+        let token = state.epoch
+        void $ async $ do
+          result <- try (openGhcupTui (runToolWithEnvironment (const (pure ()))) (rootOf state))
+          atomically (writeTQueue events (ManagerOpened token incoming result))
+        loop events state
+      RefreshToolchains | not (trusted state) -> do
+        stopped <- invalidateSession state
+        let token = stopped.epoch
+        worker <- async $ do
+          result <- try (discoverToolchains (runToolWithEnvironment (const (pure ()))) (rootOf stopped))
+          atomically (writeTQueue events (case result of
+            Right value -> InventoryReady token incoming value
+            Left (exception :: SomeException) -> InventoryFailed token incoming (Text.pack (displayException exception))))
+        loop events stopped {job = Just worker}
       _ | not (trusted state) -> do
         failed incoming "workspace-untrusted" "Open and trust a workspace before running project tools"
         loop events state
@@ -98,6 +152,24 @@ loop events state = do
         stopped <- invalidate state
         next <- discover events incoming stopped {preferred = choice, pending = state.pending, managedProject = True}
         loop events next
+      RefreshToolchains -> do
+        stopped <- invalidate state
+        next <- discover events incoming stopped {pending = state.pending, managedProject = True}
+        loop events next
+      SelectCompiler path -> do
+        stopped <- invalidate state
+        next <- discover events incoming stopped {compilerOverride = path, pending = state.pending, managedProject = True}
+        loop events next
+      BuildAnalysisWorker -> case state.toolchains.selectedCompiler of
+        Nothing -> failed incoming "compiler-unavailable" "Resolve an installed project compiler before building an analysis adapter" >> loop events state
+        Just compiler -> do
+          stopped <- invalidateSession state
+          let token = stopped.epoch
+              progress message = atomically (writeTQueue events (Progress token incoming message))
+          worker <- async $ do
+            result <- try (buildAnalysisWorker (runToolWithEnvironment progress) progress compiler)
+            atomically (writeTQueue events (WorkerBuilt token incoming result))
+          loop events stopped {job = Just worker}
       OpenDocument document -> updateDocument events incoming state document
       UpdateDocumentSnapshot document -> updateDocument events incoming state document
       CloseDocument document -> do
@@ -122,6 +194,37 @@ loop events state = do
       _ -> failed incoming "unsupported-project-command" "Command is private to a compiler session" >> loop events state
     Progress token incoming message -> do
       when (token == state.epoch) (respond incoming (ProjectProgress (Text.take 8192 message)))
+      loop events state
+    ProfilesReady token incoming value | token == state.epoch -> do
+      respond incoming (ProjectDiscovered value)
+      loop events state
+    InventoryReady token incoming inventory | token == state.epoch -> do
+      respond incoming (ToolchainsDiscovered inventory)
+      loop events state {toolchains = inventory, job = if trusted state then state.job else Nothing}
+    InventoryFailed token incoming message | token == state.epoch -> do
+      failed incoming "toolchain-discovery-failed" message
+      loop events state {job = Nothing}
+    CompilerUnavailable token incoming message | token == state.epoch -> do
+      failed incoming "compiler-unavailable" message
+      loop events state {job = Nothing, pending = Nothing}
+    WorkerBuilt token incoming result | token == state.epoch -> case result of
+      Left exception -> failed incoming "analysis-worker-build-failed" (Text.pack (displayException exception)) >> loop events state {job = Nothing}
+      Right executable -> do
+        let inventory = state.toolchains {selectedWorker = Just executable}
+        respond incoming (ToolchainsDiscovered inventory)
+        respond incoming (ProjectProgress "Analysis adapter ready; the existing compiler installation was reused")
+        let next = state {toolchains = inventory, job = Nothing}
+        case state.catalog of
+          Nothing -> discover events incoming next >>= loop events
+          Just _ -> case state.selected of
+            Just component -> prepare events incoming component next >>= loop events
+            Nothing -> case state.pending of
+              Just request -> routeAnalysis events request next {pending = Nothing} >>= loop events
+              Nothing -> loop events next
+    ManagerOpened token incoming result | token == state.epoch -> do
+      case result of
+        Left exception -> failed incoming "toolchain-manager-unavailable" (Text.pack (displayException exception))
+        Right () -> respond incoming (ProjectProgress "GHCup TUI opened in your terminal. Return here and Refresh after making changes; no global compiler selection is changed by the IDE.")
       loop events state
     CatalogReady token incoming result | token == state.epoch -> case result of
       Left exception -> failed incoming "project-discovery-failed" (Text.pack (displayException exception)) >> loop events state {job = Nothing, pending = Nothing}
@@ -220,7 +323,8 @@ rootOf state = case state.workspace of
 cacheOf :: State -> IO FilePath
 cacheOf state = do
   base <- getXdgDirectory XdgCache "visual-haskell/projects"
-  pure (base </> show (unContentHash (contentHash (Text.pack (rootOf state)))))
+  pure (base </> show (unContentHash (contentHash (Text.pack (rootOf state))))
+    </> maybe "unresolved" (Text.unpack . compilerFingerprint) state.toolchains.selectedCompiler)
 
 discover :: TQueue Event -> Incoming -> State -> IO State
 discover = discoverAfter 0
@@ -233,8 +337,30 @@ discoverAfter delay events incoming state = do
       progress message = atomically (writeTQueue events (Progress token incoming message))
   worker <- async $ do
     threadDelay delay
-    result <- try (discoverProject True (runTool progress) (rootOf state) state.preferred cache)
-    atomically (writeTQueue events (CatalogReady token incoming result))
+    result <- try $ do
+      profiles <- discoverProjectProfiles (rootOf state) state.preferred
+      atomically (writeTQueue events (ProfilesReady token incoming profiles))
+      inventory <- discoverToolchains (runToolWithEnvironment progress) (rootOf state)
+      atomically (writeTQueue events (InventoryReady token incoming inventory))
+      case find (\profile -> Just profile.profileId == profiles.catalogSelectedProfile) profiles.catalogProfiles of
+        Nothing -> Just <$> discoverProject True (runTool progress) (rootOf state) state.preferred cache
+        Just profile -> do
+          compilerResult <- try (resolveProjectCompiler (runToolWithEnvironment progress) profile state.compilerOverride inventory)
+          case compilerResult of
+            Left (exception :: IOException) -> do
+              atomically (writeTQueue events (CompilerUnavailable token incoming (Text.pack (displayException exception))))
+              pure Nothing
+            Right compiler -> do
+              worker <- findAnalysisWorker (runToolWithEnvironment progress) (rootOf state) compiler
+              let resolved = inventory {selectedCompiler = Just compiler, selectedWorker = worker}
+              atomically (writeTQueue events (InventoryReady token incoming resolved))
+              runner <- projectToolRunner progress compiler
+              selectedCache <- cacheOf state {toolchains = resolved}
+              Just <$> discoverProject True runner (rootOf state) state.preferred selectedCache
+    case result of
+      Right Nothing -> pure ()
+      Right (Just value) -> atomically (writeTQueue events (CatalogReady token incoming (Right value)))
+      Left exception -> atomically (writeTQueue events (CatalogReady token incoming (Left exception)))
   respond incoming (ProjectProgress "Discovering project packages and components")
   pure state {job = Just worker}
 
@@ -247,7 +373,6 @@ routeAnalysis events incoming state = case (incoming.envelopePayload, state.cata
     Just snapshot -> case ownersForPath value.catalogComponents snapshot.snapshotPath of
       [component] -> use component
       owners | Just chosen <- find (\c -> Just c.projectComponentId == state.selected) owners -> use chosen
-      [] | any ((== CradleComponent) . projectComponentKind) value.catalogComponents -> legacy
       [] -> failed incoming "file-outside-project" "This file is not owned by a component in the selected configuration" >> pure state
       _ -> failed incoming "component-choice-required" "This source belongs to several components; select its library, executable, test or benchmark context" >> pure state {pending = Just incoming}
   (_, Nothing) | state.managedProject -> failed incoming "project-not-ready" "Project discovery did not complete; select a configuration or use Reload / Retry" >> pure state
@@ -265,10 +390,7 @@ routeAnalysis events incoming state = case (incoming.envelopePayload, state.cata
       _ -> prepare events incoming component.projectComponentId state {pending = Just incoming}
     legacy = case state.running of
       Just (Running _ Nothing _) -> forward state incoming >> pure state
-      _ -> do
-        next <- startChild events incoming Nothing state
-        forward next incoming
-        pure next
+      _ -> discover events incoming state {pending = Just incoming, managedProject = True}
 
 prepare :: TQueue Event -> Incoming -> ComponentId -> State -> IO State
 prepare events incoming component state = case state.catalog >>= find ((== component) . projectComponentId) . catalogComponents of
@@ -276,38 +398,49 @@ prepare events incoming component state = case state.catalog >>= find ((== compo
   Just descriptor -> do
     stopped <- invalidateSession state
     let next = stopped {selected = Just component}
-    case Map.lookup component next.contexts of
-      Just cached -> do
-        started <- startChild events incoming (Just cached) next
-        case state.pending of
-          Just request -> routeAnalysis events request started {pending = Nothing}
-          Nothing -> pure started
-      Nothing -> do
-        cache <- cacheOf next
-        executable <- getExecutablePath
-        let token = next.epoch
-            progress message = atomically (writeTQueue events (Progress token incoming message))
-            contextCache = cache </> "contexts" </> show (unContentHash (contentHash component.unComponentId))
-        worker <- async $ do
-          result <- try $ do
-            createDirectoryIfMissing True contextCache
-            let request = contextCache </> "prepare-request.json"
-            Bytes.writeFile request (encode (contextCache, fromMaybe emptyProjectCatalog next.catalog, descriptor))
-            output <- runTool progress (rootOf next) executable ["--prepare-context", request]
-            either fail pure (eitherDecodeStrict' (TextEncoding.encodeUtf8 output))
-          atomically (writeTQueue events (ContextReady token incoming result))
-        respond incoming (ProjectProgress ("Preparing " <> descriptor.projectComponentTarget))
-        pure next {job = Just worker}
+    case (next.toolchains.selectedCompiler, next.toolchains.selectedWorker) of
+      (_, Nothing) -> failed incoming "analysis-worker-missing"
+        "The project compiler is installed, but its matching analysis adapter is missing. Use Build Analysis Worker; no additional compiler installation is required." >> pure next {pending = Nothing}
+      (Nothing, _) -> failed incoming "compiler-unavailable" "Resolve the project compiler first" >> pure next {pending = Nothing}
+      (Just compiler, Just executable) -> case Map.lookup component next.contexts of
+        Just cached -> do
+          started <- startChild events incoming (Just cached) next
+          case state.pending of
+            Just request -> routeAnalysis events request started {pending = Nothing}
+            Nothing -> pure started
+        Nothing -> do
+          cache <- cacheOf next
+          let token = next.epoch
+              progress message = atomically (writeTQueue events (Progress token incoming message))
+              contextCache = cache </> "contexts" </> show (unContentHash (contentHash component.unComponentId))
+          worker <- async $ do
+            result <- try $ do
+              createDirectoryIfMissing True contextCache
+              let request = contextCache </> "prepare-request.json"
+              Bytes.writeFile request (encode (contextCache, fromMaybe emptyProjectCatalog next.catalog, descriptor))
+              environment <- compilerEnvironment compiler
+              output <- runToolWithEnvironment progress environment (rootOf next) executable ["--prepare-context", request]
+              either fail pure (eitherDecodeStrict' (TextEncoding.encodeUtf8 output))
+            atomically (writeTQueue events (ContextReady token incoming result))
+          respond incoming (ProjectProgress ("Preparing " <> descriptor.projectComponentTarget))
+          pure next {job = Just worker}
 
 startChild :: TQueue Event -> Incoming -> Maybe ResolvedContext -> State -> IO State
 startChild events incoming context state = do
   stopRunning state.running
-  executable <- getExecutablePath
+  executable <- maybe (fail "Compiler worker is unavailable") pure state.toolchains.selectedWorker
+  environment <- maybe (pure []) compilerEnvironment state.toolchains.selectedCompiler
+  inherited <- getEnvironment
   args <- getArgs
   let token = state.childEpoch + 1
       hello = protocolEnvelope incoming.envelopeWorkspaceGeneration
         (ClientHelloMessage (ClientHello "project-coordinator/0.2.0" Nothing TrustedWorkspace [FullDocumentSnapshotsCapability]))
-      launch = (defaultWorkerLaunch executable) {workerArguments = "--session-worker" : args}
+      -- Compiler children own no independent preparation groups. Stop them
+      -- directly, leaving the outer coordinator's shutdown budget available
+      -- for cancelling/reaping its preparation helpers.
+      launch = (defaultWorkerLaunch executable)
+        {workerArguments = "--session-worker" : args, workerShutdownTimeoutMicroseconds = 0,
+          workerEnvironment = Just (environment <> filter (\(name, _) -> name `notElem` (["GHC_PACKAGE_PATH", "GHC_ENVIRONMENT"] <> map fst environment)) inherited)}
   client <- startAnalysisClient launch hello (atomically . writeTQueue events . ChildEvent token)
   forM_ state.workspace (sendAnalysisMessage client)
   forM_ context (\value -> sendAnalysisMessage client incoming {envelopePayload = ConfigureContext value})
@@ -342,7 +475,7 @@ cleanup state = void (invalidate state)
 stopRunning :: Maybe Running -> IO ()
 stopRunning value = forM_ value $ \(Running _ _ client) -> do
   stopAnalysisClient client
-  void (timeout 3000000 (waitAnalysisClient client))
+  waitAnalysisClient client
 
 startWatching :: TQueue Event -> Int -> Maybe Incoming -> ProjectCatalog -> IO (IO ())
 startWatching events token incoming value = do

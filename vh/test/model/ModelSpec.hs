@@ -70,11 +70,20 @@ main = do
           , workspaceProjectProfile = Just "stack:stack.yaml"
           , workspaceProjectComponent = Just (Semantic.ComponentId "stack:stack.yaml:fixture:lib")
           , workspaceFileContexts = [("src/Main.hs", Semantic.ComponentId "stack:stack.yaml:fixture:exe:app")]
+          , workspaceCompilerOverride = Just "/installed/ghc-9.6.7/bin/ghc"
           }
   assertEqual
     "workspace JSON round-trips its versioned portable state"
     (Right workspaceState)
     (decodeWorkspaceState (encodeWorkspaceState workspaceState))
+  mapM_ (\version -> case decodeWorkspaceState
+      ("{\"format\":\"visual-haskell-workspace\",\"version\":" <> Text.pack (show version) <> "}") of
+        Right oldState -> assertEqual "older workspaces default to project-selected compiler" Nothing oldState.workspaceCompilerOverride
+        Left message -> error (Text.unpack message)) ([1,2,3] :: [Int])
+  assert "workspace compiler overrides must be absolute" $
+    case decodeWorkspaceState "{\"format\":\"visual-haskell-workspace\",\"version\":4,\"compilerOverride\":\"relative/ghc\"}" of
+      Left _ -> True
+      Right _ -> False
   assert
     "workspace JSON rejects paths that escape the project root"
     ( case decodeWorkspaceState
@@ -816,6 +825,22 @@ main = do
     "editing an open dependency schedules reanalysis of the unchanged active document"
     [TaskKey "visual-haskell.analysis.edit-debounce"]
     (taskKeys backgroundEdit.transactionCommands)
+
+  let rebuilding = applyTransaction
+        (compilerApplication.appHandleEvent (CommandInvoked (CommandId 21)) compilerEdited) compilerEdited
+      editDuringBuild = compilerApplication.appHandleEvent
+        (TextChanged firstDocumentEditorKey "module Main where\nvalue = 3\n") rebuilding
+      editedDuringBuild = applyTransaction editDuringBuild rebuilding
+      cancelledBuild = applyTransaction
+        (compilerApplication.appHandleEvent (CommandInvoked (CommandId 17)) editedDuringBuild) editedDuringBuild
+      editAfterCancel = compilerApplication.appHandleEvent
+        (TextChanged firstDocumentEditorKey "module Main where\nvalue = 4\n") cancelledBuild
+  assertEqual
+    "edits remain authoritative without scheduling component preparation during an adapter build"
+    [] (taskKeys editDuringBuild.transactionCommands)
+  assertEqual
+    "cancelling an adapter build restores normal debounced analysis scheduling"
+    [TaskKey "visual-haskell.analysis.edit-debounce"] (taskKeys editAfterCancel.transactionCommands)
 
   putStrLn "vh: pure workspace/tab/document model test passed"
   where

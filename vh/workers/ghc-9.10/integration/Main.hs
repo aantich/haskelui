@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 module Main (main) where
-import Control.Exception (finally)
+import Control.Exception (finally, try, IOException)
 import Control.Monad (forM_, unless, when)
 import qualified Data.Map.Strict as Map
 import qualified Data.Text.IO as T
@@ -21,6 +21,8 @@ import GHC.Data.StringBuffer (stringToStringBuffer)
 import Control.Monad.IO.Class (liftIO)
 import Data.Time.Clock
 import ProtocolCheck (protocolCheck)
+import RegressionCheck (projectRegressionChecks)
+import ToolchainCheck (toolchainChecks)
 import qualified Data.Text as Text
 
 main :: IO ()
@@ -28,16 +30,24 @@ main = do
   hSetBuffering stdout LineBuffering
   args <- getArgs
   case args of
+    ["--toolchains"] -> toolchainChecks
     ["--self-host", root] -> selfHost root
+    ["--regressions", fixture] -> optionalChecks (takeDirectory fixture </> "project-variants") >> projectRegressionChecks fixture
     _ -> fixtureChecks args
 
 fixtureChecks :: [String] -> IO ()
 fixtureChecks args = do
   let fixture = case args of path : _ -> path; _ -> "vh/workers/ghc-9.10/test/fixtures/project-loading"
       tools = case drop 1 args of ["cabal"] -> [CabalProject]; ["stack"] -> [StackProject]; _ -> [CabalProject, StackProject]
-  forM_ tools $ \tool -> withSystemTempDirectory "vh-project-loading-" $ \temporary -> do
+  forM_ ([(tool, False) | tool <- tools] <> [(CabalProject, True) | CabalProject `elem` tools]) $ \(tool, custom) -> withSystemTempDirectory "vh-project-loading-" $ \temporary -> do
     root <- canonicalizePath temporary
     copyTree fixture root
+    when custom $ do
+      let package = root </> "upstream/stage0-upstream.cabal"
+      contents <- T.readFile package
+      T.writeFile package (Text.replace "build-type: Simple" "build-type: Custom" contents <>
+        "\ncustom-setup\n  setup-depends: base >= 4.20 && < 4.21, Cabal >= 3.12 && < 3.13\n")
+      writeFile (root </> "upstream/Setup.hs") "import Distribution.Simple\nmain = defaultMain\n"
     -- Prove Stack does not rely on special project flags/build-info generation.
     when (tool == StackProject) $ do
       writeFile (root </> "stack.yaml")
@@ -53,6 +63,10 @@ fixtureChecks args = do
     check "4 discoverable components" (length catalog.catalogComponents == 4)
     selected <- maybe (fail "missing consumer library") pure (find (\c -> c.projectComponentPackage == "stage0-consumer" && c.projectComponentKind == LibraryComponent) catalog.catalogComponents)
     context <- prepareProjectContext runner cache catalog selected
+    unless (length context.resolvedUnitRoots == 2) $ do
+      print selected.projectComponentDependencies
+      print (map projectComponentTarget (componentDependencyClosure catalog.catalogComponents selected))
+      print context.resolvedUnitRoots
     check "local home units preserved" (length context.resolvedUnitRoots == 2)
     let invocation = CompilerInvocation context.resolvedRoot context.resolvedArguments context.resolvedConfigurationFiles
           context.resolvedCompilerLibDir context.resolvedCompilerVersion.unCompilerVersion context.resolvedPrimaryUnit context.resolvedUnitRoots (Just context.resolvedSession) context.resolvedUnitDirectories
@@ -96,14 +110,65 @@ fixtureChecks args = do
         print analysis.analysisDiagnostics
         forM_ [drop 1 flag | flag <- resolved.resolvedArguments, take 1 flag == "@"] $ \response -> readFile response >>= putStrLn
       check "duplicate Main uses its own component flags" (analysis.analysisCompleteness == Typechecked)
-    putStrLn ("PASS: " <> show tool <> " real discovery, preparation, local buffers, component isolation")
+    putStrLn ("PASS: " <> show tool <> (if custom then " Custom Setup dependency" else "") <> " real discovery, preparation, local buffers, component isolation")
     protocolCheck root profile catalog
   variantChecks (takeDirectory fixture </> "project-variants") tools
+  when (CabalProject `elem` tools) $ optionalChecks (takeDirectory fixture </> "project-variants")
+  when (CabalProject `elem` tools) $ projectRegressionChecks fixture
   where
     doc name path source = DocumentSnapshot (DocumentId name) path (TextRevision (unContentHash (contentHash source))) (contentHash source) source LF
 
 check :: String -> Bool -> IO ()
 check label condition = unless condition (fail label)
+
+optionalChecks :: FilePath -> IO ()
+optionalChecks fixture = optionalDependencyChecks fixture >> optionalOnlyCheck
+
+optionalDependencyChecks :: FilePath -> IO ()
+optionalDependencyChecks fixture = forM_ [False, True] $ \enabled ->
+  withSystemTempDirectory "vh-optional-dependency-" $ \temporary -> do
+    root <- canonicalizePath temporary
+    copyTree fixture root
+    createDirectory (root </> ".git")
+    writeFile (root </> "cabal.project") ("packages: .\nwith-compiler: ghc-9.10.3\nactive-repositories: none\n" <>
+      if enabled then "tests: True\nbenchmarks: True\n" else "")
+    let package = root </> "project-variants.cabal"
+    -- Introduce an unavailable dependency in the test stanza only.
+    contents <- T.readFile package
+    let (before, after) = Text.breakOn "test-suite" contents
+        (header, dependencies) = Text.breakOn "build-depends:" after
+    T.writeFile package (before <> header <> "build-depends: vh-nonexistent-optional-test-dependency == 1," <> Text.drop (Text.length "build-depends:") dependencies)
+    let runner = runTool (const (pure ()))
+        cache = root </> ".ide-cache"
+    catalog <- discoverProject True runner root Nothing cache
+    check "broken optional dependency does not hide components" (length catalog.catalogComponents == 5)
+    check "optional solver fallback is reported" (enabled == not (null catalog.catalogWarnings))
+    library <- maybe (fail "missing optional fixture library") pure (find ((== "library") . projectComponentName) catalog.catalogComponents)
+    context <- prepareProjectContext runner (cache </> "library") catalog library
+    _ <- checkContext context (root </> "src/Variants.hs")
+    test <- maybe (fail "missing declared optional test") pure (find ((== TestComponent) . projectComponentKind) catalog.catalogComponents)
+    failed <- try (prepareProjectContext runner (cache </> "test") catalog test) :: IO (Either IOException ResolvedContext)
+    check "unavailable optional dependency fails only when selected" (case failed of Left _ -> True; Right _ -> False)
+    benchmark <- maybe (fail "missing healthy benchmark") pure (find ((== BenchmarkComponent) . projectComponentKind) catalog.catalogComponents)
+    benchmarkContext <- prepareProjectContext runner (cache </> "benchmark") catalog benchmark
+    _ <- checkContext benchmarkContext (root </> "bench/Main.hs")
+    _ <- checkContext context (root </> "src/Variants.hs")
+    putStrLn ("PASS: unavailable optional dependencies remain isolated (explicitly enabled=" <> show enabled <> ")")
+
+optionalOnlyCheck :: IO ()
+optionalOnlyCheck = withSystemTempDirectory "vh-test-only-" $ \temporary -> do
+  root <- canonicalizePath temporary
+  createDirectory (root </> ".git")
+  writeFile (root </> "cabal.project") "packages: .\nwith-compiler: ghc-9.10.3\nactive-repositories: none\n"
+  writeFile (root </> "only-test.cabal") "cabal-version: 3.0\nname: only-test\nversion: 0.1\nbuild-type: Simple\ntest-suite checks\n  type: exitcode-stdio-1.0\n  main-is: Main.hs\n  build-depends: base >= 4.20 && < 4.21\n  default-language: Haskell2010\n"
+  writeFile (root </> "Main.hs") "main :: IO ()\nmain = pure ()\n"
+  let runner = runTool (const (pure ()))
+      cache = root </> ".ide-cache"
+  catalog <- discoverProject True runner root Nothing cache
+  component <- case catalog.catalogComponents of [one] -> pure one; _ -> fail "test-only package inventory"
+  context <- prepareProjectContext runner (cache </> "test") catalog component
+  _ <- checkContext context (root </> "Main.hs")
+  putStrLn "PASS: test-only Cabal package with no default build targets"
 
 selfHost :: FilePath -> IO ()
 selfHost directory = withSystemTempDirectory "vh-project-self-host-" $ \cache -> do

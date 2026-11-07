@@ -1,0 +1,12 @@
+-- Worker-only builds reuse the installed compiler and normal Cabal store.
+-- HaskeLUI, AppKit and the editor are deliberately outside this project.
+packages:
+  ../packages/semantic-model
+  ../packages/analysis-protocol
+  ../packages/analysis-client
+  ../packages/projects
+  ghc-9.10
+
+constraints: hie-bios == 0.21.0
+tests: False
+benchmarks: False

@@ -35,6 +35,7 @@ executable visual-haskell-analysis-fake-worker
     , containers
     , directory
     , text
+    , unix
     , visual-haskell-analysis-protocol
     , visual-haskell-semantic-model
   default-language: Haskell2010

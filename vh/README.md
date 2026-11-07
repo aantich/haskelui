@@ -144,9 +144,9 @@ semantic-model     stable identities, snapshots, diagnostics, declarations,
                    structured types, and Unicode coordinate conversion
 analysis-protocol  explicit V2 JSON messages and bounded length framing
 analysis-client    child-process supervision, generations, restart, and replay
-projects           GHC-free Stack/Cabal inventory, ownership and tool execution
+projects           GHC-free project coordinator, toolchain selection and inventory
 workers/fake       deterministic real-process integration worker
-workers/ghc-9.10   project coordinator and isolated direct GHC 9.10.3 sessions
+workers/ghc-9.10   shared adapter source compiled with GHC 9.6.7 or 9.10.3
 ```
 
 The production editor registers the process client through
@@ -157,6 +157,97 @@ workspace, component, and diagnostic state. Visual Haskell accepts a semantic
 result only if worker generation, workspace generation, component session,
 document identity, revision, content hash, and all open dependency-buffer inputs still match the current pure
 model.
+
+### Existing toolchains, not an IDE-owned Haskell installation
+
+The native **Project** inspector discovers installed GHCs using GHCup's offline
+CLI and the existing PATH. Select **Project-selected compiler**, an installed
+compiler, or an absolute executable path. Cabal's `with-compiler` and Stack's
+resolver/compiler checks remain authoritative. An incompatible override reports
+an error; the IDE does not rewrite project files or run `ghcup set`.
+
+**Open GHCup TUI…** opens the existing `ghcup tui` in the system's external
+terminal. Install/remove toolchains there, return to the IDE, and use **Refresh
+installed toolchains** (returning from the TUI also requests a refresh). The IDE
+does not scrape the TUI, embed a terminal emulator, install GHC automatically,
+maintain a second compiler catalogue, or change the global compiler selection.
+The native AppKit application currently targets macOS; the coordinator's Unix
+terminal fallback is not a Windows backend.
+
+The compiler-independent `visual-haskell-project-coordinator` asks the selected
+build tool for the actual compiler. It validates the worker's exact version,
+target platform, GHC API package identity **and ABI hash** before executing
+analysis. The supported/tested adapter versions are currently **9.6.7 and
+9.10.3**; other installed compilers remain discoverable and editable but need an
+additional tested API adapter. The legacy `ghc910` package/executable/module
+names are retained for compatibility; there is only one maintained source tree.
+
+For explicit `hie.yaml` projects, a short-lived probe mode in the bundled
+adapter asks hie-bios for the cradle's runtime compiler before choosing the
+analysis adapter. The probe's own GHC version does not have to match the
+project, and the coordinator still does not link the GHC API. A compatible
+bundled adapter is therefore required for cradle discovery, even when the
+project's matching adapter has not yet been built.
+
+If the compiler is installed but its adapter is missing, choose **Build matching
+analysis worker**. This runs the existing `cabal-install` with the explicit
+installed compiler and its ordinary shared package store. Library downloads
+may be needed on the first build; no compiler is downloaded. IDE-owned adapter
+executables/build artifacts are cached once per compiler ABI under
+`$XDG_CACHE_HOME/visual-haskell/workers` (the platform default cache when unset),
+not duplicated per project. Source changes invalidate cached adapters. Build
+publication is locked and atomic. Stack metadata readers are likewise shared
+per compiler/Cabal package/source identity; Cabal's own API validates configured
+metadata. Stack/Cabal continue to own dependency resolution, Hackage indexes,
+snapshots, package versions, and stores. Different projects may use different
+versions of a library without any IDE-side Hackage version manager.
+
+Compiler switching/reload/restart preserves authoritative unsaved documents;
+compiler objects never cross the JSON protocol boundary. Prepared project
+contexts are separately cached by workspace and compiler fingerprint. Trust,
+cancellation, stale-result checks and process-group cleanup apply to worker
+building and preparation as well as analysis. Compiler overrides are restored
+from `.vihs` v4 but never grant workspace trust.
+Refresh and adapter rebuild also begin a new semantic generation immediately:
+old diagnostics, editor assistance and composition results disappear even if
+discovery/build fails. Rebuild waits for the new generation's compiler identity.
+
+Tool overrides for GUI environments are `VH_GHCUP`, `VH_GHC`, `VH_CABAL`,
+`VH_STACK`, `VH_PROJECT_COORDINATOR`, and `VH_ANALYSIS_WORKER`. An explicit
+worker still must pass ABI validation. Child processes receive private PATH
+aliases to the exact resolved Cabal/Stack tools; renamed/versioned overrides
+also work when a GUI launch has only `/usr/bin:/bin` on PATH. The aliases never
+modify the user's shell environment, and cradle Stack commands cannot install
+a compiler automatically. Worker sources are found in the checkout
+or `VH_WORKER_SOURCE_ROOT`. For installed distributions, run:
+
+```console
+bash tools/package-worker-sources.sh /absolute/release/bin/visual-haskell-worker-sources.tar.gz
+```
+
+Ship that generated archive beside the coordinator (or set
+`VH_WORKER_SOURCE_BUNDLE`). It contains canonical adapter/shared package sources,
+not compilers or dependency stores; the coordinator validates and extracts it
+once into the shared cache. Release packaging must include the coordinator,
+the application's native resources, and at least one compatible bundled adapter
+for cradle probing (normally the application's build-GHC adapter). Include
+either additional prebuilt adapters or this archive for other project GHCs.
+Ordinary development builds use the checkout directly. For a
+manual Cabal adapter build, set `VH_PROJECT_COMPILER` to the same absolute GHC
+path passed to `--with-compiler`; the compile-time ABI check rejects mismatches.
+
+Useful diagnostics, outside `stack exec`'s build lock:
+
+```console
+visual-haskell-project-coordinator --toolchains
+visual-haskell-project-coordinator --inspect-compiler /absolute/path/to/ghc
+visual-haskell-project-coordinator --build-worker /absolute/path/to/ghc
+bash tests/visual-haskell/validate-project-loading.sh toolchains
+```
+
+The last command requires both supported compilers already installed and tests
+real Cabal/Stack projects, missing-adapter builds, Template Haskell, unsaved
+errors/recovery, typed composition, compiler switching, and restart replay.
 
 ## Stack and Cabal projects
 
@@ -180,6 +271,11 @@ home units. Unsaved edits in an open local dependency participate in downstream
 analysis; they are never written to disk for GHC. Configuration changes and
 closed-source changes trigger a fresh context; open buffers remain authoritative.
 Profile, component and per-file context choices are restored from `.vihs` v3.
+Profile choices remain available even if a restored configuration fails to load.
+Cabal discovery does not force optional test/benchmark dependencies to resolve;
+their declared components remain selectable and are prepared on demand. If an
+explicitly enabled optional component breaks planning, required components use
+an isolated plan with tests/benchmarks disabled and the Project log explains it.
 
 Cabal uses `Cabal-syntax` inventory plus hie-bios 0.21 unit environments. Stack
 uses its own preparation hooks and a small helper compiled against the
@@ -188,9 +284,13 @@ HLS/ghcide or rewrites project configuration. Analysis outputs live in IDE-owned
 caches, separate from Stack's build artifacts. A single live compiler session
 and at most two prepared contexts bound memory; changing component can incur a
 cold analysis.
+Project tools discard inherited `GHC_PACKAGE_PATH`/`GHC_ENVIRONMENT` overrides,
+so launching the IDE with `stack exec vh` does not contaminate Cabal projects.
+Cancellation interrupts worker startup, replay and blocked input writes as well
+as ordinary analysis, and waits for the compiler process group to be stopped.
 
-The current compiler worker supports **GHC 9.10.3**, with Stack metadata tested
-against Cabal **3.12.x**, on macOS. Other project compilers report an actionable
+The shared adapter supports **GHC 9.6.7 and 9.10.3**, with Stack metadata tested
+against Cabal **3.10.x and 3.12.x**, on macOS. Other project compilers report an actionable
 error and leave editing available; additional worker versions are not silently
 substituted. Build tools and dependencies must be available in the environment.
 This is project loading/semantic editing, not a build/run/debug UI or a complete
@@ -201,12 +301,15 @@ Run the real toolchain acceptance matrix outside an enclosing `stack exec`:
 ```console
 tests/visual-haskell/validate-project-loading.sh          # Stack and Cabal
 tests/visual-haskell/validate-project-loading.sh self-host
+tests/visual-haskell/validate-project-loading.sh regressions
 ```
 
 The matrix covers local-package unsaved edits, distinct/shared component
 contexts, crash replay, cancellation, atomic configuration replacement, Hpack,
 internal libraries, benchmarks, paths with spaces, conditional source roots,
-named configurations, Custom Setup-generated sources and standalone Cabal.
+named configurations, Custom Setup-generated sources and local dependencies,
+unavailable optional dependencies, failed-profile recovery, Stack-launched
+Cabal loading, slow Template Haskell cancellation and standalone Cabal.
 
 ## Semantic universe inspectors
 
@@ -365,14 +468,14 @@ measures about 1.25 s for a cold load and 4–5 ms for warm broken/recovered
 edits. These measurements are diagnostic baselines rather than public timing
 guarantees.
 
-The current worker supports exactly GHC 9.10.3. `hie-bios`, rather than a VH
+The current adapters support GHC 9.6.7 and 9.10.3. `hie-bios`, rather than a VH
 Cabal/Stack parser, remains the authority for the actual cradle, flags, package
 databases, targets, `libdir`, and compiler selection. If the project selects a
-different GHC, VH reports **unsupported compiler** and keeps the editor,
+different, unsupported GHC, VH reports the missing adapter and keeps the editor,
 project tree, persistence, and TextMate highlighting available; it does not
-attempt unsound best-effort analysis with the 9.10.3 API. Future releases will
-select an exact version-specific worker and may coordinate installation of a
-missing toolchain/worker.
+attempt unsound best-effort analysis with another compiler's API. Exact workers
+are selected by the coordinator; missing supported adapters can be built using
+the existing compiler. Compiler installation remains in the external GHCup TUI.
 
 Reviewed trust now survives launches. `.vihs` records the requested editor
 state, while the user-owned canonical-workspace registry is the independent

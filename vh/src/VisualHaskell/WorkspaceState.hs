@@ -71,6 +71,7 @@ data WorkspaceState = WorkspaceState
   , workspaceProjectProfile :: !(Maybe Text)
   , workspaceProjectComponent :: !(Maybe ComponentId)
   , workspaceFileContexts :: ![(FilePath, ComponentId)]
+  , workspaceCompilerOverride :: !(Maybe FilePath)
   }
   deriving stock (Eq, Show)
 
@@ -78,7 +79,7 @@ instance ToJSON WorkspaceState where
   toJSON state =
     object
       [ "format" .= ("visual-haskell-workspace" :: Text)
-      , "version" .= (3 :: Int)
+      , "version" .= (4 :: Int)
       , "openFiles" .= fmap Text.pack state.workspaceOpenFiles
       , "activeFile" .= fmap Text.pack state.workspaceActiveFile
       , "expandedFolders" .= fmap Text.pack state.workspaceExpandedFolders
@@ -92,6 +93,7 @@ instance ToJSON WorkspaceState where
       , "projectProfile" .= state.workspaceProjectProfile
       , "projectComponent" .= state.workspaceProjectComponent
       , "fileContexts" .= state.workspaceFileContexts
+      , "compilerOverride" .= state.workspaceCompilerOverride
       ]
 
 instance FromJSON WorkspaceState where
@@ -101,7 +103,7 @@ instance FromJSON WorkspaceState where
     if (format :: Text) /= "visual-haskell-workspace"
       then fail "unexpected workspace format"
       else pure ()
-    if (version :: Int) `notElem` [1, 2, 3]
+    if (version :: Int) `notElem` [1, 2, 3, 4]
       then fail ("unsupported workspace version " <> show version)
       else pure ()
     openFiles <- value .:? "openFiles" .!= []
@@ -122,6 +124,10 @@ instance FromJSON WorkspaceState where
     projectProfile <- value .:? "projectProfile"
     projectComponent <- value .:? "projectComponent"
     contexts <- value .:? "fileContexts" .!= []
+    compilerOverride <- if version >= 4 then value .:? "compilerOverride" else pure Nothing
+    case compilerOverride of
+      Just path | not (isAbsolute path) -> fail "compilerOverride must be an absolute executable path"
+      _ -> pure ()
     parsedContexts <- traverse (\(path, component) -> (\valid -> (valid, component)) <$> validateForParser "fileContexts" path) contexts
     let uniqueOpenFiles = nub parsedOpenFiles
         active = parsedActiveFile >>= \path -> if path `elem` uniqueOpenFiles then Just path else Nothing
@@ -131,6 +137,7 @@ instance FromJSON WorkspaceState where
         , workspaceProjectProfile = projectProfile
         , workspaceProjectComponent = projectComponent
         , workspaceFileContexts = parsedContexts
+        , workspaceCompilerOverride = compilerOverride
         , workspaceActiveFile = active
         , workspaceExpandedFolders = nub ("." : parsedExpandedFolders)
         , workspaceSelectedExplorerEntry = parsedSelectedEntry

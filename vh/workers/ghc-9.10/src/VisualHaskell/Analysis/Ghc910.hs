@@ -7,6 +7,7 @@ module VisualHaskell.Analysis.Ghc910
   , analysisEngineIsRunning
   , discoverCompilerInvocation
   , prepareProjectContext
+  , probeCradleCompiler
   , startAnalysisEngine
   , stopAnalysisEngine
   , queryWithEngine

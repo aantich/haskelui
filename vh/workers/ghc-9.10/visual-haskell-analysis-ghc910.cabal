@@ -49,6 +49,7 @@ source-repository head
 library
   exposed-modules:
       VisualHaskell.Analysis.Ghc910
+      VisualHaskell.Analysis.Ghc910.Version
   other-modules:
       VisualHaskell.Analysis.Ghc910.Compat
       VisualHaskell.Analysis.Ghc910.Engine
@@ -60,16 +61,19 @@ library
   build-depends:
       aeson
     , async
-    , base >=4.20.2 && <4.21
+    , base >=4.18.3 && <4.21
     , bytestring
     , containers
     , directory
+    , filelock
     , filepath
-    , ghc ==9.10.3
+    , ghc >=9.6.7 && <9.11
     , ghc-boot
     , hie-bios ==0.21.*
     , mtl
     , stm
+    , template-haskell
+    , temporary
     , text
     , time
     , unix
@@ -81,7 +85,6 @@ library
 executable visual-haskell-analysis-ghc910
   main-is: Main.hs
   other-modules:
-      Coordinator
       Session
       Paths_visual_haskell_analysis_ghc910
   autogen-modules:
@@ -92,17 +95,20 @@ executable visual-haskell-analysis-ghc910
   build-depends:
       aeson
     , async
-    , base >=4.20.2 && <4.21
+    , base >=4.18.3 && <4.21
     , bytestring
     , containers
     , directory
+    , filelock
     , filepath
     , fsnotify
-    , ghc ==9.10.3
+    , ghc >=9.6.7 && <9.11
     , ghc-boot
     , hie-bios ==0.21.*
     , mtl
     , stm
+    , template-haskell
+    , temporary
     , text
     , time
     , unix
@@ -117,6 +123,8 @@ executable visual-haskell-project-loading-check
   main-is: Main.hs
   other-modules:
       ProtocolCheck
+      RegressionCheck
+      ToolchainCheck
       Paths_visual_haskell_analysis_ghc910
   autogen-modules:
       Paths_visual_haskell_analysis_ghc910
@@ -126,16 +134,18 @@ executable visual-haskell-project-loading-check
   build-depends:
       aeson
     , async
-    , base >=4.20.2 && <4.21
+    , base >=4.18.3 && <4.21
     , bytestring
     , containers
     , directory
+    , filelock
     , filepath
-    , ghc ==9.10.3
+    , ghc >=9.6.7 && <9.11
     , ghc-boot
     , hie-bios ==0.21.*
     , mtl
     , stm
+    , template-haskell
     , temporary
     , text
     , time
@@ -159,17 +169,19 @@ executable visual-haskell-project-loading-spike
   build-depends:
       aeson
     , async
-    , base >=4.20.2 && <4.21
+    , base >=4.18.3 && <4.21
     , bytestring
     , containers
     , directory
+    , filelock
     , filepath
-    , ghc ==9.10.3
+    , ghc >=9.6.7 && <9.11
     , ghc-boot
     , hie-bios ==0.21.*
     , mtl
     , process
     , stm
+    , template-haskell
     , temporary
     , text
     , time
@@ -193,16 +205,19 @@ test-suite visual-haskell-analysis-ghc-910-test
   build-depends:
       aeson
     , async
-    , base >=4.20.2 && <4.21
+    , base >=4.18.3 && <4.21
     , bytestring
     , containers
     , directory
+    , filelock
     , filepath
-    , ghc ==9.10.3
+    , ghc >=9.6.7 && <9.11
     , ghc-boot
     , hie-bios ==0.21.*
     , mtl
     , stm
+    , template-haskell
+    , temporary
     , text
     , time
     , unix

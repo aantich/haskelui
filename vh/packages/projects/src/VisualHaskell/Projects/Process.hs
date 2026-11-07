@@ -1,5 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
-module VisualHaskell.Projects.Process (ToolRunner, runTool) where
+module VisualHaskell.Projects.Process (ToolRunner, EnvironmentToolRunner, runTool, runToolWithEnvironment, runToolInExistingGroup) where
 
 import Control.Concurrent.Async (concurrently)
 import Control.Concurrent (threadDelay)
@@ -12,26 +12,45 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import Data.Text.Encoding.Error (lenientDecode)
 import System.Exit
+import System.Environment (getEnvironment)
 import System.Process
-import System.Posix.Signals (signalProcessGroup, sigTERM, sigKILL)
+import System.Posix.Signals (signalProcess, signalProcessGroup, sigTERM, sigKILL)
 import System.Timeout
 
 type ToolRunner = FilePath -> FilePath -> [String] -> IO Text
+type EnvironmentToolRunner = [(String, String)] -> ToolRunner
 
 -- Streams are drained concurrently and logs/results are bounded. A process
 -- group keeps cancellation from leaving Cabal/Stack/Setup/GHC descendants.
 runTool :: (Text -> IO ()) -> ToolRunner
-runTool progress directory executable arguments = do
+runTool progress = runToolWithEnvironment progress []
+
+runToolWithEnvironment :: (Text -> IO ()) -> EnvironmentToolRunner
+runToolWithEnvironment = runGrouped True
+
+-- Preparation is already an isolated supervised process group. Its nested
+-- tools must inherit that group so killing the helper also reaps their GHCs.
+runToolInExistingGroup :: (Text -> IO ()) -> EnvironmentToolRunner
+runToolInExistingGroup = runGrouped False
+
+runGrouped :: Bool -> (Text -> IO ()) -> EnvironmentToolRunner
+runGrouped ownGroup progress overrides directory executable arguments = do
   progress (Text.pack (showCommandForUser executable arguments))
+  -- stack exec exports the editor's package database, not the project's.
+  -- Cabal rejects GHC_PACKAGE_PATH and GHC_ENVIRONMENT can load unrelated units.
+  inherited <- getEnvironment
+  let environment = overrides <> filter (\(name, _) -> name `notElem`
+        (["GHC_PACKAGE_PATH", "GHC_ENVIRONMENT"] <> map fst overrides)) inherited
   result <- timeout (15 * 60 * 1000000) $
     withCreateProcess ((proc executable arguments)
-      {cwd = Just directory, std_in = NoStream, std_out = CreatePipe, std_err = CreatePipe, create_group = True}) $
+      {cwd = Just directory, env = Just environment, std_in = NoStream, std_out = CreatePipe, std_err = CreatePipe, create_group = ownGroup}) $
       \_ out err child -> do
         pid <- getPid child
         let cleanup = do
               -- A wrapper can exit before a child which still owns its pipes.
               -- Keep the original group ID and reap descendants even then.
-              let signal sig = maybe (pure ()) (\group -> signalProcessGroup sig group `catch` ignore) pid
+              let signal sig = maybe (pure ()) (\identifier ->
+                    (if ownGroup then signalProcessGroup sig identifier else signalProcess sig identifier) `catch` ignore) pid
               signal sigTERM
               status <- getProcessExitCode child
               case status of

@@ -13,16 +13,19 @@ dependencies:
   - async
   - aeson
   - bytestring
-  - base >= 4.20.2 && < 4.21
+  - base >= 4.18.3 && < 4.21
   - containers
   - directory
   - filepath
-  - ghc == 9.10.3
+  - filelock
+  - temporary
+  - ghc >= 9.6.7 && < 9.11
   - ghc-boot
   - hie-bios >= 0.21 && < 0.22
   - mtl
   - stm
   - text
+  - template-haskell
   - time
   - unix
   - visual-haskell-analysis-protocol
@@ -37,6 +40,7 @@ library:
   source-dirs: src
   exposed-modules:
     - VisualHaskell.Analysis.Ghc910
+    - VisualHaskell.Analysis.Ghc910.Version
   other-modules:
     - VisualHaskell.Analysis.Ghc910.Compat
     - VisualHaskell.Analysis.Ghc910.Engine

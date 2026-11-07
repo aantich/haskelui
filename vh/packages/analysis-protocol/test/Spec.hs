@@ -38,9 +38,11 @@ main = do
         ["/project/cabal.project"] ["/project/pkg/src"] [] (SessionId "context-1") (Just "pkg-unit")
         [("pkg-unit", ["/project/pkg/src"])] [("pkg-unit", "/project/pkg")]
   mapM_ (\payload -> assertEqual "project request round trip" (Just payload) (decode (encode payload)))
-    [DiscoverProject Nothing, PrepareComponent (ComponentId "pkg:lib"), ConfigureContext context]
+    [DiscoverProject Nothing, PrepareComponent (ComponentId "pkg:lib"), ConfigureContext context,
+      RefreshToolchains, SelectCompiler Nothing, SelectCompiler (Just "/installed/ghc"), BuildAnalysisWorker, OpenToolchainManager]
   mapM_ (\payload -> assertEqual "project event round trip" (Just payload) (decode (encode payload)))
-    [ProjectDiscovered catalog, ProjectProgress "Preparing pkg", ProjectConfigurationChanged ["/project/cabal.project"]]
+    [ProjectDiscovered catalog, ProjectProgress "Preparing pkg", ProjectConfigurationChanged ["/project/cabal.project"],
+      ToolchainsDiscovered emptyToolchainInventory]
   let query = QueryPosition (PositionQuery CompletionQuery 17)
       result = PositionQueryCompleted (PositionResult (PositionQuery HoverQuery 5)
         (Just (HoverInfo "map" "(a -> b) -> [a] -> [b]" (Just "Prelude") 4 3)) [] [] 4 0)

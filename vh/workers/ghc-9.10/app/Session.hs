@@ -27,6 +27,7 @@ import System.IO
   , stdout
   )
 import VisualHaskell.Analysis.Ghc910
+import VisualHaskell.Analysis.Ghc910.Version (compilerVersionText)
 import VisualHaskell.Analysis.Protocol
 import VisualHaskell.Semantic
 
@@ -79,7 +80,7 @@ runSessionMain = do
           WorkerHello
             { workerAcceptedProtocol = protocolV2
             , workerVersion = "visual-haskell-analysis-ghc910/0.1.0"
-            , workerCompilerVersion = Just (CompilerVersion "9.10.3")
+            , workerCompilerVersion = Just (CompilerVersion compilerVersionText)
             , workerCapabilities =
                 [ WorkspaceLoadingCapability
                 , ComponentDiscoveryCapability
@@ -191,6 +192,10 @@ loop options state = do
           loop options state
         DiscoverProject _ -> send envelope (ProjectDiscovered emptyProjectCatalog) >> loop options state
         PrepareComponent _ -> sendFailure envelope "unsupported" "Project preparation is not configured" True >> loop options state
+        RefreshToolchains -> sendFailure envelope "coordinator-required" "Toolchain management belongs to the project coordinator" True >> loop options state
+        SelectCompiler _ -> sendFailure envelope "coordinator-required" "Compiler selection belongs to the project coordinator" True >> loop options state
+        BuildAnalysisWorker -> sendFailure envelope "coordinator-required" "Worker builds belong to the project coordinator" True >> loop options state
+        OpenToolchainManager -> sendFailure envelope "coordinator-required" "Toolchain management belongs to the project coordinator" True >> loop options state
         ConfigureContext context -> do
           stopWorkerAnalysisEngine state
           now <- getCurrentTime
@@ -285,7 +290,7 @@ analyze options envelope state document =
                     ComponentInfo
                       { componentId = maybe (ComponentId snapshot.analysisSession.unSessionId) resolvedComponent state.workerContext
                       , componentRoot = root
-                      , componentCompilerVersion = CompilerVersion "9.10.3"
+                      , componentCompilerVersion = CompilerVersion compilerVersionText
                       , componentSession = snapshot.analysisSession
                       }
               send envelope (ComponentDiscovered component)
@@ -400,6 +405,10 @@ clientMessageFields message =
     DiscoverProject _ -> [("kind", "discover-project")]
     PrepareComponent _ -> [("kind", "prepare-component")]
     ConfigureContext _ -> [("kind", "configure-context")]
+    RefreshToolchains -> [("kind", "refresh-toolchains")]
+    SelectCompiler _ -> [("kind", "select-compiler")]
+    BuildAnalysisWorker -> [("kind", "build-analysis-worker")]
+    OpenToolchainManager -> [("kind", "open-toolchain-manager")]
     ClientHelloMessage {} -> [("kind", "client-hello")]
     OpenWorkspace request ->
       [ ("kind", "open-workspace")

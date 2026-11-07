@@ -56,6 +56,10 @@ data AnalysisCommand
   | DiscoverAnalysisProject !WorkspaceGeneration !WorkspaceId !(Maybe Text)
   | PrepareAnalysisComponent !WorkspaceGeneration !WorkspaceId !ComponentId
   | CancelAnalysisOperation !WorkspaceGeneration !WorkspaceId
+  | RefreshAnalysisToolchains !WorkspaceGeneration !WorkspaceId
+  | SelectAnalysisCompiler !WorkspaceGeneration !WorkspaceId !(Maybe FilePath)
+  | BuildAnalysisAdapter !WorkspaceGeneration !WorkspaceId
+  | OpenAnalysisToolchainManager !WorkspaceGeneration !WorkspaceId
   | WithAnalysisInputs !ContentHash !AnalysisCommand
   deriving stock (Eq, Show)
 
@@ -128,7 +132,7 @@ analysisService configuration toExternal =
     serviceOptions =
       defaultServiceOptions
         { serviceCommandCapacity = 256
-        , serviceOverflowPolicy = ReplacePendingCommand analysisCommandKey
+        , serviceOverflowPolicy = ReplacePendingCommand analysisQueuedCommandKey
         }
 
 runAnalysisService
@@ -150,9 +154,9 @@ runAnalysisService configuration toExternal context = do
         emitExternalEvent context.serviceEvents (toExternal (AnalysisClientChanged event))
       )
   -- Runtime service cancellation must remain prompt. The client supervisor
-  -- owns graceful child shutdown after receiving StopCommand; waiting here
-  -- would make an outer asynchronous cancellation block on a worker that is
-  -- itself still inside startup/handshake timeout handling.
+  -- receives an out-of-band stop signal and owns bounded child cleanup,
+  -- including interruption during startup/handshake/replay. Do not hold the
+  -- runtime's service-cancellation path open while that cleanup completes.
   let stop =
         analysisTrace configuration TraceInfo "service.stop" []
           >> stopAnalysisClient client
@@ -202,6 +206,10 @@ analysisCommandFields command =
       DiscoverAnalysisProject generation workspace _ -> generationFields generation <> [("workspace", workspace.unWorkspaceId)]
       PrepareAnalysisComponent generation workspace component -> generationFields generation <> [("workspace", workspace.unWorkspaceId), ("component", component.unComponentId)]
       CancelAnalysisOperation generation workspace -> generationFields generation <> [("workspace", workspace.unWorkspaceId)]
+      RefreshAnalysisToolchains generation workspace -> generationFields generation <> [("workspace", workspace.unWorkspaceId)]
+      SelectAnalysisCompiler generation workspace _ -> generationFields generation <> [("workspace", workspace.unWorkspaceId)]
+      BuildAnalysisAdapter generation workspace -> generationFields generation <> [("workspace", workspace.unWorkspaceId)]
+      OpenAnalysisToolchainManager generation workspace -> generationFields generation <> [("workspace", workspace.unWorkspaceId)]
       ConfigureAnalysisWorkspace generation request ->
         generationFields generation
           <> [ ("workspace", request.workspaceRequestId.unWorkspaceId)
@@ -282,6 +290,7 @@ workerMessageKind message =
     ProjectDiscovered {} -> "project-discovered"
     ProjectProgress {} -> "project-progress"
     ProjectConfigurationChanged {} -> "configuration-changed"
+    ToolchainsDiscovered {} -> "toolchains-discovered"
     WorkerHelloMessage {} -> "worker-hello"
     WorkspaceLoading {} -> "workspace-loading"
     WorkspaceReady {} -> "workspace-ready"
@@ -304,6 +313,14 @@ commandEnvelope command =
       (protocolEnvelope generation (PrepareComponent component)) {envelopeWorkspace = Just workspace}
     CancelAnalysisOperation generation workspace ->
       (protocolEnvelope generation (CancelRequest (RequestId 0))) {envelopeWorkspace = Just workspace}
+    RefreshAnalysisToolchains generation workspace ->
+      (protocolEnvelope generation RefreshToolchains) {envelopeWorkspace = Just workspace}
+    SelectAnalysisCompiler generation workspace path ->
+      (protocolEnvelope generation (SelectCompiler path)) {envelopeWorkspace = Just workspace}
+    BuildAnalysisAdapter generation workspace ->
+      (protocolEnvelope generation BuildAnalysisWorker) {envelopeWorkspace = Just workspace}
+    OpenAnalysisToolchainManager generation workspace ->
+      (protocolEnvelope generation OpenToolchainManager) {envelopeWorkspace = Just workspace}
     ConfigureAnalysisWorkspace generation request ->
       (protocolEnvelope generation (OpenWorkspace request))
         { envelopeWorkspace = Just request.workspaceRequestId
@@ -359,6 +376,10 @@ analysisCommandKey command =
     DiscoverAnalysisProject {} -> "discover-project"
     PrepareAnalysisComponent {} -> "prepare-component"
     CancelAnalysisOperation {} -> "cancel-project"
+    RefreshAnalysisToolchains {} -> "refresh-toolchains"
+    SelectAnalysisCompiler {} -> "select-compiler"
+    BuildAnalysisAdapter {} -> "build-analysis-worker"
+    OpenAnalysisToolchainManager {} -> "open-toolchain-manager"
     ConfigureAnalysisWorkspace {} -> "workspace"
     SelectAnalysisComponent {} -> "component"
     UpsertAnalysisDocument _ _ _ snapshot -> documentKey "snapshot" snapshot.snapshotDocumentId
@@ -371,3 +392,12 @@ analysisCommandKey command =
   where
     documentKey :: Text -> DocumentId -> Text
     documentKey kind document = kind <> ":" <> document.unDocumentId
+
+-- Coalescing moves a pending command to the end of the queue. Keep generations
+-- distinct so replacement cannot move an older OpenWorkspace past the new
+-- generation's document commands.
+analysisQueuedCommandKey :: AnalysisCommand -> Text
+analysisQueuedCommandKey RestartAnalysisWorker = "restart"
+analysisQueuedCommandKey command =
+  Text.pack (show (commandEnvelope command).envelopeWorkspaceGeneration.unWorkspaceGeneration)
+    <> ":" <> analysisCommandKey command

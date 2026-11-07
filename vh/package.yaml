@@ -46,7 +46,9 @@ executables:
       - haskelui-backend-appkit
       - visual-haskell
       - haskelui-runtime
+      - visual-haskell-projects
     build-tools:
+      - visual-haskell-projects:visual-haskell-project-coordinator
       - visual-haskell-analysis-ghc910:visual-haskell-analysis-ghc910
     ghc-options:
       - -Wall

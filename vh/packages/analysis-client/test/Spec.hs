@@ -11,9 +11,13 @@ import Control.Concurrent.STM
   , readTQueue
   , writeTQueue
   )
-import Control.Exception (finally)
-import Control.Monad (unless)
+import Control.Exception (finally, try, IOException)
+import Control.Concurrent (threadDelay)
+import Control.Concurrent.MVar (newEmptyMVar, takeMVar, putMVar)
+import Control.Monad (unless, forM_)
 import Data.IORef (modifyIORef', newIORef, readIORef)
+import qualified Data.Text as Text
+import System.Posix.Signals (nullSignal, signalProcess)
 import System.Directory
   ( doesFileExist
   , findExecutable
@@ -74,6 +78,13 @@ main = do
       assertEqual "replay retains workspace generation" generation replayed.analysisWorkspaceGeneration
       assert "fake result contains declaration" (not (null replayed.analysisDeclarations))
       assert "fake result contains requested diagnostic" (not (null replayed.analysisDiagnostics))
+      sendAnalysisMessage client (workspaceEnvelope generation workspace (OpenWorkspace (WorkspaceRequest workspace "/fixture" TrustedWorkspace)))
+      sendAnalysisMessage client (workspaceEnvelope (WorkspaceGeneration 3) workspace (OpenWorkspace (WorkspaceRequest workspace "/obsolete" TrustedWorkspace)))
+      restartAnalysisWorker client
+      thirdGeneration <- awaitReadyGeneration events (WorkerGeneration 3)
+      repeated <- awaitAnalysis events thirdGeneration
+      assertEqual "duplicate/stale workspace opens cannot erase replay buffers" updatedSnapshot.snapshotContentHash repeated.analysisContentHash
+      assertEqual "stale workspace opens cannot replace replay authority" generation repeated.analysisWorkspaceGeneration
       let expectation =
             AnalysisExpectation
               { expectedWorkerGeneration = secondGeneration
@@ -96,7 +107,48 @@ main = do
       assert "no stale pre-restart worker message is delivered after the new generation is ready" $
         all (not . isOlderWorkerMessage secondGeneration) afterSecondReady
     ) `finally` (stopAnalysisClient client >> waitAnalysisClient client >> removeIfPresent crashMarker)
-  putStrLn "Visual Haskell analysis client supervision and replay tests passed"
+  cancellationChecks executable
+  putStrLn "Visual Haskell analysis client supervision, replay and backpressure cancellation tests passed"
+
+cancellationChecks :: FilePath -> IO ()
+cancellationChecks executable =
+  forM_ ["handshake", "write", "replay"] $ \mode -> do
+    directory <- getTemporaryDirectory
+    (marker, handle) <- openTempFile directory "vh-stalled-worker"
+    hClose handle
+    removeFile marker
+    events <- newTQueueIO
+    gate <- newEmptyMVar
+    let launch = (defaultWorkerLaunch executable)
+          { workerArguments = [if mode == "handshake" then "--stall-before-hello" else "--stall-after-hello", marker]
+          , workerHandshakeTimeoutMicroseconds = 60000000
+          }
+        hello = protocolEnvelope (WorkspaceGeneration 1)
+          (ClientHelloMessage (ClientHello "cancellation-test" Nothing TrustedWorkspace []))
+        record event = do
+          atomically (writeTQueue events event)
+          case event of
+            AnalysisWorkerStarting _ | mode == "replay" -> takeMVar gate
+            _ -> pure ()
+        source = Text.replicate (2 * 1024 * 1024) "x"
+        snapshot = DocumentSnapshot (DocumentId "large") "/large.hs" (TextRevision 1) (contentHash source) source LF
+        sendLarge client = sendAnalysisMessage client (protocolEnvelope (WorkspaceGeneration 1) (OpenDocument snapshot))
+    client <- startAnalysisClient launch hello record
+    flip finally (stopAnalysisClient client >> waitAnalysisClient client >> removeIfPresent marker) $ do
+      if mode == "replay" then sendLarge client >> putMVar gate () else pure ()
+      let waitMarker 0 = fail "stalled worker did not start"
+          waitMarker attempts = doesFileExist marker >>= \exists ->
+            if exists then pure () else threadDelay 10000 >> waitMarker (attempts - 1)
+      waitMarker (200 :: Int)
+      if mode == "write" then awaitReady events >> sendLarge client else pure ()
+      -- Allow the pending 2 MiB frame to exceed the pipe's capacity.
+      threadDelay 100000
+      stopped <- timeout 2000000 (stopAnalysisClient client >> waitAnalysisClient client)
+      assert (mode <> " cancellation bypasses protocol backpressure") (stopped == Just ())
+      pid <- read <$> readFile marker
+      alive <- try (signalProcess nullSignal pid) :: IO (Either IOException ())
+      assert (mode <> " cancellation reaps its worker") (case alive of Left _ -> True; Right () -> False)
+      awaitStopped events
 
 workspaceEnvelope :: WorkspaceGeneration -> WorkspaceId -> ClientMessage -> ProtocolEnvelope ClientMessage
 workspaceEnvelope generation workspace payload =

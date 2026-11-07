@@ -64,6 +64,7 @@ executable vh
   ghc-options: -Wall -Wcompat -threaded
   build-tool-depends:
       visual-haskell-analysis-ghc910:visual-haskell-analysis-ghc910
+    , visual-haskell-projects:visual-haskell-project-coordinator
   build-depends:
       aeson
     , async
@@ -80,6 +81,7 @@ executable vh
     , visual-haskell
     , visual-haskell-analysis-client
     , visual-haskell-analysis-protocol
+    , visual-haskell-projects
     , visual-haskell-semantic-model
     , visual-haskell-textmate
     , visual-haskell-type-diagram

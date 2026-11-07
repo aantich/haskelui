@@ -34,7 +34,7 @@ library
   ghc-options: -Wall -Wcompat
   build-depends:
       async
-    , base >=4.20.2 && <4.21
+    , base >=4.18.3 && <4.21
     , bytestring
     , containers
     , process
@@ -59,7 +59,7 @@ test-suite visual-haskell-analysis-client-test
       visual-haskell-analysis-fake-worker:visual-haskell-analysis-fake-worker
   build-depends:
       async
-    , base >=4.20.2 && <4.21
+    , base >=4.18.3 && <4.21
     , bytestring
     , containers
     , directory

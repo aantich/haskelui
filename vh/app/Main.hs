@@ -5,13 +5,12 @@ module Main (main) where
 
 import Data.List (stripPrefix)
 import qualified Data.Text as Text
-import System.Directory (doesFileExist, findExecutable)
-import System.Environment (getArgs, getExecutablePath)
+import System.Environment (getArgs)
 import System.Exit (exitFailure, exitSuccess)
-import System.FilePath ((</>), takeDirectory)
 import System.IO (hPutStrLn, stderr)
 import VisualHaskell (applicationWithAnalysisEnvironment)
 import VisualHaskell.Analysis.Client (WorkerLaunch (..))
+import VisualHaskell.Projects.Toolchains (resolveCoordinator)
 import VisualHaskell.Analysis.Service
   ( AnalysisConfiguration (..)
   , defaultAnalysisConfiguration
@@ -131,10 +130,4 @@ usage =
 
 resolveAnalysisWorker :: IO FilePath
 resolveAnalysisWorker = do
-  currentExecutable <- getExecutablePath
-  let executableName = "visual-haskell-analysis-ghc910"
-      sibling = takeDirectory currentExecutable </> executableName
-  siblingExists <- doesFileExist sibling
-  if siblingExists
-    then pure sibling
-    else maybe executableName id <$> findExecutable executableName
+  resolveCoordinator

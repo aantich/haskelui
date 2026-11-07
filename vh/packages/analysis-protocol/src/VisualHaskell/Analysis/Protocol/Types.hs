@@ -43,7 +43,7 @@ data ProtocolVersion = ProtocolVersion
   deriving stock (Eq, Ord, Show)
 
 protocolV2 :: ProtocolVersion
-protocolV2 = ProtocolVersion 2 0
+protocolV2 = ProtocolVersion 2 1
 
 newtype RequestId = RequestId {unRequestId :: Word64}
   deriving stock (Eq, Ord, Show)
@@ -81,6 +81,7 @@ protocolEnvelope generation payload =
 data AnalysisCapability
   = WorkspaceLoadingCapability
   | ComponentDiscoveryCapability
+  | ToolchainManagementCapability
   | FullDocumentSnapshotsCapability
   | DiagnosticsCapability
   | DocumentDeclarationsCapability
@@ -135,6 +136,10 @@ data ClientMessage
   | DiscoverProject !(Maybe Text)
   | PrepareComponent !ComponentId
   | ConfigureContext !ResolvedContext
+  | RefreshToolchains
+  | SelectCompiler !(Maybe FilePath)
+  | BuildAnalysisWorker
+  | OpenToolchainManager
   | ShutdownWorker
   deriving stock (Eq, Show)
 
@@ -165,6 +170,7 @@ data WorkerMessage
   | ProjectDiscovered !ProjectCatalog
   | ProjectProgress !Text
   | ProjectConfigurationChanged ![FilePath]
+  | ToolchainsDiscovered !ToolchainInventory
   deriving stock (Eq, Show)
 
 instance ToJSON ProtocolVersion where
@@ -279,6 +285,10 @@ instance ToJSON ClientMessage where
     DiscoverProject profile -> tagged "discover-project" ["profile" .= profile]
     PrepareComponent component -> tagged "prepare-component" ["component" .= component]
     ConfigureContext context -> tagged "configure-context" ["context" .= context]
+    RefreshToolchains -> tagged "refresh-toolchains" []
+    SelectCompiler path -> tagged "select-compiler" ["path" .= path]
+    BuildAnalysisWorker -> tagged "build-analysis-worker" []
+    OpenToolchainManager -> tagged "open-toolchain-manager" []
     ShutdownWorker -> tagged "shutdown" []
     where tagged messageType fields = object (("type" .= (messageType :: Text)) : fields)
 
@@ -300,6 +310,10 @@ instance FromJSON ClientMessage where
       "discover-project" -> DiscoverProject <$> value .:? "profile"
       "prepare-component" -> PrepareComponent <$> value .: "component"
       "configure-context" -> ConfigureContext <$> value .: "context"
+      "refresh-toolchains" -> pure RefreshToolchains
+      "select-compiler" -> SelectCompiler <$> value .:? "path"
+      "build-analysis-worker" -> pure BuildAnalysisWorker
+      "open-toolchain-manager" -> pure OpenToolchainManager
       "shutdown" -> pure ShutdownWorker
       _ -> fail ("unknown client message " <> Text.unpack messageType)
 
@@ -343,6 +357,7 @@ instance ToJSON WorkerMessage where
     ProjectDiscovered catalog -> tagged "project-discovered" ["catalog" .= catalog]
     ProjectProgress progress -> tagged "project-progress" ["progress" .= progress]
     ProjectConfigurationChanged paths -> tagged "project-configuration-changed" ["paths" .= paths]
+    ToolchainsDiscovered inventory -> tagged "toolchains-discovered" ["inventory" .= inventory]
     where tagged messageType fields = object (("type" .= (messageType :: Text)) : fields)
 
 instance FromJSON WorkerMessage where
@@ -363,12 +378,14 @@ instance FromJSON WorkerMessage where
       "project-discovered" -> ProjectDiscovered <$> value .: "catalog"
       "project-progress" -> ProjectProgress <$> value .: "progress"
       "project-configuration-changed" -> ProjectConfigurationChanged <$> value .: "paths"
+      "toolchains-discovered" -> ToolchainsDiscovered <$> value .: "inventory"
       _ -> fail ("unknown worker message " <> Text.unpack messageType)
 
 capabilityText :: AnalysisCapability -> Text
 capabilityText capability = case capability of
   WorkspaceLoadingCapability -> "workspace-loading"
   ComponentDiscoveryCapability -> "component-discovery"
+  ToolchainManagementCapability -> "toolchain-management"
   FullDocumentSnapshotsCapability -> "full-document-snapshots"
   DiagnosticsCapability -> "diagnostics"
   DocumentDeclarationsCapability -> "document-declarations"
@@ -382,7 +399,7 @@ capabilityText capability = case capability of
 
 allCapabilities :: [AnalysisCapability]
 allCapabilities =
-  [ WorkspaceLoadingCapability, ComponentDiscoveryCapability, FullDocumentSnapshotsCapability, DiagnosticsCapability
+  [ WorkspaceLoadingCapability, ComponentDiscoveryCapability, ToolchainManagementCapability, FullDocumentSnapshotsCapability, DiagnosticsCapability
   , DocumentDeclarationsCapability, StructuredTypesCapability, SemanticSpansCapability
   , DefinitionLocationsCapability, CancellationCapability, PositionQueriesCapability, CompositionChecksCapability
   ]
