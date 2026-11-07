@@ -46,6 +46,7 @@ import HaskeLUI.Core
   ( PaneState (..)
   , PaneVisibility (..)
   )
+import VisualHaskell.Semantic (ComponentId)
 
 workspaceFileName :: FilePath
 workspaceFileName = ".vihs"
@@ -67,6 +68,9 @@ data WorkspaceState = WorkspaceState
   , workspaceNavigatorPane :: !PaneState
   , workspaceInspectorPane :: !PaneState
   , workspaceAnalysisTrusted :: !Bool
+  , workspaceProjectProfile :: !(Maybe Text)
+  , workspaceProjectComponent :: !(Maybe ComponentId)
+  , workspaceFileContexts :: ![(FilePath, ComponentId)]
   }
   deriving stock (Eq, Show)
 
@@ -74,7 +78,7 @@ instance ToJSON WorkspaceState where
   toJSON state =
     object
       [ "format" .= ("visual-haskell-workspace" :: Text)
-      , "version" .= (2 :: Int)
+      , "version" .= (3 :: Int)
       , "openFiles" .= fmap Text.pack state.workspaceOpenFiles
       , "activeFile" .= fmap Text.pack state.workspaceActiveFile
       , "expandedFolders" .= fmap Text.pack state.workspaceExpandedFolders
@@ -85,6 +89,9 @@ instance ToJSON WorkspaceState where
             , "inspector" .= paneValue state.workspaceInspectorPane
             ]
       , "analysisTrusted" .= state.workspaceAnalysisTrusted
+      , "projectProfile" .= state.workspaceProjectProfile
+      , "projectComponent" .= state.workspaceProjectComponent
+      , "fileContexts" .= state.workspaceFileContexts
       ]
 
 instance FromJSON WorkspaceState where
@@ -94,7 +101,7 @@ instance FromJSON WorkspaceState where
     if (format :: Text) /= "visual-haskell-workspace"
       then fail "unexpected workspace format"
       else pure ()
-    if (version :: Int) `notElem` [1, 2]
+    if (version :: Int) `notElem` [1, 2, 3]
       then fail ("unsupported workspace version " <> show version)
       else pure ()
     openFiles <- value .:? "openFiles" .!= []
@@ -112,11 +119,18 @@ instance FromJSON WorkspaceState where
     parsedActiveFile <- traverse (validateForParser "activeFile") activeFile
     parsedExpandedFolders <- traverse (validateForParser "expandedFolders") expandedFolders
     parsedSelectedEntry <- traverse (validateForParser "selectedExplorerEntry") selectedEntry
+    projectProfile <- value .:? "projectProfile"
+    projectComponent <- value .:? "projectComponent"
+    contexts <- value .:? "fileContexts" .!= []
+    parsedContexts <- traverse (\(path, component) -> (\valid -> (valid, component)) <$> validateForParser "fileContexts" path) contexts
     let uniqueOpenFiles = nub parsedOpenFiles
         active = parsedActiveFile >>= \path -> if path `elem` uniqueOpenFiles then Just path else Nothing
     pure
       WorkspaceState
         { workspaceOpenFiles = uniqueOpenFiles
+        , workspaceProjectProfile = projectProfile
+        , workspaceProjectComponent = projectComponent
+        , workspaceFileContexts = parsedContexts
         , workspaceActiveFile = active
         , workspaceExpandedFolders = nub ("." : parsedExpandedFolders)
         , workspaceSelectedExplorerEntry = parsedSelectedEntry

@@ -32,6 +32,7 @@ import Data.List
   ( find
   , foldl'
   , sortOn
+  , nub
   )
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -82,6 +83,8 @@ import GHC.Generics (Generic)
 import System.FilePath
   ( (</>)
   , normalise
+  , makeRelative
+  , isAbsolute
   , splitDirectories
   , takeExtension
   , takeDirectory
@@ -172,6 +175,13 @@ data EditorModel = EditorModel
   , analysisComponent :: !(Maybe Semantic.ComponentInfo)
   , analysisSnapshots :: !(Map Semantic.DocumentId (Semantic.AnalysisSnapshot Semantic.RevisionedSourceRange))
   , analysisStatus :: !Text
+  , analysisProjectCatalog :: !Semantic.ProjectCatalog
+  , analysisProfileChoice :: !(Maybe Text)
+  , analysisComponentChoice :: !(Maybe Semantic.ComponentId)
+  , analysisFileContexts :: !(Map FilePath Semantic.ComponentId)
+  , analysisProjectOperation :: !(Maybe Bool)
+  , analysisOperationIdentity :: !Word64
+  , analysisProjectLog :: !Text
   }
   deriving stock (Eq, Generic, Show)
 
@@ -221,6 +231,16 @@ saveCommand = CommandId 11
 openFolderCommand = CommandId 12
 trustWorkspaceCommand = CommandId 13
 
+reloadProjectCommand, cancelProjectCommand :: CommandId
+reloadProjectCommand = CommandId 16
+cancelProjectCommand = CommandId 17
+revokeTrustCommand :: CommandId
+revokeTrustCommand = CommandId 18
+
+projectProfileKey, projectComponentKey :: ElementKey
+projectProfileKey = ElementKey 106
+projectComponentKey = ElementKey 107
+
 addFunctionCommand, clearFunctionsCommand :: CommandId
 addFunctionCommand = CommandId 14
 clearFunctionsCommand = CommandId 15
@@ -256,6 +276,8 @@ functionsInspectorTabKey = TabKey 9000004
 
 outlineInspectorTabKey :: TabKey
 outlineInspectorTabKey = TabKey 9000005
+projectInspectorTabKey :: TabKey
+projectInspectorTabKey = TabKey 9000006
 
 outlineListKey :: ElementKey
 outlineListKey = ElementKey 251
@@ -436,6 +458,13 @@ initialModel =
     , analysisComponent = Nothing
     , analysisSnapshots = Map.empty
     , analysisStatus = "GHC: starting"
+    , analysisProjectCatalog = Semantic.emptyProjectCatalog
+    , analysisProfileChoice = Nothing
+    , analysisComponentChoice = Nothing
+    , analysisFileContexts = Map.empty
+    , analysisProjectOperation = Nothing
+    , analysisOperationIdentity = 0
+    , analysisProjectLog = ""
     }
 
 editorApplication :: EditorModel -> App EditorModel
@@ -467,6 +496,9 @@ render model =
         , CommandSpec saveCommand "Save" (Just "s") (maybe False documentDirty activeDocument)
         , CommandSpec addFunctionCommand "Add Function to Canvas" Nothing (model.selectedFunction /= Nothing)
         , CommandSpec clearFunctionsCommand "Clear Function Canvas" Nothing (not (null model.functionCanvas.canvasNodes))
+        , CommandSpec reloadProjectCommand "Reload / Retry Haskell Project" Nothing model.analysisWorkspaceTrusted
+        , CommandSpec cancelProjectCommand "Cancel Project Operation" Nothing model.analysisWorkspaceTrusted
+        , CommandSpec revokeTrustCommand "Revoke Workspace Analysis Trust" Nothing model.analysisWorkspaceTrusted
         , CommandSpec
             trustWorkspaceCommand
             "Trust Workspace for Haskell Analysis"
@@ -605,6 +637,16 @@ inspectorTabs model =
       , workspaceTabControls =
           inspectorTabRoot functionsInspectorRootKey (functionsInspectorItems model)
       }
+  , WorkspaceTabSpec
+      { workspaceTabKey = projectInspectorTabKey
+      , workspaceTabDocument = Nothing
+      , workspaceTabTitle = "Project"
+      , workspaceTabModified = False
+      , workspaceTabCloseable = False
+      , workspaceTabControls = inspectorTabRoot (ElementKey 280)
+          [topStretchInspectorItem 16 12 12 (Label (ElementKey 281) (Rect 0 0 240 60) model.analysisStatus),
+           fillInspectorItem 84 12 12 12 (debugTextControl 282 model.analysisProjectLog)]
+      }
   ]
   where
     problems = currentProblems model
@@ -648,17 +690,58 @@ navigatorControls model =
       [ Label projectTreeKey (Rect 16 684 200 44) "No folder open\nFile > Open Folder…"
       ]
     Just _ ->
-      [ TreeView
+      responsiveProjectNavigator model (TreeView
           CollectionControlSpec
             { collectionControlKey = projectTreeKey
-            , collectionControlFrame = Rect 0 0 230 718
+            , collectionControlFrame = Rect 0 188 230 530
             , collectionControlItems = projectCollectionItems model
             , collectionControlSelectionMode = SingleCollectionSelection
             , collectionControlSelection = projectSelection model
             , collectionControlRowSizing = PlatformDefaultRows
             , collectionControlEnabled = True
             }
-      ]
+      )
+
+responsiveProjectNavigator :: EditorModel -> Control -> [Control]
+responsiveProjectNavigator model tree =
+  [LayoutContainer (LayoutContainerSpec (ElementKey 105) (Rect 0 0 230 718) PlainLayoutContainer defaultLayoutEnvironment
+    (LayoutOverlay defaultOverlay {overlayClip = True}
+      (OverlayItem (Anchor AnchorStretch AnchorStretch) (Insets 0 0 188 0) 0 0 (LayoutLeaf projectTreeKey)
+       : [OverlayItem (Anchor AnchorStretch AnchorEnd) (Insets 0 10 (Dp frame.rectY) 10) 0 0
+            (LayoutBox defaultBoxSpec {boxHeight = exactAxis (Dp frame.rectHeight)} (LayoutLeaf (controlKey control)))
+          | control <- controls, let frame = controlFrame control, controlKey control `notElem` [ElementKey 109, ElementKey 110]]
+       <> [OverlayItem (Anchor AnchorStretch AnchorEnd) (Insets 0 10 50 10) 0 0
+            (LayoutBox defaultBoxSpec {boxHeight = exactAxis 28}
+              (LayoutFlow defaultRow {flowGap = 10}
+                [FlowItem defaultFlowItem {itemGrow = 1} (LayoutLeaf key) | key <- [ElementKey 109, ElementKey 110]]))]))
+    (tree : controls))]
+  where controls = projectControls model
+
+projectControls :: EditorModel -> [Control]
+projectControls model =
+  [ Label (ElementKey 108) (Rect 10 158 210 20) "PROJECT CONFIGURATION"
+  , ChoicePicker (ChoiceControlSpec projectProfileKey (Rect 10 122 210 28)
+      [ChoiceItem key (ControlLabel (toolLabel profile.profileTool <> " · " <> maybe "." (Text.pack . takeFileName) profile.profileConfiguration) Nothing) True
+        | (key, profile) <- profileChoices model]
+      (fst <$> find (\(_, profile) -> Just profile.profileId == model.analysisProfileChoice) (profileChoices model)) model.analysisWorkspaceTrusted)
+  , ChoicePicker (ChoiceControlSpec projectComponentKey (Rect 10 86 210 28)
+      [ChoiceItem key (ControlLabel component.projectComponentTarget Nothing) True | (key, component) <- componentChoices model]
+      (fst <$> find (\(_, component) -> Just component.projectComponentId == model.analysisComponentChoice) (componentChoices model)) model.analysisWorkspaceTrusted)
+  , Button (ElementKey 109) (Rect 10 50 100 28)
+      (if model.analysisWorkspaceTrusted then "Reload" else "Trust…")
+      (if model.analysisWorkspaceTrusted then reloadProjectCommand else trustWorkspaceCommand) True
+  , Button (ElementKey 110) (Rect 120 50 100 28) "Cancel" cancelProjectCommand model.analysisWorkspaceTrusted
+  , Label (ElementKey 111) (Rect 10 4 210 42) (Text.take 180 model.analysisStatus)
+  ]
+  where
+    toolLabel Semantic.CabalProject = "Cabal"
+    toolLabel Semantic.StackProject = "Stack"
+    toolLabel Semantic.CradleProject = "Cradle"
+
+profileChoices :: EditorModel -> [(ChoiceKey, Semantic.ProjectProfile)]
+profileChoices model = [(ChoiceKey (Semantic.unContentHash (Semantic.contentHash profile.profileId)), profile) | profile <- model.analysisProjectCatalog.catalogProfiles]
+componentChoices :: EditorModel -> [(ChoiceKey, Semantic.ProjectComponent)]
+componentChoices model = [(ChoiceKey (Semantic.unContentHash (Semantic.contentHash component.projectComponentId.unComponentId)), component) | component <- model.analysisProjectCatalog.catalogComponents]
 
 projectCollectionItems :: EditorModel -> [CollectionItem]
 projectCollectionItems model =
@@ -1363,7 +1446,13 @@ prepareAnalysisWorkspaceTransition
   -> Transaction EditorModel
 prepareAnalysisWorkspaceTransition oldModel newModel update
   | oldModel.projectRoot == newModel.projectRoot
-  , oldModel.analysisWorkspaceTrusted == newModel.analysisWorkspaceTrusted = update
+  , oldModel.analysisWorkspaceTrusted == newModel.analysisWorkspaceTrusted =
+      if analysisInputs oldModel == analysisInputs newModel then update else
+        update {transactionAction = batchActions "Invalidate dependency-sensitive analysis"
+          [update.transactionAction, action "Mark old semantic snapshots stale" (\current -> current
+            {analysisSnapshots = Map.map (\snapshot -> snapshot {Semantic.analysisFreshness = Semantic.StaleAnalysis}) current.analysisSnapshots,
+             documents = Map.map (\document -> document {documentQuery = Nothing, documentAssistance = Nothing}) current.documents,
+             functionCanvasRequest = Nothing, functionCanvasResult = Nothing})]}
   | otherwise =
       update
         { transactionAction =
@@ -1469,6 +1558,18 @@ analysisCommandsForTransition endpoint oldModel newModel
         : analysisCommandsForCurrentState endpoint newModel
   | not newModel.analysisWorkspaceTrusted = []
   | newModel.projectRoot == Nothing = []
+  | oldModel.analysisProfileChoice /= newModel.analysisProfileChoice =
+      [sendService endpoint (DiscoverAnalysisProject newModel.analysisWorkspaceGeneration (analysisWorkspaceId newModel) newModel.analysisProfileChoice)]
+        <> analysisCommandsForSelected endpoint newModel
+  | oldModel.analysisOperationIdentity /= newModel.analysisOperationIdentity =
+      [sendService endpoint (if newModel.analysisProjectOperation == Just False
+        then CancelAnalysisOperation newModel.analysisWorkspaceGeneration (analysisWorkspaceId newModel)
+        else ReloadAnalysisConfiguration newModel.analysisWorkspaceGeneration (Just (analysisWorkspaceId newModel)) (analysisSession newModel))]
+        <> [command | newModel.analysisProjectOperation /= Just False, command <- analysisCommandsForSelected endpoint newModel]
+  | oldModel.analysisComponentChoice /= newModel.analysisComponentChoice
+  , Just component <- newModel.analysisComponentChoice =
+      [sendService endpoint (PrepareAnalysisComponent newModel.analysisWorkspaceGeneration (analysisWorkspaceId newModel) component)]
+        <> analysisCommandsForSelectedComponent endpoint newModel component
   | otherwise =
       fmap (sendService endpoint . closeCommand) closedDocuments
         <> fmap (sendService endpoint . upsertCommand) changedDocuments
@@ -1491,11 +1592,13 @@ analysisCommandsForTransition endpoint oldModel newModel
           any ((== selected.documentKey) . (.documentKey)) changedDocuments
     selectionChanged = oldModel.selectedTab /= newModel.selectedTab
     analysisSchedulingCommands
-      | not selectedChanged && not selectionChanged = []
+      | null changedDocuments && null closedDocuments && not selectionChanged = []
       | Just selected <- selectedDocument newModel
       , isHaskellDocument selected
-      , selectedChanged || not (documentAnalysisIsCurrent newModel selected) =
-          [scheduleDocumentAnalysis endpoint selected.documentKey]
+      , not (null changedDocuments) || not (null closedDocuments) || selectedChanged || not (documentAnalysisIsCurrent newModel selected) =
+          maybe [] (\component -> [sendService endpoint (PrepareAnalysisComponent newModel.analysisWorkspaceGeneration (analysisWorkspaceId newModel) component)])
+            (if selectionChanged then Map.lookup selected.documentPath newModel.analysisFileContexts else Nothing)
+          <> [scheduleDocumentAnalysis endpoint selected.documentKey]
       | otherwise = [cancelTask analysisEditDebounceTaskKey]
     closeCommand document =
       CloseAnalysisDocument
@@ -1567,7 +1670,7 @@ analysisCommandsForDocument endpoint targetDocument model =
         session
         (analysisDocumentSnapshot document)
     analyzeCommand document =
-      RequestDocumentAnalysis
+      WithAnalysisInputs (analysisInputs model) $ RequestDocumentAnalysis
         model.analysisWorkspaceGeneration
         workspace
         session
@@ -1579,6 +1682,8 @@ documentAnalysisIsCurrent model document =
     Nothing -> False
     Just snapshot ->
       snapshot.analysisWorkspaceGeneration == model.analysisWorkspaceGeneration
+        && snapshot.analysisFreshness == Semantic.CurrentAnalysis
+        && Just snapshot.analysisSession == analysisSession model
         && snapshot.analysisRevision == semanticRevision document.documentRevision
         && snapshot.analysisContentHash == Semantic.contentHash document.documentContents
 
@@ -1588,7 +1693,8 @@ analysisCommandsForCurrentState
   -> [RuntimeCommand EditorModel]
 analysisCommandsForCurrentState endpoint model =
   case (model.analysisWorkspaceTrusted, model.projectRoot) of
-    (False, _) -> []
+    (False, Just root) -> [sendService endpoint (ConfigureAnalysisWorkspace model.analysisWorkspaceGeneration
+      (AnalysisProtocol.WorkspaceRequest (analysisWorkspaceId model) root AnalysisProtocol.UntrustedWorkspace))]
     (_, Nothing) -> []
     (True, Just root) ->
       sendService endpoint
@@ -1600,6 +1706,7 @@ analysisCommandsForCurrentState endpoint model =
               , AnalysisProtocol.workspaceRequestTrust = AnalysisProtocol.TrustedWorkspace
               }
         )
+        : sendService endpoint (DiscoverAnalysisProject model.analysisWorkspaceGeneration workspace model.analysisProfileChoice)
         : fmap (sendService endpoint . upsertCommand) documentsToAnalyze
           <> maybe [] (pure . sendService endpoint . analyzeCommand) selectedToAnalyze
       where
@@ -1616,11 +1723,28 @@ analysisCommandsForCurrentState endpoint model =
             session
             (analysisDocumentSnapshot document)
         analyzeCommand document =
-          RequestDocumentAnalysis
+          WithAnalysisInputs (analysisInputs model) $ RequestDocumentAnalysis
             model.analysisWorkspaceGeneration
             workspace
             session
             (analysisDocumentSnapshot document)
+
+analysisInputs :: EditorModel -> Semantic.ContentHash
+analysisInputs model = Semantic.analysisInputsHash (map analysisDocumentSnapshot (filter isHaskellDocument (Map.elems model.documents)))
+
+analysisCommandsForSelected :: ServiceEndpoint AnalysisCommand -> EditorModel -> [RuntimeCommand EditorModel]
+analysisCommandsForSelected endpoint model = maybe [] (\document -> analysisCommandsForDocument endpoint document.documentKey model) (selectedDocument model)
+
+analysisCommandsForSelectedComponent :: ServiceEndpoint AnalysisCommand -> EditorModel -> Semantic.ComponentId -> [RuntimeCommand EditorModel]
+analysisCommandsForSelectedComponent endpoint model identifier =
+  case (selectedDocument model, find ((== identifier) . (.projectComponentId)) model.analysisProjectCatalog.catalogComponents) of
+    (Just document, Just component) | componentOwnsPath component document.documentPath -> analysisCommandsForSelected endpoint model
+    _ -> []
+
+componentOwnsPath :: Semantic.ProjectComponent -> FilePath -> Bool
+componentOwnsPath component path = any contains component.projectComponentSourceRoots
+  where contains root = let relative = makeRelative (normalise root) (normalise path)
+                         in not (isAbsolute relative) && case splitDirectories relative of ".." : _ -> False; _ -> True
 
 analysisDocumentChanged :: Document -> Document -> Bool
 analysisDocumentChanged previous current =
@@ -1737,7 +1861,9 @@ applyAnalysisServiceEvent
   -> EditorModel
   -> Transaction EditorModel
 applyAnalysisServiceEvent endpoint serviceEvent model =
-  completeSemanticUpdate (Just endpoint) model $ case serviceEvent of
+  persistWorkspaceChanges model $ completeSemanticUpdate (Just endpoint) model $ appendRuntimeCommands followup initial
+  where
+   initial = case serviceEvent of
     AnalysisServiceChanged status ->
       let statusUpdate =
             analysisStatusTransaction
@@ -1749,6 +1875,18 @@ applyAnalysisServiceEvent endpoint serviceEvent model =
                 statusUpdate
             _ -> statusUpdate
     AnalysisClientChanged clientEvent -> applyAnalysisClientEvent clientEvent model
+   updated = applyTransaction initial model
+   followup = case serviceEvent of
+     AnalysisClientChanged (AnalysisClient.AnalysisWorkerMessage generation envelope)
+       | AnalysisProtocol.ProjectDiscovered catalog <- envelope.envelopePayload
+       , model.analysisWorkerGeneration == Just generation
+       , envelope.envelopeWorkspaceGeneration == model.analysisWorkspaceGeneration
+       , model.analysisWorkspaceTrusted
+       , catalog.catalogSelectedProfile /= Nothing ->
+           [sendService endpoint (PrepareAnalysisComponent updated.analysisWorkspaceGeneration (analysisWorkspaceId updated) component)
+             | Just component <- [updated.analysisComponentChoice], any ((== component) . (.projectComponentId)) catalog.catalogComponents]
+             <> analysisCommandsForSelected endpoint updated
+     _ -> []
 
 applyAnalysisClientEvent
   :: AnalysisClient.AnalysisClientEvent
@@ -1810,11 +1948,21 @@ applyAnalysisWorkerMessage
 applyAnalysisWorkerMessage generation envelope model
   | model.analysisWorkerGeneration /= Just generation = noTransaction
   | AnalysisProtocol.envelopeWorkspaceGeneration envelope /= model.analysisWorkspaceGeneration = noTransaction
+  | isSemanticResult envelope.envelopePayload
+  , envelope.envelopeInputHash /= Just (analysisInputs model) = noTransaction
   | otherwise =
       case AnalysisProtocol.envelopePayload envelope of
-        AnalysisProtocol.ProjectDiscovered _ -> noTransaction
-        AnalysisProtocol.ProjectProgress _ -> noTransaction
-        AnalysisProtocol.ProjectConfigurationChanged _ -> noTransaction
+        AnalysisProtocol.ProjectDiscovered catalog -> transactionWithEffects "Update project inventory" NoUndo [] $ \current -> current
+          { analysisProjectCatalog = catalog, analysisProfileChoice = catalog.catalogSelectedProfile
+          , analysisStatus = if null catalog.catalogWarnings then "Project ready · select a component or open a Haskell file" else Text.intercalate "; " catalog.catalogWarnings
+          }
+        AnalysisProtocol.ProjectProgress message -> transactionWithEffects "Update project operation" NoUndo [] $ \current -> current
+          {analysisStatus = Text.take 240 (Text.strip message), analysisProjectLog = Text.takeEnd 65536 (current.analysisProjectLog <> "\n" <> message)}
+        AnalysisProtocol.ProjectConfigurationChanged paths -> transactionWithEffects "Invalidate changed project configuration" NoUndo
+          [ReadDirectory directory | directory <- nub (map takeDirectory paths), Map.member directory model.projectEntries] $ \current -> current
+          {analysisComponent = Nothing, analysisSnapshots = Map.empty, analysisStatus = "Project changed; reloading " <> Text.intercalate ", " (map Text.pack paths)
+          , functionCanvasRequest = Nothing, functionCanvasResult = Nothing
+          , documents = Map.map (\document -> document {documentQuery = Nothing, documentAssistance = Nothing}) current.documents}
         AnalysisProtocol.WorkerHelloMessage _ -> noTransaction
         AnalysisProtocol.WorkspaceLoading _ -> analysisStatusTransaction "GHC: loading workspace"
         AnalysisProtocol.WorkspaceReady _ _ -> analysisStatusTransaction "GHC: workspace ready"
@@ -1829,6 +1977,11 @@ applyAnalysisWorkerMessage generation envelope model
             ( batchActions
                 "Select compiler component"
                 [ editorProperties.analysisComponent .= Just component
+                , editorProperties.analysisComponentChoice .= Just component.componentId
+                , action "Invalidate the previous component context" (\current ->
+                    if analysisSession model == Just component.componentSession then current else current
+                      {analysisSnapshots = Map.empty, functionCanvasRequest = Nothing, functionCanvasResult = Nothing,
+                       documents = Map.map (\document -> document {documentQuery = Nothing, documentAssistance = Nothing}) current.documents})
                 , editorProperties.analysisStatus
                     .= "GHC: " <> component.componentId.unComponentId
                 ]
@@ -1853,6 +2006,13 @@ applyAnalysisWorkerMessage generation envelope model
         AnalysisProtocol.WorkerHealthChanged (AnalysisProtocol.WorkerDegraded message) ->
           analysisStatusTransaction ("GHC degraded: " <> message)
 
+isSemanticResult :: AnalysisProtocol.WorkerMessage -> Bool
+isSemanticResult message = case message of
+  AnalysisProtocol.AnalysisCompleted _ -> True
+  AnalysisProtocol.PositionQueryCompleted _ -> True
+  AnalysisProtocol.CompositionChecked _ -> True
+  _ -> False
+
 beginPositionQuery :: ElementKey -> TextQueryRequest -> EditorModel -> Transaction EditorModel
 beginPositionQuery key request model =
   case find ((== key) . (.documentEditorKey)) (Map.elems model.documents) of
@@ -1876,7 +2036,7 @@ beginPositionQuery key request model =
 positionCommandsForTransition
   :: ServiceEndpoint AnalysisCommand -> EditorModel -> EditorModel -> [RuntimeCommand EditorModel]
 positionCommandsForTransition endpoint previous model =
-  [ sendService endpoint (RequestPositionQuery model.analysisWorkspaceGeneration (analysisWorkspaceId model)
+  [ sendService endpoint (WithAnalysisInputs (analysisInputs model) $ RequestPositionQuery model.analysisWorkspaceGeneration (analysisWorkspaceId model)
       component.componentSession (analysisDocumentSnapshot document) identity
       (AnalysisProtocol.PositionQuery (queryKindFor request.textQueryKind) request.textQueryOffset))
   | document <- Map.elems model.documents
@@ -1970,7 +2130,7 @@ completeSemanticUpdate endpoint previous initial =
                 , functionCanvasStatus = "GHC is checking the complete composition…"
                 , nextQueryIdentity = current.nextQueryIdentity + 1
                 }
-              command = sendService serviceEndpoint (RequestCompositionCheck updated.analysisWorkspaceGeneration
+              command = sendService serviceEndpoint (WithAnalysisInputs (analysisInputs updated) $ RequestCompositionCheck updated.analysisWorkspaceGeneration
                 (analysisWorkspaceId updated) component.componentSession documentSnapshot identity query)
            in appendRuntimeCommands [command] update
                 { transactionAction = batchActions "Check function composition"
@@ -2096,6 +2256,7 @@ analysisSummary snapshot =
     warningCount = length (filter ((== Semantic.DiagnosticWarning) . (.diagnosticSeverity)) diagnostics)
     declarationCount = length snapshot.analysisDeclarations
     diagnosticSummary
+      | snapshot.analysisCompleteness == Semantic.PartiallyFailed && errorCount == 0 = "dependency/configuration error (see Project)"
       | errorCount == 0 && warningCount == 0 = "clean"
       | otherwise =
           Text.pack (show errorCount)
@@ -2106,7 +2267,9 @@ analysisSummary snapshot =
 
 analysisFailureTransaction :: AnalysisProtocol.RequestFailure -> Transaction EditorModel
 analysisFailureTransaction failure =
-  analysisStatusTransaction (prefix <> AnalysisProtocol.requestFailureMessage failure)
+  transactionWithEffects "Report project/compiler failure" NoUndo [] $ \current -> current
+    {analysisStatus = prefix <> failure.requestFailureMessage,
+     analysisProjectLog = Text.takeEnd 65536 (current.analysisProjectLog <> "\n" <> failure.requestFailureCode <> ": " <> failure.requestFailureMessage)}
   where
     prefix
       | failure.requestFailureCode == "incompatible-compiler" =
@@ -2272,6 +2435,12 @@ handleEventWithoutPersistence event model =
           requestEffect "Choose project folder" RequestOpenProjectFolder
       | command == trustWorkspaceCommand ->
           trustAnalysisWorkspace model
+      | command == revokeTrustCommand ->
+          revokeAnalysisTrust model
+      | command == reloadProjectCommand || command == cancelProjectCommand ->
+          transactionWithEffects "Control project operation" NoUndo [] $ \current -> current
+            {analysisProjectOperation = Just (command == reloadProjectCommand), analysisOperationIdentity = current.analysisOperationIdentity + 1,
+              analysisComponent = Nothing, analysisSnapshots = Map.empty}
       | command == saveCommand ->
           saveActiveDocument model
     ProjectFolderChosen chosenPath -> openProjectFolder chosenPath model
@@ -2349,6 +2518,18 @@ handleEventWithoutPersistence event model =
             NoUndo
             (editorProperties.functionsInspectorDebug .= (value == ToggleOn))
     ChoiceChanged key selected
+      | key == projectProfileKey
+      , Just profile <- selected >>= (`lookup` profileChoices model) ->
+          transactionWithEffects "Select project configuration" NoUndo [] $ \current -> current
+            {analysisProfileChoice = Just profile.profileId, analysisComponentChoice = Nothing, analysisComponent = Nothing,
+              analysisProjectCatalog = current.analysisProjectCatalog {Semantic.catalogComponents = []}, analysisSnapshots = Map.empty}
+      | key == projectComponentKey
+      , Just component <- selected >>= (`lookup` componentChoices model) ->
+          transactionWithEffects "Select project component" NoUndo [] $ \current -> current
+            {analysisComponentChoice = Just component.projectComponentId, analysisComponent = Nothing, analysisSnapshots = Map.empty,
+              analysisFileContexts = maybe current.analysisFileContexts
+                (\document -> if componentOwnsPath component document.documentPath
+                  then Map.insert document.documentPath component.projectComponentId current.analysisFileContexts else current.analysisFileContexts) (selectedDocument current)}
       | key == typesInspectorScopeKey ->
           case selected of
             Just choice
@@ -2374,6 +2555,7 @@ handleEventWithoutPersistence event model =
                  , typesInspectorTabKey
                  , functionsInspectorTabKey
                  , outlineInspectorTabKey
+                 , projectInspectorTabKey
                  ] ->
           transactionFromAction
             "Select inspector tab"
@@ -2429,6 +2611,7 @@ markAnalysisPending document model update
               , action "Invalidate dependency-sensitive editor intelligence"
                   (\current -> current
                     { documents = Map.map (\open -> open {documentQuery = Nothing, documentAssistance = Nothing}) current.documents
+                    , analysisSnapshots = Map.map (\snapshot -> snapshot {Semantic.analysisFreshness = Semantic.StaleAnalysis}) current.analysisSnapshots
                     , functionCanvasRequest = Nothing
                     , functionCanvasResult = Nothing
                     })
@@ -2437,9 +2620,22 @@ markAnalysisPending document model update
         }
   | otherwise = update
 
+revokeAnalysisTrust :: EditorModel -> Transaction EditorModel
+revokeAnalysisTrust model = transactionWithEffects "Revoke compiler execution trust" NoUndo
+  [trustRegistryWriteEffect path registry | Just path <- [model.workspaceTrustRegistryPath]] $ \current -> current
+    {analysisWorkspaceTrusted = False, workspaceRequestedAnalysisTrust = False, workspaceTrustRegistry = registry}
+  where
+    registry = model.workspaceTrustRegistry {trustedWorkspaceRoots = maybe model.workspaceTrustRegistry.trustedWorkspaceRoots
+      (`Set.delete` model.workspaceTrustRegistry.trustedWorkspaceRoots) model.projectRoot}
+
 projectPropertyIds :: [PropertyId]
 projectPropertyIds =
   [ propertyId editorProperties.projectRoot
+  , propertyId editorProperties.analysisProjectCatalog
+  , propertyId editorProperties.analysisProfileChoice
+  , propertyId editorProperties.analysisComponentChoice
+  , propertyId editorProperties.analysisFileContexts
+  , propertyId editorProperties.analysisProjectLog
   , propertyId editorProperties.analysisWorkspaceTrusted
   , propertyId editorProperties.workspaceTrustRegistry
   , propertyId editorProperties.workspaceRequestedAnalysisTrust
@@ -2489,14 +2685,8 @@ beginOpenProjectFolder rootPath rememberWorkspace model =
            | rememberWorkspace
            , Just registryPath <- [model.workspaceRegistryPath]
            ]
-        <> [ trustRegistryWriteEffect trustRegistryPath trustedRegistry
-           | rememberWorkspace
-           , Just trustRegistryPath <- [model.workspaceTrustRegistryPath]
-           ]
     )
-    (projectAction "Set project root" projectPropertyIds (setProjectRoot rootPath rememberWorkspace))
-  where
-    trustedRegistry = trustRegistryInsert rootPath model.workspaceTrustRegistry
+    (projectAction "Set project root" projectPropertyIds (setProjectRoot rootPath False))
 
 setProjectRoot :: FilePath -> Bool -> EditorModel -> EditorModel
 setProjectRoot rootPath trusted model =
@@ -2506,6 +2696,11 @@ setProjectRoot rootPath trusted model =
     , selectedTab = Nothing
     , nextDocumentIdentity = 1000
     , projectRoot = Just rootPath
+    , analysisProjectCatalog = Semantic.emptyProjectCatalog
+    , analysisProfileChoice = Nothing
+    , analysisComponentChoice = Nothing
+    , analysisFileContexts = Map.empty
+    , analysisProjectLog = ""
     , analysisWorkspaceTrusted = trusted
     , workspaceTrustRegistry =
         if trusted
@@ -2787,6 +2982,9 @@ restoreWorkspaceState root state =
     ( actionWithProperties
         "Apply workspace metadata"
         [ propertyId editorProperties.projectExpandedFolders
+        , propertyId editorProperties.analysisProfileChoice
+        , propertyId editorProperties.analysisComponentChoice
+        , propertyId editorProperties.analysisFileContexts
         , propertyId editorProperties.projectSelectedEntry
         , propertyId editorProperties.navigatorState
         , propertyId editorProperties.inspectorState
@@ -2822,6 +3020,9 @@ restoreWorkspaceState root state =
        in
       current
         { projectExpandedFolders = expandedFolders
+        , analysisProfileChoice = state.workspaceProjectProfile
+        , analysisComponentChoice = state.workspaceProjectComponent
+        , analysisFileContexts = Map.fromList [(path, component) | (relative, component) <- state.workspaceFileContexts, Just path <- [fromWorkspaceRelativePath root relative]]
         , projectSelectedEntry = explorerSelection
         , navigatorState = state.workspaceNavigatorPane
         , inspectorState = state.workspaceInspectorPane
@@ -2952,6 +3153,9 @@ workspaceStateFromModel model = do
       , workspaceNavigatorPane = model.navigatorState
       , workspaceInspectorPane = model.inspectorState
       , workspaceAnalysisTrusted = model.analysisWorkspaceTrusted
+      , workspaceProjectProfile = model.analysisProfileChoice
+      , workspaceProjectComponent = model.analysisComponentChoice
+      , workspaceFileContexts = [(relative, component) | (path, component) <- Map.toList model.analysisFileContexts, Just relative <- [toWorkspaceRelativePath root path]]
       }
 
 selectProjectEntry :: CollectionItemKey -> EditorModel -> Transaction EditorModel

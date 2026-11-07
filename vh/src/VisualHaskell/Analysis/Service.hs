@@ -53,6 +53,10 @@ data AnalysisCommand
       !(Maybe WorkspaceId)
       !(Maybe SessionId)
   | RestartAnalysisWorker
+  | DiscoverAnalysisProject !WorkspaceGeneration !WorkspaceId !(Maybe Text)
+  | PrepareAnalysisComponent !WorkspaceGeneration !WorkspaceId !ComponentId
+  | CancelAnalysisOperation !WorkspaceGeneration !WorkspaceId
+  | WithAnalysisInputs !ContentHash !AnalysisCommand
   deriving stock (Eq, Show)
 
 data AnalysisConfiguration = AnalysisConfiguration
@@ -194,6 +198,10 @@ analysisCommandFields :: AnalysisCommand -> [(Text, Text)]
 analysisCommandFields command =
   ("kind", analysisCommandKey command) :
     case command of
+      WithAnalysisInputs _ inner -> analysisCommandFields inner
+      DiscoverAnalysisProject generation workspace _ -> generationFields generation <> [("workspace", workspace.unWorkspaceId)]
+      PrepareAnalysisComponent generation workspace component -> generationFields generation <> [("workspace", workspace.unWorkspaceId), ("component", component.unComponentId)]
+      CancelAnalysisOperation generation workspace -> generationFields generation <> [("workspace", workspace.unWorkspaceId)]
       ConfigureAnalysisWorkspace generation request ->
         generationFields generation
           <> [ ("workspace", request.workspaceRequestId.unWorkspaceId)
@@ -289,6 +297,13 @@ workerMessageKind message =
 commandEnvelope :: AnalysisCommand -> ProtocolEnvelope ClientMessage
 commandEnvelope command =
   case command of
+    WithAnalysisInputs hashValue inner -> (commandEnvelope inner) {envelopeInputHash = Just hashValue}
+    DiscoverAnalysisProject generation workspace choice ->
+      (protocolEnvelope generation (DiscoverProject choice)) {envelopeWorkspace = Just workspace}
+    PrepareAnalysisComponent generation workspace component ->
+      (protocolEnvelope generation (PrepareComponent component)) {envelopeWorkspace = Just workspace}
+    CancelAnalysisOperation generation workspace ->
+      (protocolEnvelope generation (CancelRequest (RequestId 0))) {envelopeWorkspace = Just workspace}
     ConfigureAnalysisWorkspace generation request ->
       (protocolEnvelope generation (OpenWorkspace request))
         { envelopeWorkspace = Just request.workspaceRequestId
@@ -340,6 +355,10 @@ documentEnvelope generation workspace session snapshot payload =
 analysisCommandKey :: AnalysisCommand -> Text
 analysisCommandKey command =
   case command of
+    WithAnalysisInputs _ inner -> analysisCommandKey inner
+    DiscoverAnalysisProject {} -> "discover-project"
+    PrepareAnalysisComponent {} -> "prepare-component"
+    CancelAnalysisOperation {} -> "cancel-project"
     ConfigureAnalysisWorkspace {} -> "workspace"
     SelectAnalysisComponent {} -> "component"
     UpsertAnalysisDocument _ _ _ snapshot -> documentKey "snapshot" snapshot.snapshotDocumentId

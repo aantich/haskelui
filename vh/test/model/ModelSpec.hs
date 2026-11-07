@@ -67,6 +67,9 @@ main = do
           , workspaceNavigatorPane = PaneState PaneVisible (Just 246)
           , workspaceInspectorPane = PaneState PaneCollapsed (Just 300)
           , workspaceAnalysisTrusted = True
+          , workspaceProjectProfile = Just "stack:stack.yaml"
+          , workspaceProjectComponent = Just (Semantic.ComponentId "stack:stack.yaml:fixture:lib")
+          , workspaceFileContexts = [("src/Main.hs", Semantic.ComponentId "stack:stack.yaml:fixture:exe:app")]
           }
   assertEqual
     "workspace JSON round-trips its versioned portable state"
@@ -91,6 +94,10 @@ main = do
     "workspace paths outside the root are not persisted"
     Nothing
     (toWorkspaceRelativePath "/tmp/project" "/tmp/elsewhere/Main.hs")
+  assert "per-file context paths cannot escape the workspace" $
+    case decodeWorkspaceState "{\"format\":\"visual-haskell-workspace\",\"version\":3,\"fileContexts\":[[\"../secret.hs\",\"component\"]]}" of
+      Left _ -> True
+      Right _ -> False
 
   let highlighted = highlightHaskell "😀 module Main where\nvalue = \"hi\" -- note\n"
   assert
@@ -191,12 +198,13 @@ main = do
     )
   assertEqual
     "the inspector exposes document, problems, types, and functions tabs"
-    ["Outline", "Document", "Problems (0)", "Types", "Functions"]
+    ["Outline", "Document", "Problems (0)", "Types", "Functions", "Project"]
     (inspectorTabTitles initialView.appWindows)
   assert
     "every inspector tab has one shared portable layout root"
     ( case inspectorTabControlForests initialView.appWindows of
         [ [LayoutContainer {}]
+          , [LayoutContainer {}]
           , [LayoutContainer {}]
           , [LayoutContainer {}]
           , [LayoutContainer {}]
@@ -549,7 +557,7 @@ main = do
     "the completed recovery is canonicalized back to .vihs"
     "/tmp/restored/.vihs"
     restoreReadme.transactionEffects
-    (== workspaceState)
+    (== workspaceState {workspaceAnalysisTrusted = False})
 
   let malformedWorkspace =
         application.appHandleEvent
@@ -799,6 +807,15 @@ main = do
     "the completed debounce sends the latest snapshot and one analysis request"
     2
     (length debouncedRequest.transactionCommands)
+  let withDependency = applyTransaction
+        (compilerApplication.appHandleEvent (TextFileRead "/tmp/compiler-project/Dependency.hs" (Right "module Dependency where\nvalue = 1\n")) compilerOpened) compilerOpened
+      activeMain = applyTransaction (compilerApplication.appHandleEvent (TabSelected firstDocumentTabKey) withDependency) withDependency
+      backgroundEdit = compilerApplication.appHandleEvent
+        (TextChanged (ElementKey 1001001) "module Dependency where\nvalue = \"changed\"\n") activeMain
+  assertEqual
+    "editing an open dependency schedules reanalysis of the unchanged active document"
+    [TaskKey "visual-haskell.analysis.edit-debounce"]
+    (taskKeys backgroundEdit.transactionCommands)
 
   putStrLn "vh: pure workspace/tab/document model test passed"
   where

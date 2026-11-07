@@ -50,6 +50,7 @@ main =
           -- finish before the user trusts/opens a workspace.
           threadDelay 500000
           dispatch (ProjectFolderChosen workspaceRoot)
+          dispatch (CommandInvoked (CommandId 13))
           dispatch (TextFileRead sourcePath (Right sourceText))
           analyzed <- waitForCompilerAnalysis latestView 150
           if analyzed

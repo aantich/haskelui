@@ -73,6 +73,7 @@ main =
     runApp
       ( scriptedBackend firstView $ \dispatch -> do
           dispatch (ProjectFolderChosen workspaceRoot)
+          dispatch (CommandInvoked (CommandId 13))
           dispatch (TextFileChosen mainPath)
           dispatch (TextFileChosen readmePath)
           dispatch (TabSelected firstDocumentTabKey)
