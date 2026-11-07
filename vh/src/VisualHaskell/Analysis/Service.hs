@@ -48,6 +48,7 @@ data AnalysisCommand
       !DocumentSnapshot
   | RequestPositionQuery !WorkspaceGeneration !WorkspaceId !SessionId !DocumentSnapshot !RequestId !PositionQuery
   | RequestCompositionCheck !WorkspaceGeneration !WorkspaceId !SessionId !DocumentSnapshot !RequestId !CompositionQuery
+  | RequestSymbolSearch !WorkspaceGeneration !WorkspaceId !SessionId !DocumentSnapshot !RequestId !SymbolQuery
   | ReloadAnalysisConfiguration
       !WorkspaceGeneration
       !(Maybe WorkspaceId)
@@ -105,6 +106,7 @@ defaultAnalysisConfiguration executable =
         , StructuredTypesCapability
         , PositionQueriesCapability
         , CompositionChecksCapability
+        , SymbolSearchCapability
         ]
     , analysisTraceSink = noTrace
     }
@@ -230,6 +232,8 @@ analysisCommandFields command =
         generationFields generation <> documentFields workspace snapshot
       RequestCompositionCheck generation workspace _ snapshot _ _ ->
         generationFields generation <> documentFields workspace snapshot
+      RequestSymbolSearch generation workspace _ snapshot _ _ ->
+        generationFields generation <> documentFields workspace snapshot
       ReloadAnalysisConfiguration generation workspace _ ->
         generationFields generation
           <> [("workspace", maybe "<none>" (.unWorkspaceId) workspace)]
@@ -300,6 +304,7 @@ workerMessageKind message =
     AnalysisCompleted {} -> "analysis-completed"
     PositionQueryCompleted {} -> "position-query-completed"
     CompositionChecked {} -> "composition-checked"
+    SymbolsFound {} -> "symbols-found"
     WorkerRequestFailed {} -> "request-failed"
     WorkerHealthChanged {} -> "health-changed"
 
@@ -345,6 +350,9 @@ commandEnvelope command =
     RequestCompositionCheck generation workspace session snapshot request query ->
       (documentEnvelope generation workspace (Just session) snapshot (CheckComposition query))
         { envelopeRequestId = Just request }
+    RequestSymbolSearch generation workspace session snapshot request query ->
+      (documentEnvelope generation workspace (Just session) snapshot (QuerySymbols query))
+        { envelopeRequestId = Just request }
     ReloadAnalysisConfiguration generation workspace session ->
       (protocolEnvelope generation ReloadConfiguration)
         { envelopeWorkspace = workspace
@@ -387,6 +395,7 @@ analysisCommandKey command =
     RequestDocumentAnalysis _ _ _ snapshot -> documentKey "analysis" snapshot.snapshotDocumentId
     RequestPositionQuery _ _ _ snapshot _ query -> documentKey ("query:" <> Text.pack (show query.queryKind)) snapshot.snapshotDocumentId
     RequestCompositionCheck _ _ _ snapshot _ _ -> documentKey "composition" snapshot.snapshotDocumentId
+    RequestSymbolSearch _ _ _ snapshot _ _ -> documentKey "symbols" snapshot.snapshotDocumentId
     ReloadAnalysisConfiguration {} -> "configuration"
     RestartAnalysisWorker -> "restart"
   where

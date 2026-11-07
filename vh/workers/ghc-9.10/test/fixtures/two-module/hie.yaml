@@ -4,3 +4,4 @@ cradle:
       - -i.
       - A.hs
       - B.hs
+      - C.hs

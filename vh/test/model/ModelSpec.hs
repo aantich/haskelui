@@ -34,9 +34,11 @@ import VisualHaskell.WorkspaceState
   )
 import qualified Data.Text as Text
 import HaskeLUI.Core
+import SymbolIndexSpec (runSymbolIndexChecks)
 
 main :: IO ()
 main = do
+  runSymbolIndexChecks
   let firstFunction = Semantic.DeclarationId "function:first"
       secondFunction = Semantic.DeclarationId "function:second"
       canvas = FunctionCanvas.connectFunctions 1 2

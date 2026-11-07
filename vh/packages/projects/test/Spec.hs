@@ -6,6 +6,7 @@ import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (async, cancel, waitCatch)
 import Control.Exception (try, IOException, bracket)
 import Data.IORef
+import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import System.Directory
 import System.FilePath
@@ -13,11 +14,36 @@ import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.IO.Temp
 import System.Posix.Signals (nullSignal, signalProcess)
 import VisualHaskell.Projects
+import VisualHaskell.Projects.SourcePaths (restoreSourcePaths)
+import VisualHaskell.Analysis.Protocol
 import VisualHaskell.Semantic
 import ToolchainSpec (runToolchainChecks)
 
 main :: IO ()
 main = withSystemTempDirectory "vh-project-contracts" $ \root -> do
+  let source = "module B where\ng = id\n"
+      canonical = root </> "real/B.hs"
+      original = root </> "symlink/B.hs"
+      document = DocumentSnapshot (DocumentId "B") canonical (TextRevision 3) (contentHash source) source LF
+      range = RevisionedSourceRange (TextRevision 3) (SourcePosition 1 0 UnicodeScalarColumn) (SourcePosition 1 1 UnicodeScalarColumn)
+      symbol = IndexedSymbol (Declaration (DeclarationId "B.g") "g" ValueDeclaration (Just range) (Just range) Nothing (Just "a -> a") Nothing)
+        Map.empty (ModuleName "B") "main" "workspace" "" (Just canonical) (Just document.snapshotContentHash)
+      query = SymbolQuery "g" FunctionSymbols 0 50 [symbol.indexedDeclaration.declarationId]
+      result = SymbolSearchResult query [symbol] [symbol] 1 1 0 0 [] True (ContentHash 7)
+      restore = restoreSourcePaths (Map.singleton document.snapshotDocumentId document) (Map.singleton document.snapshotDocumentId original)
+  check "indexed page and pinned sources use the original editor path without changing hashes" $
+    case restore (SymbolsFound result) of
+      SymbolsFound restored -> all (\s -> s.indexedSourcePath == Just original && s.indexedSourceHash == Just document.snapshotContentHash)
+        (restored.symbolSearchSymbols <> restored.symbolSearchPinned)
+      _ -> False
+  let target = DefinitionTarget canonical range document.snapshotContentHash
+      position = PositionResult (PositionQuery DefinitionQuery 0) Nothing [target] [] 0 0
+  check "position definitions share the same original-path restoration" $
+    case restore (PositionQueryCompleted position) of
+      PositionQueryCompleted restored -> map (.definitionPath) restored.resultDefinitions == [original]
+      _ -> False
+  check "closed source paths are not rewritten" $
+    restoreSourcePaths Map.empty Map.empty (SymbolsFound result) == SymbolsFound result
   createDirectory (root </> ".git")
   writeFile (root </> "stack.yaml") "resolver: lts-24.50\npackages: [.]\n"
   writeFile (root </> "cabal.project") "packages: .\n"

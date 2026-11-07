@@ -1,4 +1,5 @@
 {-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -170,7 +171,7 @@ data Declaration range = Declaration
   , declarationSignatureText :: !(Maybe Text)
   , declarationTypeSemantics :: !(Maybe (TypeDeclarationSemantics range))
   }
-  deriving stock (Eq, Show)
+  deriving stock (Eq, Show, Functor)
 
 -- | Compiler-neutral semantics for a declared type parameter. Kinds are
 -- references into the enclosing snapshot's 'TypeTable', just like every other
@@ -187,7 +188,7 @@ data TypeFieldSemantics range = TypeFieldSemantics
   , typeFieldSemanticType :: !TypeId
   , typeFieldSemanticRange :: !(Maybe range)
   }
-  deriving stock (Eq, Show)
+  deriving stock (Eq, Show, Functor)
 
 -- | Constructor structure retains both positional arguments and record fields.
 -- GADT-specific existential variables, constraints, and result type remain
@@ -202,7 +203,7 @@ data TypeConstructorSemantics range = TypeConstructorSemantics
   , typeConstructorSemanticResult :: !(Maybe TypeId)
   , typeConstructorSemanticRange :: !(Maybe range)
   }
-  deriving stock (Eq, Show)
+  deriving stock (Eq, Show, Functor)
 
 data TypeMethodSemantics range = TypeMethodSemantics
   { typeMethodSemanticDeclaration :: !DeclarationId
@@ -211,7 +212,7 @@ data TypeMethodSemantics range = TypeMethodSemantics
   , typeMethodSemanticSignatureText :: !(Maybe Text)
   , typeMethodSemanticRange :: !(Maybe range)
   }
-  deriving stock (Eq, Show)
+  deriving stock (Eq, Show, Functor)
 
 data TypeDeclarationDefinition range
   = AlgebraicTypeSemantics ![TypeConstructorSemantics range]
@@ -220,7 +221,7 @@ data TypeDeclarationDefinition range
   | TypeClassSemantics ![TypeId] ![TypeMethodSemantics range]
   | TypeFamilySemantics
   | AbstractTypeSemantics !Text
-  deriving stock (Eq, Show)
+  deriving stock (Eq, Show, Functor)
 
 -- | Rich semantics attached only to type/class declarations. The constructor
 -- identity is distinct from 'declarationType': for @data Box a@ the former is
@@ -231,7 +232,7 @@ data TypeDeclarationSemantics range = TypeDeclarationSemantics
   , typeDeclarationSemanticParameters :: ![TypeParameterSemantics]
   , typeDeclarationSemanticDefinition :: !(TypeDeclarationDefinition range)
   }
-  deriving stock (Eq, Show)
+  deriving stock (Eq, Show, Functor)
 
 data StructuredType
   = TypeVariable !Text

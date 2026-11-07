@@ -43,7 +43,7 @@ data ProtocolVersion = ProtocolVersion
   deriving stock (Eq, Ord, Show)
 
 protocolV2 :: ProtocolVersion
-protocolV2 = ProtocolVersion 2 1
+protocolV2 = ProtocolVersion 2 3
 
 newtype RequestId = RequestId {unRequestId :: Word64}
   deriving stock (Eq, Ord, Show)
@@ -91,6 +91,7 @@ data AnalysisCapability
   | CancellationCapability
   | PositionQueriesCapability
   | CompositionChecksCapability
+  | SymbolSearchCapability
   | UnsupportedCapability !Text
   deriving stock (Eq, Ord, Show)
 
@@ -131,6 +132,7 @@ data ClientMessage
   | AnalyzeDocument !DocumentId
   | QueryPosition !PositionQuery
   | CheckComposition !CompositionQuery
+  | QuerySymbols !SymbolQuery
   | CancelRequest !RequestId
   | ReloadConfiguration
   | DiscoverProject !(Maybe Text)
@@ -165,6 +167,7 @@ data WorkerMessage
   | AnalysisCompleted !(AnalysisSnapshot RevisionedSourceRange)
   | PositionQueryCompleted !PositionResult
   | CompositionChecked !CompositionResult
+  | SymbolsFound !SymbolSearchResult
   | WorkerRequestFailed !(Maybe RequestId) !RequestFailure
   | WorkerHealthChanged !WorkerHealth
   | ProjectDiscovered !ProjectCatalog
@@ -280,6 +283,7 @@ instance ToJSON ClientMessage where
     AnalyzeDocument document -> tagged "analyze-document" ["document" .= document]
     QueryPosition query -> tagged "query-position" ["query" .= query]
     CheckComposition query -> tagged "check-composition" ["query" .= query]
+    QuerySymbols query -> tagged "query-symbols" ["query" .= query]
     CancelRequest request -> tagged "cancel-request" ["request" .= request]
     ReloadConfiguration -> tagged "reload-configuration" []
     DiscoverProject profile -> tagged "discover-project" ["profile" .= profile]
@@ -305,6 +309,7 @@ instance FromJSON ClientMessage where
       "analyze-document" -> AnalyzeDocument <$> value .: "document"
       "query-position" -> QueryPosition <$> value .: "query"
       "check-composition" -> CheckComposition <$> value .: "query"
+      "query-symbols" -> QuerySymbols <$> value .: "query"
       "cancel-request" -> CancelRequest <$> value .: "request"
       "reload-configuration" -> pure ReloadConfiguration
       "discover-project" -> DiscoverProject <$> value .:? "profile"
@@ -352,6 +357,7 @@ instance ToJSON WorkerMessage where
     AnalysisCompleted snapshot -> tagged "analysis-completed" ["snapshot" .= snapshot]
     PositionQueryCompleted result -> tagged "position-query-completed" ["result" .= result]
     CompositionChecked result -> tagged "composition-checked" ["result" .= result]
+    SymbolsFound result -> tagged "symbols-found" ["result" .= result]
     WorkerRequestFailed request failure -> tagged "request-failed" ["request" .= request, "failure" .= failure]
     WorkerHealthChanged health -> tagged "worker-health" ["health" .= health]
     ProjectDiscovered catalog -> tagged "project-discovered" ["catalog" .= catalog]
@@ -373,6 +379,7 @@ instance FromJSON WorkerMessage where
       "analysis-completed" -> AnalysisCompleted <$> value .: "snapshot"
       "position-query-completed" -> PositionQueryCompleted <$> value .: "result"
       "composition-checked" -> CompositionChecked <$> value .: "result"
+      "symbols-found" -> SymbolsFound <$> value .: "result"
       "request-failed" -> WorkerRequestFailed <$> value .:? "request" <*> value .: "failure"
       "worker-health" -> WorkerHealthChanged <$> value .: "health"
       "project-discovered" -> ProjectDiscovered <$> value .: "catalog"
@@ -395,11 +402,12 @@ capabilityText capability = case capability of
   CancellationCapability -> "cancellation"
   PositionQueriesCapability -> "position-queries"
   CompositionChecksCapability -> "composition-checks"
+  SymbolSearchCapability -> "symbol-search"
   UnsupportedCapability name -> name
 
 allCapabilities :: [AnalysisCapability]
 allCapabilities =
   [ WorkspaceLoadingCapability, ComponentDiscoveryCapability, ToolchainManagementCapability, FullDocumentSnapshotsCapability, DiagnosticsCapability
   , DocumentDeclarationsCapability, StructuredTypesCapability, SemanticSpansCapability
-  , DefinitionLocationsCapability, CancellationCapability, PositionQueriesCapability, CompositionChecksCapability
+  , DefinitionLocationsCapability, CancellationCapability, PositionQueriesCapability, CompositionChecksCapability, SymbolSearchCapability
   ]

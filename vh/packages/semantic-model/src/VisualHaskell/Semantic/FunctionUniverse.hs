@@ -1,10 +1,12 @@
 {-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module VisualHaskell.Semantic.FunctionUniverse
   ( FunctionNode (..)
   , buildFunctionUniverse
+  , buildFunctionNodes
   , renderFunctionUniverseDebug
   ) where
 
@@ -25,20 +27,22 @@ data FunctionNode range = FunctionNode
   , functionInput :: !Text
   , functionOutput :: !Text
   }
-  deriving stock (Eq, Show)
+  deriving stock (Eq, Show, Functor)
 
 buildFunctionUniverse :: AnalysisSnapshot range -> [FunctionNode range]
-buildFunctionUniverse snapshot = sortOn (.functionName)
+buildFunctionUniverse snapshot = buildFunctionNodes snapshot.analysisTypes snapshot.analysisDeclarations
+
+buildFunctionNodes :: TypeTable -> [Declaration range] -> [FunctionNode range]
+buildFunctionNodes table declarations = sortOn (.functionName)
   [ FunctionNode declaration.declarationId declaration.declarationName
       declaration.declarationSelectionRange (maybe "" id declaration.declarationSignatureText)
       (render Set.empty input) (render Set.empty output)
-  | declaration <- snapshot.analysisDeclarations
+  | declaration <- declarations
   , declaration.declarationKind == ValueDeclaration
   , Just identifier <- [declaration.declarationType]
   , Just (input, output) <- [ports Set.empty identifier]
   ]
   where
-    table = snapshot.analysisTypes
     ports seen identifier
       | Set.member identifier seen = Nothing
       | otherwise = case Map.lookup identifier table of

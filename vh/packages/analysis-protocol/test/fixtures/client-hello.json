@@ -1,5 +1,5 @@
 {
-  "protocol": { "major": 2, "minor": 1 },
+  "protocol": { "major": 2, "minor": 3 },
   "requestId": null,
   "workspace": null,
   "workspaceGeneration": 0,

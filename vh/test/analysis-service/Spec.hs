@@ -10,7 +10,7 @@ import Control.Concurrent.STM
   , readTQueue
   , writeTQueue
   )
-import Control.Exception (bracket)
+import Control.Exception (bracket, try, IOException, throwIO)
 import Control.Monad (void, unless)
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import qualified Data.Text as Text
@@ -45,7 +45,7 @@ import VisualHaskell.TextMate (defaultTextMateConfiguration)
 
 main :: IO ()
 main =
-  bracket createFixture removePathForcibly $ \fixture -> do
+  bracket createFixture cleanupFixture $ \fixture -> do
     configuration <- defaultTextMateConfiguration (fixture </> "home")
     cabal <- findExecutable "cabal" >>= maybe (fail "cabal is required by the adapter rebuild regression") pure
     worker <- findExecutable "visual-haskell-analysis-ghc910" >>= maybe (fail "analysis adapter is missing") pure
@@ -155,6 +155,38 @@ main =
                 [surface | window <- invalidView.appWindows, DrawingSurface surface <- windowLeafControls window,
                  surface.drawingSurfaceKey == functionCanvasKey])
                 (error "A rejected composition did not render a red wire")
+              -- Unopened local module + unimported dependency, with filters
+              -- changing between additions. Cards must outlive palette pages.
+              dispatch (CommandInvoked clearFunctionsCommand)
+              dispatch (TabSelected (TabKey 9000004))
+              dispatch (ChoiceChanged (ElementKey 290) (Just (ChoiceKey 1)))
+              dispatch (TextChanged (ElementKey 291) "Other.unopened")
+              localIndexed <- waitForPalette latestView 200 "Other.unopened"
+              unless localIndexed $ do
+                failed <- readIORef latestView
+                error ("Workspace palette did not index the unopened local module: " <> show
+                  [attributedTextValue rich.richTextValue | window <- failed.appWindows, RichText rich <- windowLeafControls window,
+                   rich.richTextKey == ElementKey 234] <> "; labels=" <> show (labelTexts failed))
+              add "Other.unopened"
+              dispatch (TextChanged (ElementKey 291) "Data.List.reverse")
+              dependencyIndexed <- waitForPalette latestView 200 "Data.List.reverse"
+              unless dependencyIndexed $ do
+                failed <- readIORef latestView
+                error ("Workspace palette did not index the library export: " <> show
+                  [attributedTextValue rich.richTextValue | window <- failed.appWindows, RichText rich <- windowLeafControls window,
+                   rich.richTextKey == ElementKey 234] <> "; items=" <> show
+                  [item.collectionItemLabel | window <- failed.appWindows, ListView list <- windowLeafControls window,
+                   list.collectionControlKey == functionsListKey, item <- list.collectionControlItems])
+              add "Data.List.reverse"
+              connect
+              externalValid <- waitForComposition latestView 100 "Composes ::"
+              unless externalValid (error "Imported function cards did not receive GHC composition feedback")
+              dispatch (ChoiceChanged (ElementKey 292) (Just (ChoiceKey 1)))
+              dispatch (TextChanged (ElementKey 291) "Other.Box")
+              typeIndexed <- waitForPalette latestView 100 "Other.Box"
+              unless typeIndexed (error "Type browsing did not show unopened declared types")
+              dispatch (ChoiceChanged (ElementKey 290) (Just (ChoiceKey 0)))
+              dispatch (TextChanged (ElementKey 291) "")
               -- Rebuilding stops the current compiler. Failure must not leave
               -- its outline, typed palette, assistance or composition visible.
               dispatch (CommandInvoked (CommandId 21))
@@ -183,6 +215,8 @@ main =
               unless rebuilt (error "Successful adapter rebuild did not publish its result")
               resumed <- waitForCompilerAnalysis latestView 250
               unless resumed (error "Successful adapter rebuild did not restore unsaved-buffer analysis")
+              recomposed <- waitForComposition latestView 200 "Composes ::"
+              unless recomposed (error "Compiler restart did not refresh pinned library cards and recheck their composition")
               -- A query and an immediate edit deliberately race. Old responses
               -- must never decorate the newly edited revision.
               dispatch (request 104 TextHoverQuery)
@@ -334,6 +368,19 @@ scriptedBackend latestView script =
         , backendShutdown = pure ()
         }
 
+-- Service shutdown signals the supervised process group without blocking the
+-- UI thread. Allow its bounded cleanup to finish before removing cache files
+-- that an in-flight index request may still be atomically publishing.
+cleanupFixture :: FilePath -> IO ()
+cleanupFixture path = cleanup (100 :: Int)
+  where
+    cleanup remaining = do
+      removed <- try (removePathForcibly path)
+      case removed of
+        Right () -> pure ()
+        Left exception | remaining > 0 -> threadDelay 20000 >> cleanup (remaining - 1)
+                       | otherwise -> throwIO (exception :: IOException)
+
 createFixture :: IO FilePath
 createFixture = do
   temporary <- getTemporaryDirectory
@@ -345,9 +392,18 @@ createFixture = do
   createDirectory (fixture </> "workspace")
   createDirectory (fixture </> "workspace" </> "src")
   writeFile (fixture </> "workspace" </> "src" </> "Fixture.hs") sourceText
+  writeFile (fixture </> "workspace" </> "src" </> "Other.hs")
+    "module Other (unopened, Box (..)) where\nunopened :: Int -> String\nunopened = show\ndata Box a = Box a\n"
   writeFile
     (fixture </> "workspace" </> "hie.yaml")
-    "cradle:\n  direct:\n    arguments:\n      - -isrc\n      - src/Fixture.hs\n"
+    "cradle:\n  direct:\n    arguments:\n      - -isrc\n      - src/Fixture.hs\n      - src/Other.hs\n"
   pure fixture
   where
     sourceText = "module Fixture where\nvalue :: Int\nvalue = 42\n"
+waitForPalette :: IORef AppView -> Int -> Text.Text -> IO Bool
+waitForPalette _ 0 _ = pure False
+waitForPalette latest attempts name = do
+  view <- readIORef latest
+  if any ((== name) . (.collectionItemLabel)) [item | window <- view.appWindows, ListView list <- windowLeafControls window,
+      list.collectionControlKey == functionsListKey, item <- list.collectionControlItems]
+    then pure True else threadDelay 100000 >> waitForPalette latest (attempts - 1) name

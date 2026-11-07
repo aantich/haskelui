@@ -90,6 +90,7 @@ runSessionMain = do
                 , StructuredTypesCapability
                 , PositionQueriesCapability
                 , CompositionChecksCapability
+                , SymbolSearchCapability
                 ]
             , workerMaximumFrameBytes = maximumFrameBytes defaultFrameLimits
             }
@@ -186,6 +187,22 @@ loop options state = do
                     Right (Left failure) -> sendFailure envelope failure.failureCode failure.failureMessage failure.failureRecoverable
                     Right (Right result) -> send envelope (CompositionChecked result)
             _ -> sendFailure envelope "stale-composition" "The composed document or session changed" True
+          loop options state
+        QuerySymbols query -> do
+          case (envelope.envelopeDocument, state.workerAnalysisEngine) of
+            (Just document, Just engine)
+              | envelope.envelopeWorkspace == state.workerWorkspace
+              , Just snapshot <- Map.lookup document state.workerDocuments
+              , envelope.envelopeRevision == Just snapshot.snapshotRevision
+              , envelope.envelopeContentHash == Just snapshot.snapshotContentHash
+              , Just component <- state.workerComponent
+              , envelope.envelopeSession == Just component.componentSession -> do
+                  attempted <- try (searchSymbolsWithEngine engine state.workerDocuments document query)
+                  case attempted of
+                    Left (exception :: SomeException) -> sendFailure envelope "index-exception" (Text.pack (displayException exception)) True
+                    Right (Left failure) -> sendFailure envelope failure.failureCode failure.failureMessage failure.failureRecoverable
+                    Right (Right result) -> send envelope (SymbolsFound result)
+            _ -> sendFailure envelope "stale-index" "The indexed document or session changed" True
           loop options state
         CancelRequest _ -> do
           sendFailure envelope "cancellation-unsupported" "This feasibility worker completes one request at a time" True
@@ -423,6 +440,7 @@ clientMessageFields message =
     AnalyzeDocument document -> [("kind", "analyze-document"), ("document", document.unDocumentId)]
     QueryPosition query -> [("kind", "query-position"), ("query", Text.pack (show query))]
     CheckComposition query -> [("kind", "check-composition"), ("query", Text.pack (show query))]
+    QuerySymbols query -> [("kind", "query-symbols"), ("query", Text.pack (show query))]
     CancelRequest request -> [("kind", "cancel-request"), ("request", Text.pack (show request))]
     ReloadConfiguration -> [("kind", "reload-configuration")]
     ShutdownWorker -> [("kind", "shutdown-worker")]

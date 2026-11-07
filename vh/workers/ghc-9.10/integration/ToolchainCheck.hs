@@ -33,15 +33,18 @@ toolchainChecks = do
     createDirectory (root </> ".git")
     writeFile (root </> "multi-ghc-fixture.cabal") $ unlines
       ["cabal-version: 3.0", "name: multi-ghc-fixture", "version: 0.1.0.0", "build-type: Simple",
-       "library", "  exposed-modules: Fixture", "  hs-source-dirs: src", "  build-depends: base >= 4.18 && < 4.21",
+       "library", "  exposed-modules: Fixture, Other", "  hs-source-dirs: src", "  build-depends: base >= 4.18 && < 4.21",
        "  default-language: Haskell2010"]
     createDirectory (root </> "src")
+    createDirectoryLink (root </> "src") (root </> "open sources")
     let source = "{-# LANGUAGE TemplateHaskell #-}\nmodule Fixture where\nvalue :: Int\nvalue = $( [| 41 |] )\nfirst :: Int -> String\nfirst = show\nsecond :: String -> Int\nsecond = length\n"
         broken = T.replace "value :: Int" "value :: String" source
         corrected = T.replace "value = $( [| 41 |] )" "value = $( [| \"unsaved\" |] )" broken
-        document text = DocumentSnapshot (DocumentId "fixture") (root </> "src/Fixture.hs")
+        document text = DocumentSnapshot (DocumentId "fixture") (root </> "open sources/Fixture.hs")
           (TextRevision (unContentHash (contentHash text))) (contentHash text) text LF
     T.writeFile (root </> "src/Fixture.hs") source
+    T.writeFile (root </> "src/Other.hs")
+      "module Other (unopened) where\nunopened :: Int -> String\nunopened = show\n"
     forM_ compilers $ \compiler -> do
       let suffix = T.unpack compiler.compilerVersion
       writeFile (root </> "cabal.project." <> suffix) $ unlines
@@ -118,11 +121,39 @@ toolchainChecks = do
                envelopeInputHash = Just (analysisInputsHash [current])})
             result <- await events $ \message -> case message of CompositionChecked value -> Just value; _ -> Nothing
             check "visual composition uses the selected compiler's typechecker" result.compositionValid
+            let search text = do
+                  let query = SymbolQuery text FunctionSymbols 0 50 []
+                  sendAnalysisMessage client ((base (QuerySymbols query))
+                    {envelopeDocument = Just current.snapshotDocumentId, envelopeRevision = Just current.snapshotRevision,
+                     envelopeContentHash = Just current.snapshotContentHash, envelopeSession = Just fixed.analysisSession,
+                     envelopeInputHash = Just (analysisInputsHash [current])})
+                  await events $ \message -> case message of SymbolsFound value -> Just value; _ -> Nothing
+            own <- search "Fixture.first"
+            check "indexed sources restore symlinked open-buffer paths and unsaved hashes"
+              (any (\symbol -> symbol.indexedModule == ModuleName "Fixture"
+                && symbol.indexedDeclaration.declarationName == "first"
+                && symbol.indexedSourcePath == Just current.snapshotPath
+                && symbol.indexedSourceHash == Just current.snapshotContentHash
+                && symbol.indexedDeclaration.declarationSelectionRange /= Nothing) own.symbolSearchSymbols)
+            local <- search "Other.unopened"
+            library <- search "Data.List.reverse"
+            case (local.symbolSearchSymbols, library.symbolSearchSymbols) of
+              (unopened : _, reverseFunction : _) -> do
+                check "selected compiler indexes unopened local and library modules"
+                  (local.symbolSearchLocalModules >= 2 && library.symbolSearchLibraryModules > 0)
+                sendAnalysisMessage client ((base (CheckComposition (CompositionQuery
+                  [unopened.indexedDeclaration.declarationId, reverseFunction.indexedDeclaration.declarationId, second.declarationId])))
+                  {envelopeDocument = Just current.snapshotDocumentId, envelopeRevision = Just current.snapshotRevision,
+                   envelopeContentHash = Just current.snapshotContentHash, envelopeSession = Just fixed.analysisSession,
+                   envelopeInputHash = Just (analysisInputsHash [current])})
+                imported <- await events $ \message -> case message of CompositionChecked value -> Just value; _ -> Nothing
+                check "selected compiler checks unopened and unimported function composition" imported.compositionValid
+              _ -> fail "selected compiler did not return local/library symbols"
           _ -> fail "typed function declarations missing"
         restartAnalysisWorker client
         replayed <- await events $ \message -> case message of AnalysisCompleted value -> Just value; _ -> Nothing
         check "compiler restart preserves unsaved buffers and profile" (replayed.analysisContentHash == contentHash corrected && replayed.analysisCompleteness == Typechecked)
-        putStrLn ("PASS: " <> show tool <> " GHC " <> T.unpack compiler.compilerVersion <> " discovery/build, TH, diagnostics, composition and replay")
+        putStrLn ("PASS: " <> show tool <> " GHC " <> T.unpack compiler.compilerVersion <> " discovery/build, TH, diagnostics, indexing, imported composition and replay")
       -- Switch the compiler without resending the current document: the
       -- coordinator and client replay store remain authoritative.
       case compilers of

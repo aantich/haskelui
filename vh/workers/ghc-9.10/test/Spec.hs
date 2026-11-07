@@ -11,21 +11,28 @@ import Control.Concurrent.STM
   , readTQueue
   , writeTQueue
   )
-import Control.Exception (finally)
+import Control.Exception (finally, bracket)
+import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async (withAsync, wait)
 import Control.Monad (unless, when)
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as Text
 import qualified Data.Text.IO as TextIO
+import Data.Aeson (eitherDecode)
+import qualified Data.ByteString.Lazy as LazyBytes
 import Data.Time.Clock (diffUTCTime, getCurrentTime)
 import System.Directory
   ( findExecutable
   , getTemporaryDirectory
   , makeAbsolute
   , removeFile
+  , listDirectory
+  , doesFileExist
   )
-import System.Environment (lookupEnv)
+import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
+import System.IO.Temp (withSystemTempDirectory)
 import System.Timeout (timeout)
 import VisualHaskell.Analysis.Client
 import VisualHaskell.Analysis.Ghc910
@@ -33,7 +40,14 @@ import VisualHaskell.Analysis.Protocol
 import VisualHaskell.Semantic
 
 main :: IO ()
-main = do
+main = withSystemTempDirectory "vh-symbol-cache-test" $ \cacheRoot ->
+  bracket (lookupEnv "XDG_CACHE_HOME")
+    (maybe (unsetEnv "XDG_CACHE_HOME") (setEnv "XDG_CACHE_HOME")) $ \_ -> do
+      setEnv "XDG_CACHE_HOME" cacheRoot
+      runTests cacheRoot
+
+runTests :: FilePath -> IO ()
+runTests cacheRoot = do
   -- A Stack cradle launches @stack repl@. Running that while an enclosing
   -- @stack test@ owns Stack's build lock can deadlock, so the repository's
   -- self-hosted cradle check is an explicit post-build validation. The direct
@@ -121,6 +135,8 @@ main = do
         , "negateInt = negate"
         , "identity :: a -> a"
         , "identity input = input"
+        , "vhInput0 :: Int -> String"
+        , "vhInput0 = show"
         , "renderAny :: Show a => a -> String"
         , "renderAny = show"
         , "sorted = L.sort [3 :: Int, 1]"
@@ -173,6 +189,9 @@ main = do
       validComposition <- checkCompositionWithEngine engine documents (DocumentId "A")
         (CompositionQuery [functionId "identity", functionId "toText", functionId "textLength"]) >>= either (fail . show) pure
       assert "GHC validates the entire polymorphic composition chain" (validComposition.compositionValid && validComposition.compositionSignature /= Nothing)
+      captured <- checkCompositionWithEngine engine documents (DocumentId "A")
+        (CompositionQuery [functionId "vhInput0", functionId "textLength"]) >>= either (fail . show) pure
+      assert "generated composition binders cannot capture user function names" captured.compositionValid
       invalidComposition <- checkCompositionWithEngine engine documents (DocumentId "A")
         (CompositionQuery [functionId "toText", functionId "negateInt"]) >>= either (fail . show) pure
       assert "GHC returns an actual mismatch for incompatible ports" (not invalidComposition.compositionValid && invalidComposition.compositionError /= Nothing)
@@ -180,6 +199,59 @@ main = do
         (CompositionQuery [functionId "identity", functionId "renderAny"]) >>= either (fail . show) pure
       assert "composition preserves inferred typeclass constraints" $
         constrained.compositionValid && maybe False (Text.isInfixOf "Show") constrained.compositionSignature
+      indexed <- searchSymbolsWithEngine engine documents (DocumentId "A")
+        (SymbolQuery "C.unopened" FunctionSymbols 0 50 []) >>= either (fail . show) pure
+      assert "unopened, unimported declared module is indexed" $
+        any (\symbol -> symbol.indexedModule == ModuleName "C" && symbol.indexedDeclaration.declarationName == "unopened"
+          && symbol.indexedSourcePath == Just (fixture </> "C.hs")) indexed.symbolSearchSymbols
+      assert "unrelated broken open buffers do not poison the component index" (indexed.symbolSearchLocalModules >= 3)
+      let unopened = case indexed.symbolSearchSymbols of symbol : _ -> symbol.indexedDeclaration.declarationId; [] -> error "Unopened symbol missing"
+      reversePage <- searchSymbolsWithEngine engine documents (DocumentId "A")
+        (SymbolQuery "Data.List.reverse" FunctionSymbols 0 50 [unopened]) >>= either (fail . show) pure
+      let reverseSymbols = [symbol | symbol <- reversePage.symbolSearchSymbols, symbol.indexedModule == ModuleName "Data.List", symbol.indexedDeclaration.declarationName == "reverse"]
+      assert "unimported library export keeps its import route, version, and no fake source range" $
+        any (\symbol -> symbol.indexedPackage == "base" && not (Text.null symbol.indexedPackageVersion)
+          && symbol.indexedDeclaration.declarationSelectionRange == Nothing && symbol.indexedSourcePath == Nothing
+          && not (Map.null symbol.indexedTypes)) reverseSymbols
+      assert "pinned cards survive filtering and paging" (any ((== unopened) . declarationId . indexedDeclaration) reversePage.symbolSearchPinned)
+      let reverseId = case reverseSymbols of symbol : _ -> symbol.indexedDeclaration.declarationId; [] -> error "Library reverse missing"
+      crossModule <- checkCompositionWithEngine engine documents (DocumentId "A")
+        (CompositionQuery [unopened, reverseId, functionId "textLength"]) >>= either (fail . show) pure
+      assert "GHC composes unopened module, unimported dependency and local function" crossModule.compositionValid
+      rejectedExternal <- checkCompositionWithEngine engine documents (DocumentId "A")
+        (CompositionQuery [unopened, functionId "negateInt"]) >>= either (fail . show) pure
+      assert "GHC rejects incompatible indexed functions" (not rejectedExternal.compositionValid)
+      privatePage <- searchSymbolsWithEngine engine documents (DocumentId "A")
+        (SymbolQuery "C.privateFunction" FunctionSymbols 0 50 []) >>= either (fail . show) pure
+      assert "private definitions are not exposed as importable palette entries" (null privatePage.symbolSearchSymbols)
+      typePage <- searchSymbolsWithEngine engine documents (DocumentId "A")
+        (SymbolQuery "C.Box" TypeSymbols 0 50 []) >>= either (fail . show) pure
+      assert "unopened type declarations retain constructors and parameter kinds" $
+        any (\symbol -> case symbol.indexedDeclaration.declarationTypeSemantics of
+          Just semantics -> not (null semantics.typeDeclarationSemanticParameters) && case semantics.typeDeclarationSemanticDefinition of
+            AlgebraicTypeSemantics constructors -> not (null constructors)
+            _ -> False
+          Nothing -> False) typePage.symbolSearchSymbols
+      operatorPage <- searchSymbolsWithEngine engine documents (DocumentId "A")
+        (SymbolQuery "Data.Function.&" FunctionSymbols 0 50 []) >>= either (fail . show) pure
+      let operatorId = case [symbol.indexedDeclaration.declarationId | symbol <- operatorPage.symbolSearchSymbols,
+              symbol.indexedDeclaration.declarationName == "&"] of identifier : _ -> identifier; [] -> error "Library operator missing"
+      operatorComposition <- checkCompositionWithEngine engine documents (DocumentId "A")
+        (CompositionQuery [unopened, operatorId]) >>= either (fail . show) pure
+      assert "qualified symbolic operators compose without textual name guessing" operatorComposition.compositionValid
+      let editedC = snapshot (DocumentId "C") (fixture </> "C.hs") (TextRevision 1)
+            "module C (unopened) where\nunopened :: String -> Int\nunopened = length\n"
+          withC = Map.insert (DocumentId "C") editedC documents
+      staleIndexed <- checkCompositionWithEngine engine withC (DocumentId "A")
+        (CompositionQuery [unopened, reverseId])
+      assert "dependency edits invalidate old index authority before refresh" (case staleIndexed of Left _ -> True; Right _ -> False)
+      editedIndex <- searchSymbolsWithEngine engine withC (DocumentId "A")
+        (SymbolQuery "C.unopened" FunctionSymbols 0 50 []) >>= either (fail . show) pure
+      assert "unsaved indexed-module signature changes are reflected" $
+        any ((== Just "String -> Int") . declarationSignatureText . indexedDeclaration) editedIndex.symbolSearchSymbols
+      changedComposition <- checkCompositionWithEngine engine withC (DocumentId "A")
+        (CompositionQuery [unopened, reverseId]) >>= either (fail . show) pure
+      assert "new indexed types, not cached signatures, govern compatibility" (not changedComposition.compositionValid)
       let valueOffset = Text.length (fst (Text.breakOn "value\n" aSource))
       hover <- queryWithEngine engine documents (DocumentId "A") (PositionQuery HoverQuery valueOffset) >>= either (fail . show) pure
       assert "hover resolves the imported occurrence and its inferred type" $
@@ -315,6 +387,25 @@ main = do
     warmBrokenMilliseconds < 1000
   assert "warm corrected edit remains below the interactive one-second budget" $
     warmRecoveredMilliseconds < 1000
+  let indexCache = cacheRoot </> "visual-haskell/symbol-index/v2"
+  cachedFiles <- listDirectory indexCache
+  assert "immutable library projections are persisted" (not (null cachedFiles))
+  case cachedFiles of
+    file : _ -> do
+      let path = indexCache </> file
+      writeFile path "{ corrupt cache"
+      restarted <- startAnalysisEngine invocation >>= either (fail . show) pure
+      cachedResult <- flip finally (stopAnalysisEngine restarted) $
+        searchSymbolsWithEngine restarted documents (DocumentId "A")
+          (SymbolQuery "Data.List.reverse" FunctionSymbols 0 50 []) >>= either (fail . show) pure
+      assert "new sessions reuse valid library cache modules" (cachedResult.symbolSearchCacheHits > 0)
+      assert "corrupt cache does not hide library functions" (not (null cachedResult.symbolSearchSymbols))
+      repaired <- eitherDecode <$> LazyBytes.readFile path
+      assert "corrupt cache is atomically replaced with a valid projection" $
+        case (repaired :: Either String (Text.Text, [IndexedSymbol])) of Right _ -> True; Left _ -> False
+    [] -> fail "Library cache empty"
+  closedSourceRace
+  symbolIndexRegressions
   (_, protocolAnalysis, warmProtocolAnalysis) <- analyzeThroughWorker fixture aSnapshot bSnapshot []
   assert "the real worker protocol returns typechecked unsaved analysis" (protocolAnalysis.analysisCompleteness == Typechecked)
   assert "the real worker protocol preserves content identity" (protocolAnalysis.analysisContentHash == aSnapshot.snapshotContentHash)
@@ -469,6 +560,122 @@ awaitMatching events select = do
           AnalysisWorkerMessage _ envelope | WorkerRequestFailed _ failure <- envelope.envelopePayload ->
             fail (Text.unpack failure.requestFailureCode <> ": " <> Text.unpack failure.requestFailureMessage)
           _ -> loop
+
+-- Deterministic closed-file race: C's trusted splice signals when the full
+-- index load reaches it, then pauses while an external writer changes C.
+-- No span from the old GHC module may be paired with the new file's hash.
+closedSourceRace :: IO ()
+closedSourceRace = withSystemTempDirectory "vh-closed-index-source" $ \temporary -> do
+  root <- makeAbsolute temporary
+  let aPath = root </> "A.hs"
+      cPath = root </> "C.hs"
+      marker = root </> "index-started"
+      aText = "module A where\nidentity :: a -> a\nidentity = id\n"
+      replacement = "module C where\nchanging :: String -> Int\nchanging = length\n"
+      slow = Text.unlines
+        ["{-# LANGUAGE TemplateHaskell #-}", "module C where", "import Language.Haskell.TH", "import Control.Concurrent",
+         "changing :: Int -> String", "changing = $(do runIO (writeFile " <> Text.pack (show marker) <>
+          " \"ready\" >> threadDelay 500000); [| show |])"]
+  TextIO.writeFile aPath aText
+  TextIO.writeFile cPath slow
+  writeFile (root </> "hie.yaml") "cradle:\n  direct:\n    arguments: [-i., -package, template-haskell, A.hs, C.hs]\n"
+  invocation <- discoverCompilerInvocation aPath [aPath, cPath] >>= either (fail . show) pure
+  engine <- startAnalysisEngine invocation >>= either (fail . show) pure
+  let documents = Map.singleton (DocumentId "A") (snapshot (DocumentId "A") aPath (TextRevision 1) aText)
+      rewrite 0 = fail "Index load did not reach the source-race marker"
+      rewrite attempts = do
+        exists <- doesFileExist marker
+        if exists then TextIO.writeFile cPath replacement else threadDelay 10000 >> rewrite (attempts - 1)
+      query = SymbolQuery "C.changing" FunctionSymbols 0 50 []
+  flip finally (stopAnalysisEngine engine) $ withAsync (rewrite (1000 :: Int)) $ \writer -> do
+    raced <- searchSymbolsWithEngine engine documents (DocumentId "A") query >>= either (fail . show) pure
+    wait writer
+    assert "closed source changes during indexing never publish mismatched spans and hashes" $
+      raced.symbolSearchLocalModules == 0 && null raced.symbolSearchSymbols
+        && not raced.symbolSearchComplete
+        && any (Text.isInfixOf "Sources changed") raced.symbolSearchWarnings
+    refreshed <- searchSymbolsWithEngine engine documents (DocumentId "A") query >>= either (fail . show) pure
+    assert "source-race refresh indexes the new source without restarting the compiler" $
+      any ((== Just "String -> Int") . declarationSignatureText . indexedDeclaration) refreshed.symbolSearchSymbols
+
+symbolIndexRegressions :: IO ()
+symbolIndexRegressions = withSystemTempDirectory "vh-index-regressions" $ \temporary -> do
+  root <- makeAbsolute temporary
+  let aPath = root </> "A.hs"
+      bPath = root </> "B.hs"
+      zPath = root </> "Z.hs"
+      modePath = root </> "mode.txt"
+      aText = "module A where\nlocal :: Int\nlocal = 1\n"
+      bText = "module B (g) where\ng :: Int -> String\ng = show\n"
+      paths = map (root </>) ["A.hs", "B.hs", "C.hs", "D.hs", "Z.hs"]
+      documents = Map.singleton (DocumentId "A") (snapshot (DocumentId "A") aPath (TextRevision 1) aText)
+      changing = Text.unlines
+        [ "{-# LANGUAGE TemplateHaskell #-}", "module D where", "import Language.Haskell.TH"
+        , "import Language.Haskell.TH.Syntax (addDependentFile)"
+        , "$(do addDependentFile " <> Text.pack (show modePath)
+        , "     mode <- runIO (readFile " <> Text.pack (show modePath) <> ")"
+        , "     if mode == \"bool\" then [d| changing :: Bool -> Bool; changing = id |]"
+        , "                       else [d| changing :: Int -> String; changing = show |])"
+        ]
+  TextIO.writeFile aPath aText
+  TextIO.writeFile bPath bText
+  TextIO.writeFile (root </> "C.hs") "module C (g) where\nimport B (g)\n"
+  TextIO.writeFile (root </> "D.hs") changing
+  TextIO.writeFile zPath "module Z where\nokay :: Int\nokay = 1\n"
+  writeFile modePath "int"
+  writeFile (root </> "hie.yaml") "cradle:\n  direct:\n    arguments: [-i., -package, template-haskell, A.hs, B.hs, C.hs, D.hs, Z.hs]\n"
+  invocation <- discoverCompilerInvocation aPath paths >>= either (fail . show) pure
+  engine <- startAnalysisEngine invocation >>= either (fail . show) pure
+  flip finally (stopAnalysisEngine engine) $ do
+    let search docs text pinned = searchSymbolsWithEngine engine docs (DocumentId "A")
+          (SymbolQuery text FunctionSymbols 0 50 pinned) >>= either (fail . show) pure
+        named :: Text.Text -> Text.Text -> SymbolSearchResult -> IO IndexedSymbol
+        named moduleName name result = case [s | s <- result.symbolSearchSymbols,
+            s.indexedModule == ModuleName moduleName, s.indexedDeclaration.declarationName == name] of
+          symbol : _ -> pure symbol
+          [] -> fail ("Missing indexed symbol " <> Text.unpack moduleName <> "." <> Text.unpack name)
+        compose docs identifiers = checkCompositionWithEngine engine docs (DocumentId "A")
+          (CompositionQuery identifiers) >>= either (fail . show) pure
+    defined <- search documents "B.g" [] >>= named "B" "g"
+    reexported <- search documents "C.g" [] >>= named "C" "g"
+    let gId = defined.indexedDeclaration.declarationId
+        hasDefiningSource :: IndexedSymbol -> Bool
+        hasDefiningSource symbol = symbol.indexedSourcePath == Just bPath
+          && symbol.indexedSourceHash == Just (contentHash bText)
+          && symbol.indexedDeclaration.declarationSelectionRange == defined.indexedDeclaration.declarationSelectionRange
+          && symbol.indexedDeclaration.declarationSelectionRange /= Nothing
+    assert "re-export import routes retain the defining module's real source" $
+      reexported.indexedDeclaration.declarationId == gId && hasDefiningSource reexported
+    reversePage <- search documents "Data.List.reverse" [gId]
+    assert "pinned re-export dedup never replaces a real source with the exporting file" $
+      not (null reversePage.symbolSearchPinned) && all hasDefiningSource reversePage.symbolSearchPinned
+    reversed <- named "Data.List" "reverse" reversePage
+    counted <- search documents "Data.List.length" [] >>= named "Data.List" "length"
+    let chain = map (.indexedDeclaration.declarationId) [reversed, counted]
+    before <- compose documents chain
+    assert "library-only composition starts valid" before.compositionValid
+    old <- search documents "D.changing" []
+    oldFunction <- named "D" "changing" old
+    writeFile modePath "bool"
+    new <- search documents "D.changing" []
+    newFunction <- named "D" "changing" new
+    assert "TH dependent-file changes revise index authority without an open-document edit" $
+      old.symbolSearchRevision /= new.symbolSearchRevision
+        && oldFunction.indexedDeclaration.declarationId == newFunction.indexedDeclaration.declarationId
+        && oldFunction.indexedDeclaration.declarationSignatureText == Just "Int -> String"
+        && newFunction.indexedDeclaration.declarationSignatureText == Just "Bool -> Bool"
+    let broken = Map.insert (DocumentId "Z")
+          (snapshot (DocumentId "Z") zPath (TextRevision 2) "module Z where\nokay :: Int\nokay = missing\n") documents
+    active <- analyzeWithEngine engine broken (DocumentId "A") (WorkspaceGeneration 1) >>= either (fail . show) pure
+    assert "an unrelated declared error leaves active document analysis usable" (active.analysisCompleteness == Typechecked)
+    partial <- search broken "Data.List.reverse" [gId]
+    assert "local failure is explicitly incomplete rather than revoking missing local pins" $
+      not partial.symbolSearchComplete && partial.symbolSearchLocalModules == 0
+        && null partial.symbolSearchPinned && not (null partial.symbolSearchSymbols)
+    after <- compose broken chain
+    assert "library-only composition survives a failed local graph" after.compositionValid
+    recovered <- search documents "C.g" [] >>= named "C" "g"
+    assert "partial indexes are retried and local source navigation recovers" (hasDefiningSource recovered)
 
 assert :: String -> Bool -> IO ()
 assert message condition = unless condition (fail message)

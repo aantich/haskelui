@@ -6,6 +6,7 @@ module Main (main) where
 import Control.Monad (unless)
 import Data.Aeson (decode, encode)
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import qualified Data.Text as Text
 import VisualHaskell.Semantic
 
@@ -173,6 +174,37 @@ main = do
     "analysis JSON preserves rich declared-type semantics"
     (Just firstAnalysis)
     (decode (encode firstAnalysis))
+  let functionType = TypeId "function"
+      intType = TypeId "int"
+      indexed = IndexedSymbol
+        (Declaration (DeclarationId "library:f") "f" ValueDeclaration Nothing Nothing (Just functionType) (Just "Int -> Int") Nothing)
+        (Map.fromList [(functionType, FunctionType intType intType), (intType, TypeConstructor "Int")])
+        (ModuleName "Library") "unit-1" "library" "1.2" Nothing Nothing
+      reexported = indexed {indexedModule = ModuleName "Other"}
+      query = SymbolQuery "Other.f 1.2" FunctionSymbols 0 50 []
+      (total, page) = searchSymbols query [indexed, reexported]
+  assertEqual "filter before dedup retains the requested import route" (1, [reexported]) (total, page)
+  let internal = reexported {indexedModule = ModuleName "GHC.Internal.Other"}
+  assertEqual "public qualified route outranks an internal substring re-export" (1, [reexported])
+    (searchSymbols query [internal, reexported])
+  assertEqual "indexed symbol JSON round trip" (Just indexed) (decode (encode indexed))
+  assertEqual "interface functions never invent source spans" (Just Nothing) (functionRange <$> symbolFunction indexed)
+  assertEqual "type-only search excludes function entries" (0, []) (searchSymbols (query {symbolQueryKind = TypeSymbols}) [reexported])
+  assertEqual "negative paging offsets are bounded" (1, [reexported]) (searchSymbols (query {symbolQueryOffset = -1, symbolQueryLimit = 10000}) [reexported])
+  let identity = indexed.indexedDeclaration.declarationId
+      old = Map.singleton identity indexed
+      missing = SymbolSearchResult (query {symbolQueryPinned = [identity]}) [] [] 0 0 10 0
+        ["Local component failed to typecheck"] False (ContentHash 1)
+  assertEqual "partial coverage preserves missing pins as explicitly stale"
+    (old, Set.singleton identity) (reconcileSymbolPage missing old)
+  assertEqual "complete coverage revokes missing declarations"
+    (Map.empty, Set.empty) (reconcileSymbolPage (missing {symbolSearchComplete = True}) old)
+  assertEqual "fresh pins replace stale presentation even on partial results"
+    (Map.singleton identity reexported, Set.empty)
+    (reconcileSymbolPage (missing {symbolSearchPinned = [reexported]}) old)
+  assertEqual "partial coverage does not retain unpinned earlier pages"
+    (Map.empty, Set.empty)
+    (reconcileSymbolPage (missing {symbolSearchQuery = query}) old)
   putStrLn "Visual Haskell semantic model tests passed"
 
 assert :: String -> Bool -> IO ()

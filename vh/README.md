@@ -293,8 +293,8 @@ The shared adapter supports **GHC 9.6.7 and 9.10.3**, with Stack metadata tested
 against Cabal **3.10.x and 3.12.x**, on macOS. Other project compilers report an actionable
 error and leave editing available; additional worker versions are not silently
 substituted. Build tools and dependencies must be available in the environment.
-This is project loading/semantic editing, not a build/run/debug UI or a complete
-project-wide symbol index.
+This is project loading/semantic editing, not a build/run/debug UI. Index coverage
+is the active component and its visible dependencies, not every project component.
 
 Run the real toolchain acceptance matrix outside an enclosing `stack exec`:
 
@@ -312,6 +312,59 @@ unavailable optional dependencies, failed-profile recovery, Stack-launched
 Cabal loading, slow Template Haskell cancellation and standalone Cabal.
 
 ## Semantic universe inspectors
+
+### Component and library palette
+
+In **Functions**, choose **Component + libraries** to index the actual cradle's
+declared module graph, including unopened/unimported local modules, and the
+package modules visible to that component's compiler. Search by name, qualified
+module, package/version, or signature; choose functions, types/classes, or all
+symbols. Results are paged (50 per page). Coverage and unavailable/ambiguous
+module warnings are shown explicitly. Nothing executes until workspace trust
+has been granted, and current-file browsing does not trigger the full index.
+
+Select a function and choose **Add function**, then move/connect its canvas
+card. Search changes never remove existing cards. GHC checks mixed local/library
+chains using temporary qualified imports, verifies their exact compiler symbol
+identities (including the defining unit), and restores the interactive context.
+Hidden implementation modules are not mistaken for the importable re-export
+module. Private exports cannot be selected from another module. The canvas is
+an exploratory composition view; it does not insert imports or rewrite source.
+Incomplete indexes preserve unavailable pinned cards, their positions, and wires
+as stale instead of treating missing results as deleted declarations. Those cards
+cannot show successful composition feedback or navigate stale source. Usable
+library-only chains remain checkable even if an unrelated local module fails.
+
+Each symbol carries its own structured type table, constructor/class semantics,
+import module, unit, package/version and optional real source location. Local
+card navigation checks the defining source hash before opening an unopened file,
+including re-exports, and reuses already-open buffers through their original
+editor paths (even when the compiler uses canonicalized paths). Library
+interfaces are read-only and do not receive synthetic source coordinates.
+The separate Types diagram continues to show accepted open-document snapshots;
+the global palette is not advertised as full-project diagram coverage.
+
+The existing compiler session owns the index. Open-buffer hashes and local
+module content hashes invalidate its in-memory cache. Immutable library
+projections are cached atomically under the OS cache directory at
+`visual-haskell/symbol-index/v2`, keyed by compiler location/version, unit ABI,
+and export module; they are reused across projects without copying Hackage
+indexes, package sources, or compiler installations. Corrupt/missing cache
+entries are rebuilt. Local/unsaved source is never persisted in that cache.
+Responses remain bound to request, all-open-buffer input hash, active document,
+compiler session and worker/workspace generation.
+Index revisions also cover closed source and Template Haskell dependent files;
+accepted revisions invalidate old composition results even when the active text
+and function identities are unchanged. Changing an unmonitored non-source TH
+input requires **Refresh** in the palette; a new index never reuses old feedback.
+
+Indexing loads all declared targets and may execute trusted Template Haskell,
+just like project typechecking. The first global query can be noticeably slower
+than a warm search. Failed local graphs report partial coverage; broken unrelated
+open buffers outside the declared graph are excluded. Switch components to browse
+their different dependency visibility. Haddock text, downloaded package source,
+cross-component aggregation and palette-to-canvas drag-and-drop remain future UI
+extensions (canvas cards themselves are draggable).
 
 The **Outline** tab lists current compiler declarations and their signatures in
 source order. Selecting a declaration reveals its exact source range. In a
@@ -403,21 +456,21 @@ universe never guesses structure from pretty-printed text. Compiler symbol
 identity uses unit, module, namespace, and occurrence rather than session-local
 GHC `Unique` values or context-dependent pretty-printer qualification.
 
-Project scope remains deliberately honest: today it combines accepted open-
+The Types diagram's Project scope remains deliberately honest: it combines accepted open-
 document snapshots, which the coverage field reports as
-`accepted-snapshots`; it is not yet a persistent whole-workspace or dependency
-index. Referenced package and built-in constructors remain present in the
-structured type table, while materializing them as full external entities with
-package metadata/source navigation belongs to the indexing phase. Type-family
+`accepted-snapshots`; it does not yet consume the component/library palette's
+index. Referenced package and built-in constructors remain present in its
+structured type table. Materializing indexed package declarations as full
+diagram entities remains a separate integration step. Type-family
 declarations are identified, but family equations are deferred until the
 semantic contract can represent open families, closed ordered equations, and
 imported instances without conflating them.
 
 The **Functions** tab consumes a dedicated, compiler-independent `FunctionNode`
-model derived from current typed value declarations, not the type-universe
+model derived from current typed value declarations and indexed exports, not the type-universe
 preview. Select a function and choose **Add function**, then drag or click its
 output circle onto another card's input. Cards can be moved, scroll pans, and
-Command-/Control-scroll zooms. Double-click a card to reveal its declaration.
+Command-/Control-scroll zooms. Double-click a source-backed card to reveal its declaration.
 Widen the inspector using its divider to give the canvas more room.
 
 Connections form a linear composition (up to 32 cards). Each wire represents

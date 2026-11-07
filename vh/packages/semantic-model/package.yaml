@@ -30,6 +30,7 @@ library:
     - VisualHaskell.Semantic.FunctionUniverse
     - VisualHaskell.Semantic.Project
     - VisualHaskell.Semantic.Toolchain
+    - VisualHaskell.Semantic.SymbolIndex
 
 tests:
   visual-haskell-semantic-model-test:

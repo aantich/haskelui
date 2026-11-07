@@ -12,6 +12,7 @@ module VisualHaskell.Analysis.Ghc910
   , stopAnalysisEngine
   , queryWithEngine
   , checkCompositionWithEngine
+  , searchSymbolsWithEngine
   ) where
 
 import VisualHaskell.Analysis.Ghc910.Compat

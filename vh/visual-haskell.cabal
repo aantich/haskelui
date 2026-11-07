@@ -186,6 +186,7 @@ test-suite vh-model-test
   type: exitcode-stdio-1.0
   main-is: ModelSpec.hs
   other-modules:
+      SymbolIndexSpec
       Paths_visual_haskell
   autogen-modules:
       Paths_visual_haskell

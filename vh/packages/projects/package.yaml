@@ -32,6 +32,7 @@ library:
     - VisualHaskell.Projects
     - VisualHaskell.Projects.Process
     - VisualHaskell.Projects.Toolchains
+    - VisualHaskell.Projects.SourcePaths
   other-modules: [Paths_visual_haskell_projects]
 executables:
   visual-haskell-project-coordinator:

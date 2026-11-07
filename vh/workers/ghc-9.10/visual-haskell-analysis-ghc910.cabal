@@ -20,6 +20,7 @@ extra-source-files:
     test/fixtures/two-module/hie.yaml
     test/fixtures/two-module/A.hs
     test/fixtures/two-module/B.hs
+    test/fixtures/two-module/C.hs
     test/fixtures/project-loading/consumer/stage0-consumer.cabal
     test/fixtures/project-loading/upstream/stage0-upstream.cabal
     test/fixtures/project-loading/consumer/app/Main.hs

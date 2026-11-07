@@ -52,6 +52,10 @@ main = do
       checked = CompositionChecked (CompositionResult composition True (Just "Int -> String") Nothing)
   assertEqual "composition request wire round trip" (Just (CheckComposition composition)) (decode (encode (CheckComposition composition)))
   assertEqual "composition result wire round trip" (Just checked) (decode (encode checked))
+  let symbols = SymbolQuery "Data.List.reverse" FunctionSymbols 0 50 []
+      found = SymbolsFound (SymbolSearchResult symbols [] [] 0 3 20 5 [] True (ContentHash 23))
+  assertEqual "symbol search request wire round trip" (Just (QuerySymbols symbols)) (decode (encode (QuerySymbols symbols)))
+  assertEqual "symbol search response wire round trip" (Just found) (decode (encode found))
   assertEqual
     "unknown capabilities survive minor-version negotiation"
     (Just (UnsupportedCapability "future-capability"))

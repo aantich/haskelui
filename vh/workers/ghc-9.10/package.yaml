@@ -90,6 +90,7 @@ extra-source-files:
   - test/fixtures/two-module/hie.yaml
   - test/fixtures/two-module/A.hs
   - test/fixtures/two-module/B.hs
+  - test/fixtures/two-module/C.hs
   - test/fixtures/project-loading/**/*.cabal
   - test/fixtures/project-loading/**/*.hs
   - test/fixtures/project-loading/cabal.project

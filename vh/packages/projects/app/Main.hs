@@ -28,6 +28,7 @@ import VisualHaskell.Analysis.Client
 import VisualHaskell.Analysis.Protocol
 import VisualHaskell.Projects
 import VisualHaskell.Projects.Toolchains
+import VisualHaskell.Projects.SourcePaths (restoreSourcePaths)
 import VisualHaskell.Semantic
 
 type Incoming = ProtocolEnvelope ClientMessage
@@ -92,7 +93,7 @@ runCoordinator = do
       respond hello (WorkerHelloMessage (WorkerHello protocolV2 "visual-haskell-project-worker/0.2.0"
         Nothing [WorkspaceLoadingCapability, ComponentDiscoveryCapability, ToolchainManagementCapability,
           FullDocumentSnapshotsCapability, DiagnosticsCapability, DocumentDeclarationsCapability,
-          StructuredTypesCapability, PositionQueriesCapability, CompositionChecksCapability]
+          StructuredTypesCapability, PositionQueriesCapability, CompositionChecksCapability, SymbolSearchCapability]
         (maximumFrameBytes defaultFrameLimits)))
       events <- newTQueueIO
       let readInput = do
@@ -182,6 +183,16 @@ loop events state = do
       SelectComponent component -> prepare events incoming component state >>= loop events
       QueryPosition _ -> forwardOrFail state incoming >> loop events state
       CheckComposition _ -> forwardOrFail state incoming >> loop events state
+      QuerySymbols _ -> do
+        -- The coordinator canonicalizes paths and sends only component-owned
+        -- overlays to a session. Validate the client's complete input identity
+        -- here, before either transformation, not against the worker subset.
+        let originalDocuments = [document {snapshotPath = Map.findWithDefault document.snapshotPath
+              document.snapshotDocumentId state.documentPaths} | document <- Map.elems state.documents]
+        if incoming.envelopeInputHash == Just (analysisInputsHash originalDocuments)
+          then forwardOrFail state incoming
+          else failed incoming "stale-index-inputs" "Open buffers changed before the symbol search was dispatched"
+        loop events state
       ReloadConfiguration -> do
         stopped <- invalidate state
         next <- discover events incoming stopped {pending = state.pending, managedProject = True}
@@ -254,13 +265,8 @@ loop events state = do
           WorkerHelloMessage _ -> pure ()
           WorkspaceLoading _ -> pure ()
           WorkspaceReady _ _ -> pure ()
-          PositionQueryCompleted result -> do
-            let restore :: DefinitionTarget -> DefinitionTarget
-                restore target = case find ((== normalise target.definitionPath) . normalise . snapshotPath) (Map.elems state.documents) of
-                  Just document -> target {definitionPath = Map.findWithDefault target.definitionPath document.snapshotDocumentId state.documentPaths}
-                  Nothing -> target
-            void (writeFrame defaultFrameLimits stdout message {envelopePayload = PositionQueryCompleted result {resultDefinitions = map restore result.resultDefinitions}})
-          _ -> void (writeFrame defaultFrameLimits stdout message)
+          _ -> void (writeFrame defaultFrameLimits stdout message
+            {envelopePayload = restoreSourcePaths state.documents state.documentPaths message.envelopePayload})
         AnalysisWorkerLog _ message -> forM_ state.workspace (\incoming -> respond incoming (ProjectProgress (Text.take 8192 message)))
         AnalysisWorkerProtocolFailure _ message -> forM_ state.workspace (\incoming -> failed incoming "compiler-process-failed" message)
         AnalysisWorkerRestarting _ _ -> forM_ state.workspace (\incoming -> respond incoming (ProjectProgress "Restarting compiler session and restoring open buffers"))

@@ -15,6 +15,7 @@ module VisualHaskell.Analysis.Ghc910.Compat
   , stopAnalysisEngine
   , queryWithEngine
   , checkCompositionWithEngine
+  , searchSymbolsWithEngine
   , inspectCompilerUnits
   ) where
 
@@ -54,6 +55,10 @@ import qualified Data.Set as Set
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (catMaybes)
+import Data.Aeson (eitherDecode, encode)
+import qualified Data.ByteString.Lazy as LazyBytes
+import Data.Version (showVersion)
+import GHC.Fingerprint (getFileHash)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as TextIO
@@ -98,7 +103,14 @@ import GHC.Core.Type
 import GHC.Data.StringBuffer (stringToStringBuffer)
 import qualified GHC.Data.Strict as Strict
 import GHC.Driver.Monad (pushLogHookM, modifySession)
-import GHC.Driver.Env (hscSetActiveUnitId, hsc_all_home_unit_ids, hsc_unit_env)
+import GHC.Driver.Env (hscSetActiveUnitId, hsc_all_home_unit_ids, hsc_unit_env, hsc_units)
+import GHC.Unit.State (listVisibleModuleNames, lookupUnit, moduleNameProvidersMap, ModuleOrigin (..))
+import GHC.Unit.Info (unitPackageNameString, unitPackageVersion, unitAbiHash, unitId)
+import GHC.Unit.Module.ModIface (mi_usages)
+import GHC.Unit.Module.Deps (Usage (..))
+#if MIN_VERSION_ghc(9,10,0)
+import GHC.Types.Unique.Map (lookupUniqMap)
+#endif
 import qualified GHC.Driver.Session as DynFlags
 import qualified GHC.Unit.Env as UnitEnv
 import GHC.Types.Error
@@ -167,7 +179,9 @@ import HIE.Bios.Types (ComponentOptions (..))
 import Language.Haskell.Syntax.Basic (FieldLabelString (..))
 import Language.Haskell.Syntax.Module.Name (moduleNameString)
 import System.FilePath
-import System.IO (stderr)
+import System.Directory (getXdgDirectory, XdgDirectory (XdgCache), createDirectoryIfMissing, renameFile)
+import System.IO (stderr, hClose)
+import System.IO.Temp (withTempFile)
 import VisualHaskell.Analysis.Ghc910.Types
 import VisualHaskell.Semantic
 import VisualHaskell.Analysis.Protocol.Queries
@@ -217,6 +231,21 @@ data EngineRequest = EngineRequest
       !(TMVar (Either GhcAnalysisFailure PositionResult))
   | EngineComposition !(Map DocumentId DocumentSnapshot) !DocumentId !CompositionQuery
       !(TMVar (Either GhcAnalysisFailure CompositionResult))
+  | EngineSymbols !(Map DocumentId DocumentSnapshot) !DocumentId !SymbolQuery
+      !(TMVar (Either GhcAnalysisFailure SymbolSearchResult))
+
+data SymbolIndexStore = SymbolIndexStore
+  { indexVersions :: !(Map DocumentId (FilePath, TextRevision, ContentHash))
+  , indexSources :: ![(FilePath, Maybe ContentHash)]
+  , indexSymbols :: ![IndexedSymbol]
+  , indexLibrarySymbols :: ![IndexedSymbol]
+  , indexLocalModules :: !Int
+  , indexLibraryModules :: !Int
+  , indexCacheHits :: !Int
+  , indexWarnings :: ![Text]
+  , indexComplete :: !Bool
+  , indexRevision :: !ContentHash
+  }
 
 data QueryContext = QueryContext
   { contextDocument :: !DocumentSnapshot
@@ -258,9 +287,10 @@ startAnalysisEngine invocation = do
         targets <- initSession componentOptions
         GHC.setTargets targets
         captureReference <- liftIO (newIORef Nothing)
+        indexReference <- liftIO (newIORef Nothing)
         pushLogHookM (const (captureCurrentLog captureReference))
         liftIO (atomically (putTMVar ready ()))
-        engineLoop invocation captureReference requests Map.empty Nothing
+        engineLoop invocation captureReference requests targets indexReference Map.empty Nothing
   startup <- race (atomically (takeTMVar ready)) (waitCatch worker)
   case startup of
     Left () ->
@@ -333,22 +363,47 @@ engineLoop
   :: CompilerInvocation
   -> IORef DiagnosticCapture
   -> TQueue EngineRequest
+  -> [GHC.Target]
+  -> IORef (Maybe SymbolIndexStore)
   -> TargetCache
   -> Maybe QueryContext
   -> GHC.Ghc ()
-engineLoop invocation captureReference requests targetCache queryContext = do
+engineLoop invocation captureReference requests declaredTargets indexReference targetCache queryContext = do
   request <- liftIO (atomically (readTQueue requests))
   case request of
+    EngineSymbols documents document query response -> do
+      (currentContext, updatedTargets) <- prepareQueryContext invocation captureReference targetCache documents document False queryContext
+      result <- case (currentContext, Map.lookup document documents) of
+        (Just context, Just snapshot) | context.contextDocument == snapshot && context.contextVersions == documentVersions documents -> do
+          environment <- GHC.getSession
+          GHC.handleSourceError (\exception -> do
+            GHC.setSession environment
+            liftIO (writeIORef indexReference Nothing)
+            pure (Left (failure "index-source-error" (Text.pack (show exception)) True))) $ do
+              index <- prepareSymbolIndex invocation declaredTargets indexReference documents
+              let (total, page) = searchSymbols query index.indexSymbols
+                  pinned = Map.elems (Map.fromList [(symbol.indexedDeclaration.declarationId, symbol) | symbol <- index.indexSymbols,
+                    symbol.indexedDeclaration.declarationId `elem` take 64 query.symbolQueryPinned])
+              pure (Right (SymbolSearchResult query page pinned total index.indexLocalModules index.indexLibraryModules index.indexCacheHits index.indexWarnings
+                index.indexComplete index.indexRevision))
+        _ -> pure (Left (failure "index-unavailable" "The active document must typecheck before indexing its component" True))
+      liftIO (atomically (putTMVar response result))
+      engineLoop invocation captureReference requests declaredTargets indexReference updatedTargets currentContext
     EngineComposition documents document query response -> do
       (currentContext, updatedTargets) <- prepareQueryContext invocation captureReference targetCache documents document False queryContext
+      cachedIndex <- liftIO (readIORef indexReference)
+      validIndex <- case cachedIndex of
+        Just index -> liftIO (indexIsCurrent documents index)
+        Nothing -> pure False
       result <- answerComposition invocation documents document query currentContext
+        (if validIndex then maybe [] indexSymbols cachedIndex else [])
       liftIO (atomically (putTMVar response result))
-      engineLoop invocation captureReference requests updatedTargets currentContext
+      engineLoop invocation captureReference requests declaredTargets indexReference updatedTargets currentContext
     EngineQuery documents document query response -> do
       (currentContext, updatedTargets) <- prepareQueryContext invocation captureReference targetCache documents document (query.queryKind == CompletionQuery) queryContext
       result <- answerQuery invocation documents document query currentContext
       liftIO (atomically (putTMVar response result))
-      engineLoop invocation captureReference requests updatedTargets currentContext
+      engineLoop invocation captureReference requests declaredTargets indexReference updatedTargets currentContext
     EngineRequest {} -> do
       (result, updatedTargetCache) <-
         analyzeInCurrentSession invocation captureReference targetCache
@@ -363,7 +418,7 @@ engineLoop invocation captureReference requests targetCache queryContext = do
             Just context -> Just context
             Nothing -> queryContext
       liftIO (atomically (putTMVar request.requestResponse result))
-      engineLoop invocation captureReference requests updatedTargetCache retained
+      engineLoop invocation captureReference requests declaredTargets indexReference updatedTargetCache retained
 
 -- Queries can target another open buffer than the last background analysis.
 -- Reuse the same GHC session, but refresh its context before answering. Tracking
@@ -410,10 +465,212 @@ checkCompositionWithEngine engine documents document query = do
     Left result -> result
     Right _ -> Left (failure "ghc-session-terminated" "Compiler composition session stopped" True)
 
+searchSymbolsWithEngine
+  :: AnalysisEngine -> Map DocumentId DocumentSnapshot -> DocumentId -> SymbolQuery
+  -> IO (Either GhcAnalysisFailure SymbolSearchResult)
+searchSymbolsWithEngine engine documents document query = do
+  response <- newEmptyTMVarIO
+  atomically (writeTQueue engine.engineRequests (EngineSymbols documents document query response))
+  completed <- race (atomically (takeTMVar response)) (waitCatch engine.engineWorker)
+  pure $ case completed of
+    Left result -> result
+    Right _ -> Left (failure "ghc-session-terminated" "Compiler index session stopped" True)
+
+indexIsCurrent :: Map DocumentId DocumentSnapshot -> SymbolIndexStore -> IO Bool
+indexIsCurrent documents index
+  | index.indexVersions /= documentVersions documents = pure False
+  | otherwise = (== index.indexSources) <$> sourceVersions documents (map fst index.indexSources)
+
+sourceVersions :: Map DocumentId DocumentSnapshot -> [FilePath] -> IO [(FilePath, Maybe ContentHash)]
+sourceVersions documents = traverse $ \path -> do
+  hashValue <- case find ((== normalise path) . normalise . snapshotPath) (Map.elems documents) of
+    Just snapshot -> pure (Just snapshot.snapshotContentHash)
+    Nothing -> do
+      hashed <- try (getFileHash path)
+      pure (case hashed of Left (_ :: IOException) -> Nothing; Right fingerprint -> Just (contentHash (Text.pack (show fingerprint))))
+  pure (path, hashValue)
+
+sourceSnapshot :: Map DocumentId DocumentSnapshot -> FilePath -> IO (Maybe DocumentSnapshot)
+sourceSnapshot documents path = case find ((== normalise path) . normalise . snapshotPath) (Map.elems documents) of
+  Just snapshot -> pure (Just snapshot)
+  Nothing -> do
+    loaded <- try (TextIO.readFile path)
+    pure $ case loaded of
+      Left (_ :: IOException) -> Nothing
+      Right source -> Just (DocumentSnapshot (DocumentId (Text.pack path)) path (TextRevision 0) (contentHash source) source UnknownLineEndings)
+
+prepareSymbolIndex
+  :: CompilerInvocation -> [GHC.Target] -> IORef (Maybe SymbolIndexStore)
+  -> Map DocumentId DocumentSnapshot -> GHC.Ghc SymbolIndexStore
+prepareSymbolIndex invocation declaredTargets reference documents = do
+  previous <- liftIO (readIORef reference)
+  current <- liftIO (maybe (pure False) (indexIsCurrent documents) previous)
+  case previous of
+    Just index | current && index.indexComplete -> pure index
+    _ -> do
+      -- The editor may have unrelated, broken buffers open. Restrict the full
+      -- load to cradle-declared targets and overlays in their dependency graph.
+      previousTargets <- GHC.getTargets
+      let declared = [maybe target id (find (sameTarget target) previousTargets) | target <- declaredTargets]
+      GHC.setTargets declared
+      graph <- GHC.depanal [] False
+      let paths = catMaybes (map (GHC.ml_hs_file . GHC.ms_location) (GHC.mgModSummaries graph))
+          relevant target = case GHC.targetId target of
+            GHC.TargetFile path _ -> normalise path `elem` map normalise paths
+            _ -> any (`sameTarget` target) declared
+          overlays = filter relevant previousTargets
+      before <- liftIO (sourceVersions documents (nub paths))
+      sourceSnapshots <- liftIO $ fmap Map.fromList $ forM paths $ \path -> do
+        source <- sourceSnapshot documents path
+        pure (normalise path, source)
+      GHC.setTargets (declared <> [target | target <- overlays, not (any (`sameTarget` target) declared)])
+      loaded <- GHC.handleSourceError (const (pure GHC.Failed)) (GHC.load GHC.LoadAllTargets)
+      loadedGraph <- GHC.getModuleGraph
+      let moduleSources = Map.fromList [(GHC.ms_mod summary, source)
+            | summary <- GHC.mgModSummaries loadedGraph
+            , Just path <- [GHC.ml_hs_file (GHC.ms_location summary)]
+            , Just source <- [Map.lookup (normalise path) sourceSnapshots >>= id]]
+      local <- case loaded of
+        GHC.Failed -> pure []
+        GHC.Succeeded -> fmap concat $ forM (GHC.mgModSummaries loadedGraph) $ \summary -> do
+          case GHC.ml_hs_file (GHC.ms_location summary) >>= (\path -> Map.lookup (normalise path) sourceSnapshots >>= id) of
+            Nothing -> pure []
+            Just _ -> moduleSymbols (GHC.ms_mod summary) moduleSources
+      environment <- GHC.getSession
+      let memoryLibraries = Map.fromListWith (<>)
+            [(symbol.indexedModule, [symbol]) | index <- maybe [] pure previous, symbol <- index.indexLibrarySymbols]
+      libraries <- forM (listVisibleModuleNames (hsc_units environment)) $ \name ->
+        GHC.handleSourceError (const (pure ([], False, Just (Text.pack (GHC.moduleNameString name))))) $ do
+          resolved <- GHC.findModule name Nothing
+          if toUnitId (moduleUnit resolved) `Set.member` hsc_all_home_unit_ids environment
+            then pure ([], False, Nothing)
+            else do
+              let definingUnit = lookupUnit (hsc_units environment) (moduleUnit resolved)
+                  -- A module re-export can rename the module itself, not just
+                  -- its exported Names (base:Data.List -> ghc-internal:...).
+                  origin =
+#if MIN_VERSION_ghc(9,10,0)
+                    lookupUniqMap (moduleNameProvidersMap (hsc_units environment)) name >>= (`lookupUniqMap` resolved)
+#else
+                    Map.lookup name (moduleNameProvidersMap (hsc_units environment)) >>= Map.lookup resolved
+#endif
+                  unit = case origin of
+                    Just ModOrigin {fromExposedReexport = exposed, fromOrigUnit = original}
+                      | original /= Just True, exposing : _ <- exposed -> Just exposing
+                    _ -> definingUnit
+                  key = Text.pack (show (invocation.invocationCompilerLibDir, invocation.invocationCompilerVersion,
+                          unitString (moduleUnit resolved), GHC.moduleNameString name,
+                          fmap (\value -> (unitIdString (unitId value), show (unitAbiHash value))) unit,
+                          fmap (show . unitAbiHash) definingUnit))
+              cached <- case Map.lookup (ModuleName (Text.pack (GHC.moduleNameString name))) memoryLibraries of
+                Just symbols -> pure (Just symbols)
+                Nothing -> liftIO (readLibraryCache key)
+              case cached of
+                Just symbols -> pure (symbols, True, Nothing)
+                Nothing -> do
+                  projected <- moduleSymbols resolved Map.empty
+                  let symbols = [symbol
+                        { indexedModule = ModuleName (Text.pack (GHC.moduleNameString name))
+                        , indexedUnit = maybe symbol.indexedUnit (Text.pack . unitIdString . unitId) unit
+                        , indexedPackage = maybe symbol.indexedPackage (Text.pack . unitPackageNameString) unit
+                        , indexedPackageVersion = maybe symbol.indexedPackageVersion (Text.pack . showVersion . unitPackageVersion) unit
+                        } | symbol <- projected]
+                  liftIO (writeLibraryCache key symbols)
+                  pure (symbols, False, Nothing)
+      GHC.setTargets previousTargets
+      dependentFiles <- fmap concat $ forM (GHC.mgModSummaries loadedGraph) $ \summary -> do
+        info <- GHC.getModuleInfo (GHC.ms_mod summary)
+        pure [usageFilePath usage | interface <- maybe [] pure (info >>= GHC.modInfoIface),
+              usage@UsageFile {} <- mi_usages interface]
+      versions <- liftIO (sourceVersions documents (nub (paths <> dependentFiles)))
+      after <- liftIO (sourceVersions documents (nub paths))
+      let localCurrent = before == after && Set.fromList paths == Set.fromList
+            (catMaybes (map (GHC.ml_hs_file . GHC.ms_location) (GHC.mgModSummaries loadedGraph)))
+          localSymbols = if localCurrent then local else []
+          skipped = catMaybes [warning | (_, _, warning) <- libraries]
+          warnings = ["Local component failed to typecheck; local index is unavailable" | GHC.Failed <- [loaded]]
+            <> ["Sources changed while indexing; refresh to obtain local symbols" | not localCurrent]
+            <> ["Unavailable or ambiguous library modules: " <> Text.intercalate ", " (take 20 skipped) | not (null skipped)]
+          complete = case loaded of GHC.Succeeded -> localCurrent && null skipped; GHC.Failed -> False
+          -- Library ABIs and compiler options are fixed for this engine's
+          -- lifetime. Its UI scope additionally includes worker/session IDs.
+          revision = contentHash (Text.pack (show (documentVersions documents, versions, complete, warnings)))
+          index = SymbolIndexStore (documentVersions documents) versions
+            (localSymbols <> concat [symbols | (symbols, _, _) <- libraries])
+            (concat [symbols | (symbols, _, _) <- libraries])
+            (case loaded of GHC.Succeeded | localCurrent -> length (GHC.mgModSummaries loadedGraph); _ -> 0)
+            (length [() | (_, _, Nothing) <- libraries]) (length [() | (_, True, _) <- libraries]) warnings complete revision
+      -- Retain usable library authority even when the local graph failed.
+      -- Incomplete coverage is never reused as a complete search cache hit.
+      liftIO (writeIORef reference (Just index))
+      pure index
+
+usageFilePath :: Usage -> FilePath
+usageFilePath UsageFile {usg_file_path = path} =
+#if MIN_VERSION_ghc(9,8,0)
+  unpackFS path
+#else
+  path
+#endif
+usageFilePath _ = error "Expected GHC UsageFile"
+
+moduleSymbols :: GHC.Module -> Map GHC.Module DocumentSnapshot -> GHC.Ghc [IndexedSymbol]
+moduleSymbols exportedModule sources = do
+  info <- GHC.getModuleInfo exportedModule
+  environment <- GHC.getSession
+  let unit = lookupUnit (hsc_units environment) (moduleUnit exportedModule)
+      package = maybe "workspace" (Text.pack . unitPackageNameString) unit
+      version = maybe "" (Text.pack . showVersion . unitPackageVersion) unit
+  fmap catMaybes $ forM (maybe [] GHC.modInfoExports info) $ \name -> do
+    thing <- GHC.lookupName name
+    pure $ do
+      value <- thing
+      -- Keep the public import route separate from the defining source. A
+      -- local re-export can point into another open or closed home module.
+      let source = nameModule_maybe name >>= (`Map.lookup` sources)
+          snapshot = maybe (DocumentSnapshot (DocumentId "interface") "" (TextRevision 0) (ContentHash 0) "" UnknownLineEndings) id source
+          types = execState (mapM_ recordType (semanticTypesForThing value) >> case value of ATyCon constructor -> void (recordTypeConstructor constructor); _ -> pure ()) Map.empty
+          range = sourceRangeFor snapshot (nameSrcSpan name)
+          declaration = Declaration (DeclarationId ("ghc:" <> stableNameIdentity name)) (nameText name)
+            (declarationKindFor value) range range (typeIdentity <$> typeOfThing value)
+            (renderType <$> typeOfThing value) (fmap (fmap Just) (typeDeclarationSemanticsFor snapshot value))
+      pure (IndexedSymbol declaration types (ModuleName (Text.pack (GHC.moduleNameString (moduleName exportedModule))))
+        (Text.pack (unitString (moduleUnit exportedModule))) package version
+        (snapshotPath <$> source) (snapshotContentHash <$> source))
+
+-- Only immutable library interface projections are persisted. Unsaved and
+-- local source text never enters this cache. Cache failures are non-fatal.
+libraryCachePath :: Text -> IO FilePath
+libraryCachePath key = do
+  root <- getXdgDirectory XdgCache "visual-haskell/symbol-index/v2"
+  pure (root </> show (contentHash key).unContentHash <.> "json")
+
+readLibraryCache :: Text -> IO (Maybe [IndexedSymbol])
+readLibraryCache key = do
+  attempted <- try $ do
+    path <- libraryCachePath key
+    bytes <- LazyBytes.readFile path
+    pure $ case eitherDecode bytes of
+      Right (storedKey, symbols) | storedKey == key -> Just symbols
+      _ -> Nothing
+  pure (either (const Nothing) id (attempted :: Either IOException (Maybe [IndexedSymbol])))
+
+writeLibraryCache :: Text -> [IndexedSymbol] -> IO ()
+writeLibraryCache key symbols = do
+  attempted <- try $ do
+    path <- libraryCachePath key
+    createDirectoryIfMissing True (takeDirectory path)
+    withTempFile (takeDirectory path) "index.tmp" $ \temporary handle -> do
+      LazyBytes.hPut handle (encode (key, symbols))
+      hClose handle
+      renameFile temporary path
+  either (\(_ :: IOException) -> pure ()) pure attempted
+
 answerComposition
   :: CompilerInvocation -> Map DocumentId DocumentSnapshot -> DocumentId -> CompositionQuery -> Maybe QueryContext
+  -> [IndexedSymbol]
   -> GHC.Ghc (Either GhcAnalysisFailure CompositionResult)
-answerComposition invocation documents document query context = case (Map.lookup document documents, context) of
+answerComposition invocation documents document query context indexed = case (Map.lookup document documents, context) of
   (Just snapshot, Just current)
     | current.contextDocument == snapshot
     , current.contextVersions == documentVersions documents
@@ -426,22 +683,40 @@ answerComposition invocation documents document query context = case (Map.lookup
             info <- GHC.getModuleInfo (GHC.ms_mod summary)
             let names = maybe [] (maybe [] id . GHC.modInfoTopLevelScope) info
                 declared = Map.fromList
-                  [(DeclarationId ("ghc:" <> stableNameIdentity name), nameText name) | name <- names,
+                  [(DeclarationId ("ghc:" <> stableNameIdentity name), Left (nameText name)) | name <- names,
                     sourceRangeFor snapshot (nameSrcSpan name) /= Nothing]
-            case traverse (`Map.lookup` declared) query.compositionFunctions of
+                available = Map.union declared (Map.fromList [(symbol.indexedDeclaration.declarationId, Right symbol) | symbol <- indexed, symbolFunction symbol /= Nothing])
+            case traverse (`Map.lookup` available) query.compositionFunctions of
               Nothing -> pure unavailable
-              Just functions -> do
+              Just selected -> do
                 environment <- GHC.getSession
                 GHC.handleSourceError
                   (\exception -> do
                     GHC.setSession environment
                     pure (Right (CompositionResult query False Nothing (Just (Text.pack (show exception)))))) $ do
                   modifySession (hscSetActiveUnitId (toUnitId (moduleUnit (GHC.ms_mod summary))))
-                  GHC.setContext [GHC.IIModule (GHC.ms_mod_name summary)]
-                  let body = foldl (\input function -> "(" <> function <> ") (" <> input <> ")") "vhInput" functions
-                  inferred <- GHC.exprType GHC.TM_Inst (Text.unpack ("(\\vhInput -> " <> body <> ")"))
-                  GHC.setSession environment
-                  pure (Right (CompositionResult query True (Just (renderType inferred)) Nothing))
+                  importsAndFunctions <- forM (zip [0 :: Int ..] selected) $ \(offset, entry) -> case entry of
+                    Left function -> pure (Nothing, function, Nothing)
+                    Right symbol -> do
+                      let alias = "VHIndex" <> Text.pack (show offset)
+                          function = alias <> "." <> symbol.indexedDeclaration.declarationName
+                      imported <- GHC.parseImportDecl ("import qualified " <> Text.unpack symbol.indexedModule.unModuleName <> " as " <> Text.unpack alias)
+                      pure (Just (GHC.IIDecl imported), function, Just symbol.indexedDeclaration.declarationId)
+                  GHC.setContext (GHC.IIModule (GHC.ms_mod_name summary) : catMaybes [imported | (imported, _, _) <- importsAndFunctions])
+                  identities <- forM importsAndFunctions $ \(_, function, expected) -> case expected of
+                    Nothing -> pure True
+                    Just identifier -> do
+                      resolved <- GHC.parseName (Text.unpack function)
+                      pure (any (\name -> DeclarationId ("ghc:" <> stableNameIdentity name) == identifier) resolved)
+                  let functions = [function | (_, function, _) <- importsAndFunctions]
+                      freshBinder offset = let candidate = "vhInput" <> Text.pack (show (offset :: Int))
+                        in if candidate `elem` functions then freshBinder (offset + 1) else candidate
+                      binder = freshBinder 0
+                      body = foldl (\input function -> "(" <> function <> ") (" <> input <> ")") binder functions
+                  if not (and identities) then GHC.setSession environment >> pure unavailable else do
+                    inferred <- GHC.exprType GHC.TM_Inst (Text.unpack ("(\\" <> binder <> " -> " <> body <> ")"))
+                    GHC.setSession environment
+                    pure (Right (CompositionResult query True (Just (renderType inferred)) Nothing))
   _ -> pure unavailable
   where
     unavailable = Left (failure "composition-unavailable" "Composition requires current, successfully typechecked function declarations" True)

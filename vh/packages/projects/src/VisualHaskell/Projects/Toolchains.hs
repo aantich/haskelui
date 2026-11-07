@@ -42,7 +42,7 @@ supportedCompilerVersions :: [Text]
 supportedCompilerVersions = ["9.6.7", "9.10.3"]
 
 workerApiVersion :: Int
-workerApiVersion = 3
+workerApiVersion = 5
 
 compilerFingerprintFor :: Text -> Text -> Text -> Text
 compilerFingerprintFor version target unit = Text.pack (show (unContentHash (contentHash (Text.pack (show (version, target, unit))))))

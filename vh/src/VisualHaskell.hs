@@ -148,9 +148,21 @@ data EditorModel = EditorModel
   , typeDiagramState :: !TypeDiagram.TypeDiagramState
   , functionsInspectorDebug :: !Bool
   , selectedFunction :: !(Maybe Semantic.DeclarationId)
+  , symbolGlobal :: !Bool
+  , symbolSearchText :: !Text
+  , symbolSearchKind :: !Semantic.SymbolKind
+  , symbolSearchOffset :: !Int
+  , symbolSearchRequest :: !(Maybe (AnalysisProtocol.RequestId, Semantic.DocumentSnapshot, Semantic.ContentHash, Semantic.SymbolQuery))
+  , symbolRequestContext :: !(Maybe (Semantic.WorkspaceGeneration, Maybe AnalysisClient.WorkerGeneration, Semantic.SessionId, Semantic.ContentHash))
+  , symbolSearchResult :: !(Maybe Semantic.SymbolSearchResult)
+  , symbolIndexContext :: !(Maybe (Semantic.WorkspaceGeneration, Maybe AnalysisClient.WorkerGeneration, Semantic.SessionId, Semantic.ContentHash))
+  , indexedSymbols :: !(Map Semantic.DeclarationId Semantic.IndexedSymbol)
+  , indexedStale :: !(Set Semantic.DeclarationId)
+  , symbolIndexRevision :: !(Maybe Semantic.ContentHash)
+  , symbolSearchStatus :: !Text
   , functionCanvas :: !FunctionCanvas.FunctionCanvas
   , functionCanvasDocument :: !(Maybe Semantic.DocumentId)
-  , functionCanvasRequest :: !(Maybe (AnalysisProtocol.RequestId, Semantic.DocumentSnapshot, AnalysisProtocol.CompositionQuery))
+  , functionCanvasRequest :: !(Maybe (AnalysisProtocol.RequestId, Semantic.DocumentSnapshot, AnalysisProtocol.CompositionQuery, Semantic.ContentHash))
   , functionCanvasResult :: !(Maybe AnalysisProtocol.CompositionResult)
   , functionCanvasStatus :: !Text
   , selectedProblem :: !(Maybe CollectionItemKey)
@@ -265,6 +277,16 @@ clearFunctionsCommand = CommandId 15
 functionsListKey, functionCanvasKey :: ElementKey
 functionsListKey = ElementKey 260
 functionCanvasKey = ElementKey 263
+
+symbolScopeKey, symbolSearchKey, symbolKindKey :: ElementKey
+symbolScopeKey = ElementKey 290
+symbolSearchKey = ElementKey 291
+symbolKindKey = ElementKey 292
+
+refreshSymbolsCommand, previousSymbolsCommand, nextSymbolsCommand :: CommandId
+refreshSymbolsCommand = CommandId 23
+previousSymbolsCommand = CommandId 24
+nextSymbolsCommand = CommandId 25
 
 projectTreeKey :: ElementKey
 projectTreeKey = ElementKey 100
@@ -448,6 +470,18 @@ initialModel =
     , typeDiagramState = TypeDiagram.initialTypeDiagramState
     , functionsInspectorDebug = False
     , selectedFunction = Nothing
+    , symbolGlobal = False
+    , symbolSearchText = ""
+    , symbolSearchKind = Semantic.FunctionSymbols
+    , symbolSearchOffset = 0
+    , symbolSearchRequest = Nothing
+    , symbolRequestContext = Nothing
+    , symbolSearchResult = Nothing
+    , symbolIndexContext = Nothing
+    , indexedSymbols = Map.empty
+    , indexedStale = Set.empty
+    , symbolIndexRevision = Nothing
+    , symbolSearchStatus = "Choose workspace scope to index local modules and visible libraries"
     , functionCanvas = FunctionCanvas.emptyFunctionCanvas
     , functionCanvasDocument = Nothing
     , functionCanvasRequest = Nothing
@@ -517,6 +551,9 @@ render model =
         , CommandSpec saveCommand "Save" (Just "s") (maybe False documentDirty activeDocument)
         , CommandSpec addFunctionCommand "Add Function to Canvas" Nothing (model.selectedFunction /= Nothing)
         , CommandSpec clearFunctionsCommand "Clear Function Canvas" Nothing (not (null model.functionCanvas.canvasNodes))
+        , CommandSpec refreshSymbolsCommand "Refresh Component Symbol Index" Nothing model.symbolGlobal
+        , CommandSpec previousSymbolsCommand "Previous Symbol Page" Nothing (model.symbolGlobal && model.symbolSearchOffset > 0)
+        , CommandSpec nextSymbolsCommand "Next Symbol Page" Nothing (model.symbolGlobal && maybe False (\result -> result.symbolSearchTotal > model.symbolSearchOffset + 50) (currentSymbolResult model))
         , CommandSpec reloadProjectCommand "Reload / Retry Haskell Project" Nothing model.analysisWorkspaceTrusted
         , CommandSpec cancelProjectCommand "Cancel Project Operation" Nothing model.analysisWorkspaceTrusted
         , CommandSpec revokeTrustCommand "Revoke Workspace Analysis Trust" Nothing model.analysisWorkspaceTrusted
@@ -1161,45 +1198,136 @@ functionsInspectorItems model =
         ]
       else
         [ topStretchInspectorItem 122 12 12
-            (setControlFrame (Rect 0 0 250 90) (debugTextControl 234 (functionCanvasMessage model)))
-        , topStretchInspectorItem 222 12 12
+            (ChoicePicker (ChoiceControlSpec symbolScopeKey (Rect 0 0 250 28)
+              [ChoiceItem (ChoiceKey 0) (ControlLabel "Current file" Nothing) True, ChoiceItem (ChoiceKey 1) (ControlLabel "Component + libraries" Nothing) True]
+              (Just (ChoiceKey (if model.symbolGlobal then 1 else 0))) True))
+        , topStretchInspectorItem 158 12 12
+            (TextField symbolSearchKey (Rect 0 0 250 28) model.symbolSearchText "Search name, module, package or type" False)
+        , topStretchInspectorItem 194 12 12
+            (ChoicePicker (ChoiceControlSpec symbolKindKey (Rect 0 0 250 28)
+              [ChoiceItem (ChoiceKey 0) (ControlLabel "Functions" Nothing) True, ChoiceItem (ChoiceKey 1) (ControlLabel "Types / classes" Nothing) True, ChoiceItem (ChoiceKey 2) (ControlLabel "All symbols" Nothing) True]
+              (Just (ChoiceKey (case model.symbolSearchKind of Semantic.FunctionSymbols -> 0; Semantic.TypeSymbols -> 1; Semantic.AllSymbols -> 2))) model.symbolGlobal))
+        , topStretchInspectorItem 230 12 12
+            (setControlFrame (Rect 0 0 250 72) (debugTextControl 234 (paletteStatus model <> "\n" <> functionCanvasMessage model)))
+        , topStretchInspectorItem 310 12 12
             ( ListView CollectionControlSpec
                 { collectionControlKey = functionsListKey
                 , collectionControlFrame = Rect 0 0 250 132
-                , collectionControlItems = [CollectionItem (functionItemKey node) node.functionName node.functionSignature Nothing 0 False False | node <- functionsFor model]
+                , collectionControlItems = paletteItems model
                 , collectionControlSelectionMode = SingleCollectionSelection
-                , collectionControlSelection = [functionItemKey node | node <- functionsFor model, Just node.functionIdentity == model.selectedFunction]
+                , collectionControlSelection = [key | identifier <- maybeToList model.selectedFunction,
+                    let key = CollectionItemKey (stableTextIdentity identifier.unDeclarationId),
+                    any ((== key) . (.collectionItemKey)) (paletteItems model)]
                 , collectionControlRowSizing = ContentSizedRows
                 , collectionControlEnabled = True
                 })
-        , fixedInspectorItem 12 364 (Button (ElementKey 261) (Rect 0 0 136 30) "Add function" addFunctionCommand
+        , fixedInspectorItem 12 452 (Button (ElementKey 261) (Rect 0 0 136 30) "Add function" addFunctionCommand
             (any (\node -> Just node.functionIdentity == model.selectedFunction) (functionsFor model)))
-        , fixedInspectorItem 160 364 (Button (ElementKey 262) (Rect 0 0 100 30) "Clear" clearFunctionsCommand (not (null model.functionCanvas.canvasNodes)))
-        , fillInspectorItem 406 8 8 8
+        , fixedInspectorItem 160 452 (Button (ElementKey 262) (Rect 0 0 100 30) "Clear" clearFunctionsCommand (not (null model.functionCanvas.canvasNodes)))
+        , fixedInspectorItem 12 492 (Button (ElementKey 293) (Rect 0 0 74 28) "Previous" previousSymbolsCommand (model.symbolGlobal && model.symbolSearchOffset > 0))
+        , fixedInspectorItem 92 492 (Button (ElementKey 294) (Rect 0 0 74 28) "Next" nextSymbolsCommand
+            (model.symbolGlobal && maybe False (\result -> result.symbolSearchTotal > model.symbolSearchOffset + 50) (currentSymbolResult model)))
+        , fixedInspectorItem 172 492 (Button (ElementKey 295) (Rect 0 0 88 28) "Refresh" refreshSymbolsCommand model.symbolGlobal)
+        , fillInspectorItem 530 8 8 8
             (FunctionCanvas.functionCanvasSurface functionCanvasKey model.systemColorScheme (functionsFor model)
               (if currentComposition model then AnalysisProtocol.compositionValid <$> model.functionCanvasResult else Nothing) model.functionCanvas)
         ]
 
-functionsFor :: EditorModel -> [Semantic.FunctionNode Semantic.RevisionedSourceRange]
-functionsFor model = case selectedDocument model of
+functionsFor :: EditorModel -> [Semantic.FunctionNode (Maybe Semantic.RevisionedSourceRange)]
+functionsFor model = Map.elems (Map.union local indexed)
+  where
+    local = Map.fromList [(node.functionIdentity, fmap Just node) | node <- localFunctions model]
+    indexed = if indexContextIsCurrent model
+      then Map.mapMaybe Semantic.symbolFunction model.indexedSymbols else Map.empty
+
+localFunctions :: EditorModel -> [Semantic.FunctionNode Semantic.RevisionedSourceRange]
+localFunctions model = case selectedDocument model of
   Just document | documentAnalysisIsCurrent model document
     , Just snapshot <- Map.lookup (analysisDocumentId document) model.analysisSnapshots
     , snapshot.analysisCompleteness == Semantic.Typechecked -> Semantic.buildFunctionUniverse snapshot
   _ -> []
+
+indexContextFor :: EditorModel -> Maybe (Semantic.WorkspaceGeneration, Maybe AnalysisClient.WorkerGeneration, Semantic.SessionId, Semantic.ContentHash)
+indexContextFor model = (\session -> (model.analysisWorkspaceGeneration, model.analysisWorkerGeneration, session, analysisInputs model)) <$> analysisSession model
+
+indexContextIsCurrent :: EditorModel -> Bool
+indexContextIsCurrent model = model.analysisWorkspaceTrusted && model.symbolIndexContext /= Nothing
+  && model.symbolIndexContext == indexContextFor model
+  && maybe False (documentAnalysisIsCurrent model) (selectedDocument model)
+
+currentSymbolResult :: EditorModel -> Maybe Semantic.SymbolSearchResult
+currentSymbolResult model
+  | indexContextIsCurrent model = model.symbolSearchResult >>= \result ->
+      if result.symbolSearchQuery == symbolQueryFor model then Just result else Nothing
+  | otherwise = Nothing
+
+symbolQueryFor :: EditorModel -> Semantic.SymbolQuery
+symbolQueryFor model = Semantic.SymbolQuery model.symbolSearchText model.symbolSearchKind model.symbolSearchOffset 50
+  (take 64 (nub (map snd model.functionCanvas.canvasNodes)))
+
+paletteItems :: EditorModel -> [CollectionItem]
+paletteItems model
+  | model.symbolGlobal = [CollectionItem (CollectionItemKey (stableTextIdentity symbol.indexedDeclaration.declarationId.unDeclarationId))
+      (symbol.indexedModule.unModuleName <> "." <> symbol.indexedDeclaration.declarationName)
+      (maybe "" id symbol.indexedDeclaration.declarationSignatureText <> " · " <> symbol.indexedPackage <> " " <> symbol.indexedPackageVersion)
+      Nothing 0 False False | result <- maybe [] pure (currentSymbolResult model), symbol <- result.symbolSearchSymbols]
+  | otherwise = [CollectionItem (functionItemKey node) node.functionName node.functionSignature Nothing 0 False False
+      | node <- localFunctions model, all (`Text.isInfixOf` Text.toCaseFold (node.functionName <> " " <> node.functionSignature)) (Text.words (Text.toCaseFold model.symbolSearchText))]
+
+paletteStatus :: EditorModel -> Text
+paletteStatus model
+  | not model.symbolGlobal = "Current file functions"
+  | Just result <- currentSymbolResult model =
+      Text.pack (show result.symbolSearchTotal) <> " matches · " <> Text.pack (show result.symbolSearchLocalModules) <> " local / "
+      <> Text.pack (show result.symbolSearchLibraryModules) <> " library modules (active component)"
+      <> (if null result.symbolSearchWarnings then "" else " · " <> Text.intercalate "; " result.symbolSearchWarnings)
+      <> selectedSymbolSummary model
+  | otherwise = model.symbolSearchStatus
+
+selectedSymbolSummary :: EditorModel -> Text
+selectedSymbolSummary model = case model.selectedFunction >>= (`Map.lookup` model.indexedSymbols) of
+  Just symbol | indexContextIsCurrent model, Just semantics <- symbol.indexedDeclaration.declarationTypeSemantics ->
+    "\n" <> symbol.indexedDeclaration.declarationName <> " " <> Text.unwords (map (.typeParameterSemanticName) semantics.typeDeclarationSemanticParameters)
+      <> " · " <> case semantics.typeDeclarationSemanticDefinition of
+        Semantic.AlgebraicTypeSemantics constructors -> Text.intercalate " | " (map (.typeConstructorSemanticName) constructors)
+        Semantic.NewtypeSemantics constructor -> "newtype " <> constructor.typeConstructorSemanticName
+        Semantic.TypeAliasSemantics _ -> "type synonym"
+        Semantic.TypeClassSemantics _ methods -> "class methods: " <> Text.intercalate ", " (map (.typeMethodSemanticName) methods)
+        Semantic.TypeFamilySemantics -> "type family (reduction requires GHC)"
+        Semantic.AbstractTypeSemantics message -> message
+  _ -> ""
 
 functionItemKey :: Semantic.FunctionNode range -> CollectionItemKey
 functionItemKey node = CollectionItemKey (stableTextIdentity node.functionIdentity.unDeclarationId)
 
 currentComposition :: EditorModel -> Bool
 currentComposition model = case (selectedDocument model, model.functionCanvasRequest) of
-  (Just document, Just (_,snapshot,query)) ->
+  (Just document, Just (_,snapshot,query,inputs)) ->
     snapshot == analysisDocumentSnapshot document
       && FunctionCanvas.compositionChain model.functionCanvas == Right query.compositionFunctions
       && documentAnalysisIsCurrent model document
+      && inputs == compositionInputs model
+      && compositionSymbolsAreCurrent model query.compositionFunctions
   _ -> False
+
+-- Composition depends on the whole compiler scope, not just the active text.
+-- In particular a closed TH dependency can alter an imported type/instance
+-- without changing any open buffer or declaration identity.
+compositionInputs :: EditorModel -> Semantic.ContentHash
+compositionInputs model = Semantic.contentHash (Text.pack (show
+  (model.analysisWorkspaceGeneration, model.analysisWorkerGeneration, analysisSession model, analysisInputs model,
+   if indexContextIsCurrent model then model.symbolIndexRevision else Nothing)))
+
+compositionSymbolsAreCurrent :: EditorModel -> [Semantic.DeclarationId] -> Bool
+compositionSymbolsAreCurrent model = all (\identifier -> identifier `Set.member` local
+  || (indexContextIsCurrent model && Map.member identifier model.indexedSymbols && identifier `Set.notMember` model.indexedStale))
+  where local = Set.fromList (map (.functionIdentity) (localFunctions model))
 
 functionCanvasMessage :: EditorModel -> Text
 functionCanvasMessage model
+  | any (\identifier -> identifier `Set.member` model.indexedStale && not (compositionSymbolsAreCurrent model [identifier]))
+      (map snd model.functionCanvas.canvasNodes) =
+      "Partial index: unavailable function cards are preserved; refresh after fixing the component to check their types"
   | not (Text.null model.functionCanvas.canvasNotice) = model.functionCanvas.canvasNotice
   | not (currentComposition model) = "Connect output to input. Each wire composes one application; remaining arguments stay curried."
   | otherwise = model.functionCanvasStatus
@@ -2090,10 +2218,16 @@ applyAnalysisWorkerMessage generation envelope model
           acceptPositionResult envelope result model
         AnalysisProtocol.CompositionChecked result ->
           acceptCompositionResult envelope result model
+        AnalysisProtocol.SymbolsFound result -> acceptSymbolResult envelope result model
         AnalysisProtocol.WorkerRequestFailed (Just request) failure ->
-          if maybe False (\(identity,_,_) -> identity == request) model.functionCanvasRequest
+          if maybe False (\(identity,_,_,_) -> identity == request) model.functionCanvasRequest
             then transactionWithEffects "Report composition check failure" NoUndo []
               (\current -> current {functionCanvasStatus = AnalysisProtocol.requestFailureMessage failure})
+          else if maybe False (\(identity,_,_,_) -> identity == request) model.symbolSearchRequest
+            then transactionWithEffects "Report symbol index failure" NoUndo []
+              (\current -> current {symbolSearchStatus = AnalysisProtocol.requestFailureMessage failure,
+                symbolSearchRequest = if AnalysisProtocol.requestFailureCode failure `elem` ["stale-index-inputs", "context-not-ready"]
+                  then Nothing else current.symbolSearchRequest})
           else if any (maybe False ((== request) . fst) . (.documentQuery)) (Map.elems model.documents)
             then transactionWithEffects "Report editor query failure" NoUndo []
               (\current -> current {workspaceMessage = AnalysisProtocol.requestFailureMessage failure})
@@ -2109,6 +2243,7 @@ isSemanticResult message = case message of
   AnalysisProtocol.AnalysisCompleted _ -> True
   AnalysisProtocol.PositionQueryCompleted _ -> True
   AnalysisProtocol.CompositionChecked _ -> True
+  AnalysisProtocol.SymbolsFound _ -> True
   _ -> False
 
 beginPositionQuery :: ElementKey -> TextQueryRequest -> EditorModel -> Transaction EditorModel
@@ -2207,9 +2342,74 @@ finishDefinitionRead path result model =
        (Left message, _) -> cleared {workspaceMessage = "Could not open definition: " <> message}
        _ -> cleared
 
+completeSymbolUpdate
+  :: Maybe (ServiceEndpoint AnalysisCommand) -> EditorModel -> Transaction EditorModel -> Transaction EditorModel
+completeSymbolUpdate endpoint previous update = case (endpoint, selectedDocument updated) of
+  (Just serviceEndpoint, Just document)
+    | symbolSearchWanted updated
+    , documentAnalysisIsCurrent updated document
+    , Just snapshot <- Map.lookup (analysisDocumentId document) updated.analysisSnapshots
+    , snapshot.analysisCompleteness == Semantic.Typechecked
+    , let query = symbolQueryFor updated
+    , currentSymbolResult updated == Nothing
+    , not (updated.symbolRequestContext == indexContextFor updated && maybe False (\(_, old, inputs, oldQuery) -> old == analysisDocumentSnapshot document
+          && inputs == analysisInputs updated && oldQuery == query) updated.symbolSearchRequest) ->
+        appendRuntimeCommands [startTask (TaskKey "visual-haskell.symbol-search") ApplicationScope ReplaceRunning
+          "Debounce component symbol search" (const (threadDelay 250000))
+          (\outcome -> externalEvent "Search current component symbols" $ \current -> case outcome of
+            TaskSucceeded () -> beginSymbolSearch serviceEndpoint current
+            _ -> noTransaction)] update
+  _ -> update
+  where updated = applyTransaction update previous
+
+symbolSearchWanted :: EditorModel -> Bool
+symbolSearchWanted model = model.workspaceOpen && model.analysisWorkspaceTrusted
+  && ((model.symbolGlobal && model.selectedInspectorTab == functionsInspectorTabKey && not model.functionsInspectorDebug)
+      || any (`Map.member` model.indexedSymbols) (map snd model.functionCanvas.canvasNodes))
+
+beginSymbolSearch :: ServiceEndpoint AnalysisCommand -> EditorModel -> Transaction EditorModel
+beginSymbolSearch endpoint model = case (selectedDocument model, model.analysisComponent) of
+  (Just document, Just component)
+    | symbolSearchWanted model, documentAnalysisIsCurrent model document ->
+      let identity = AnalysisProtocol.RequestId model.nextQueryIdentity
+          snapshot = analysisDocumentSnapshot document
+          query = symbolQueryFor model
+          inputs = analysisInputs model
+       in transactionWithCommands "Search component and library exports" NoUndo
+            [sendService endpoint (WithAnalysisInputs inputs (RequestSymbolSearch model.analysisWorkspaceGeneration
+              (analysisWorkspaceId model) component.componentSession snapshot identity query))]
+            (\current -> current {symbolSearchRequest = Just (identity, snapshot, inputs, query), symbolRequestContext = indexContextFor current,
+              symbolSearchStatus = "Indexing active component and visible libraries…", nextQueryIdentity = current.nextQueryIdentity + 1})
+  _ -> noTransaction
+
+acceptSymbolResult
+  :: AnalysisProtocol.ProtocolEnvelope AnalysisProtocol.WorkerMessage
+  -> Semantic.SymbolSearchResult -> EditorModel -> Transaction EditorModel
+acceptSymbolResult envelope result model = case (model.symbolSearchRequest, selectedDocument model) of
+  (Just (identity, snapshot, inputs, query), Just document)
+    | envelope.envelopeRequestId == Just identity
+    , envelope.envelopeWorkspace == Just (analysisWorkspaceId model)
+    , envelope.envelopeSession == analysisSession model
+    , envelope.envelopeDocument == Just snapshot.snapshotDocumentId
+    , envelope.envelopeRevision == Just snapshot.snapshotRevision
+    , envelope.envelopeContentHash == Just snapshot.snapshotContentHash
+    , inputs == analysisInputs model
+    , snapshot == analysisDocumentSnapshot document
+    , query == result.symbolSearchQuery
+    , query == symbolQueryFor model
+    , documentAnalysisIsCurrent model document ->
+        transactionWithEffects "Accept current component symbols" NoUndo [] $ \current ->
+          let (symbols, stale) = Semantic.reconcileSymbolPage result current.indexedSymbols
+           in current
+             {symbolSearchResult = Just result, symbolIndexContext = indexContextFor current,
+              symbolIndexRevision = Just result.symbolSearchRevision,
+              indexedSymbols = symbols, indexedStale = stale,
+              symbolSearchStatus = if result.symbolSearchComplete then "Symbol index ready" else "Partial symbol index"}
+  _ -> noTransaction
+
 completeSemanticUpdate
   :: Maybe (ServiceEndpoint AnalysisCommand) -> EditorModel -> Transaction EditorModel -> Transaction EditorModel
-completeSemanticUpdate endpoint previous initial =
+completeSemanticUpdate endpoint previous initial = completeSymbolUpdate endpoint previous $
   case (endpoint, selectedDocument updated, FunctionCanvas.compositionChain updated.functionCanvas) of
     (Just serviceEndpoint, Just document, Right chain)
       | length chain >= 2
@@ -2218,12 +2418,14 @@ completeSemanticUpdate endpoint previous initial =
       , snapshot.analysisCompleteness == Semantic.Typechecked
       , Just component <- updated.analysisComponent
       , all (\identifier -> any ((== identifier) . (.functionIdentity)) (functionsFor updated)) chain
+      , compositionSymbolsAreCurrent updated chain
       , let query = AnalysisProtocol.CompositionQuery chain
       , let documentSnapshot = analysisDocumentSnapshot document
-      , not (maybe False (\(_,oldSnapshot,oldQuery) -> oldSnapshot == documentSnapshot && oldQuery == query) updated.functionCanvasRequest) ->
+      , let inputs = compositionInputs updated
+      , not (maybe False (\(_,oldSnapshot,oldQuery,oldInputs) -> oldSnapshot == documentSnapshot && oldQuery == query && oldInputs == inputs) updated.functionCanvasRequest) ->
           let identity = AnalysisProtocol.RequestId updated.nextQueryIdentity
               change current = current
-                { functionCanvasRequest = Just (identity, documentSnapshot, query)
+                { functionCanvasRequest = Just (identity, documentSnapshot, query, inputs)
                 , functionCanvasResult = Nothing
                 , functionCanvasStatus = "GHC is checking the complete composition…"
                 , nextQueryIdentity = current.nextQueryIdentity + 1
@@ -2241,7 +2443,9 @@ completeSemanticUpdate endpoint previous initial =
         | documentAnalysisIsCurrent rawUpdated currentDocument
         , Just snapshot <- Map.lookup (analysisDocumentId currentDocument) rawUpdated.analysisSnapshots
         , snapshot.analysisCompleteness == Semantic.Typechecked ->
-            FunctionCanvas.retainFunctions (fmap (.functionIdentity) (functionsFor rawUpdated)) rawUpdated.functionCanvas
+            if not (indexContextIsCurrent rawUpdated) && any (`Map.member` rawUpdated.indexedSymbols) (map snd rawUpdated.functionCanvas.canvasNodes)
+              then rawUpdated.functionCanvas
+              else FunctionCanvas.retainFunctions (fmap (.functionIdentity) (functionsFor rawUpdated)) rawUpdated.functionCanvas
       _ -> rawUpdated.functionCanvas
     initiallyUpdated = rawUpdated {functionCanvas = retainedCanvas}
     prepared = if retainedCanvas == rawUpdated.functionCanvas then initial
@@ -2273,7 +2477,7 @@ acceptCompositionResult
   -> AnalysisProtocol.CompositionResult -> EditorModel -> Transaction EditorModel
 acceptCompositionResult envelope result model =
   case model.functionCanvasRequest of
-    Just (identity, snapshot, query)
+    Just (identity, snapshot, query, _)
       | envelope.envelopeRequestId == Just identity
       , envelope.envelopeWorkspace == Just (analysisWorkspaceId model)
       , envelope.envelopeSession == analysisSession model
@@ -2295,12 +2499,25 @@ acceptCompositionResult envelope result model =
 handleFunctionsCanvasInput :: DrawingInput -> EditorModel -> Transaction EditorModel
 handleFunctionsCanvasInput input model
   | null (functionsFor model) = noTransaction
-  | otherwise = transactionWithEffects "Interact with function composition" NoUndo [] $ \current ->
-      let (canvas, activated) = FunctionCanvas.handleFunctionCanvasInput input current.functionCanvas
-          moved = current {functionCanvas = canvas}
-       in case (activated >>= (\identity -> find ((== identity) . (.functionIdentity)) (functionsFor model)), selectedDocument model) of
-         (Just node, Just document) -> revealSource document node.functionRange moved
-         _ -> moved
+  | otherwise =
+      let (canvas, activated) = FunctionCanvas.handleFunctionCanvasInput input model.functionCanvas
+          moved = model {functionCanvas = canvas}
+       in case activated of
+         Just identifier | Just node <- find ((== identifier) . (.functionIdentity)) (localFunctions model)
+           , Just document <- selectedDocument model ->
+             transactionWithEffects "Go to local function" NoUndo [] (const (revealSource document node.functionRange moved))
+         Just identifier | Just symbol <- Map.lookup identifier model.indexedSymbols, indexContextIsCurrent model ->
+           if identifier `Set.member` model.indexedStale
+             then transactionWithEffects "Indexed source unavailable" NoUndo []
+               (const moved {workspaceMessage = "This function is unavailable in the partial index; fix the component and refresh"})
+             else case (symbol.indexedSourcePath, symbol.indexedSourceHash, symbol.indexedDeclaration.declarationSelectionRange) of
+               (Just path, Just hashValue, Just range) -> navigateDefinition (AnalysisProtocol.DefinitionTarget path range hashValue) moved
+               _ -> transactionWithEffects "Dependency source unavailable" NoUndo []
+                 (const moved {workspaceMessage = "Source location is unavailable for this export; library interfaces are read-only"})
+         _ -> transactionWithEffects "Interact with function composition" NoUndo [] $ const $
+           case (activated >>= (\identity -> find ((== identity) . (.functionIdentity)) (functionsFor model)), selectedDocument model) of
+             (Just node, Just document) | Just range <- node.functionRange -> revealSource document range moved
+             _ -> moved
 
 acceptAnalysisResult
   :: AnalysisClient.WorkerGeneration
@@ -2519,6 +2736,12 @@ handleEventWithoutPersistence event model =
             NoUndo
             (editorProperties.systemColorScheme .= scheme)
     CommandInvoked command
+      | command == refreshSymbolsCommand -> transactionWithEffects "Refresh symbol palette" NoUndo []
+          (\current -> current {symbolSearchRequest = Nothing, symbolSearchResult = Nothing})
+      | command == previousSymbolsCommand -> transactionWithEffects "Previous symbol page" NoUndo []
+          (\current -> current {symbolSearchOffset = max 0 (current.symbolSearchOffset - 50)})
+      | command == nextSymbolsCommand -> transactionWithEffects "Next symbol page" NoUndo []
+          (\current -> current {symbolSearchOffset = current.symbolSearchOffset + 50})
       | command == addFunctionCommand ->
           case model.selectedFunction of
             Just identifier | any ((== identifier) . (.functionIdentity)) (functionsFor model) ->
@@ -2606,6 +2829,8 @@ handleEventWithoutPersistence event model =
                 (insertDocumentAction readPath readContents)
     TextChanged changedKey changedContents | changedKey == compilerPathKey ->
       transactionWithEffects "Edit compiler executable path" NoUndo [] (\current -> current {analysisCompilerDraft = changedContents})
+    TextChanged changedKey changedContents | changedKey == symbolSearchKey ->
+      transactionWithEffects "Search symbols" NoUndo [] (\current -> current {symbolSearchText = changedContents, symbolSearchOffset = 0})
     TextChanged changedKey changedContents ->
       case find ((== changedKey) . (.documentEditorKey)) (Map.elems model.documents) of
         Nothing -> noTransaction
@@ -2627,6 +2852,11 @@ handleEventWithoutPersistence event model =
             NoUndo
             (editorProperties.functionsInspectorDebug .= (value == ToggleOn))
     ChoiceChanged key selected
+      | key == symbolScopeKey -> transactionWithEffects "Set symbol scope" NoUndo []
+          (\current -> current {symbolGlobal = selected == Just (ChoiceKey 1), symbolSearchOffset = 0})
+      | key == symbolKindKey -> transactionWithEffects "Set symbol kind" NoUndo []
+          (\current -> current {symbolSearchKind = case selected of Just (ChoiceKey 1) -> Semantic.TypeSymbols; Just (ChoiceKey 2) -> Semantic.AllSymbols; _ -> Semantic.FunctionSymbols,
+                               symbolSearchOffset = 0})
       | key == compilerChoiceKey, model.analysisWorkspaceTrusted ->
           case selected of
             Just (ChoiceKey 0) -> setCompilerOverride Nothing model
@@ -2661,7 +2891,11 @@ handleEventWithoutPersistence event model =
       | key == outlineListKey -> selectOutline selectedKey model
       | key == functionsListKey ->
           transactionWithEffects "Select function" NoUndo []
-            (\current -> current {selectedFunction = Semantic.functionIdentity <$> find ((== selectedKey) . functionItemKey) (functionsFor model)})
+            (\current -> current {selectedFunction = if model.symbolGlobal
+              then Semantic.declarationId . Semantic.indexedDeclaration <$> find
+                (\symbol -> CollectionItemKey (stableTextIdentity symbol.indexedDeclaration.declarationId.unDeclarationId) == selectedKey)
+                (maybe [] (.symbolSearchSymbols) (currentSymbolResult model))
+              else Semantic.functionIdentity <$> find ((== selectedKey) . functionItemKey) (functionsFor model)})
     CollectionExpansionChanged key itemKey expanded
       | key == projectTreeKey -> setProjectExpansion itemKey expanded model
     TabSelected tabKey

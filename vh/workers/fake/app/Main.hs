@@ -101,6 +101,9 @@ loop configuration state = do
         CheckComposition _ -> do
           sendFailure envelope "composition-unsupported" "The deterministic fake worker does not provide composition checks"
           loop configuration state
+        QuerySymbols _ -> do
+          sendFailure envelope "index-unsupported" "The deterministic fake worker does not provide a semantic index"
+          loop configuration state
         CancelRequest _ -> loop configuration state
         DiscoverProject _ -> send envelope (ProjectDiscovered emptyProjectCatalog) >> loop configuration state
         PrepareComponent _ -> sendFailure envelope "unsupported" "Fake worker has no project preparation" >> loop configuration state
