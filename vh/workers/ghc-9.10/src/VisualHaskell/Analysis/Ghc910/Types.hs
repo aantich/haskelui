@@ -6,6 +6,7 @@ module VisualHaskell.Analysis.Ghc910.Types
   ) where
 
 import Data.Text (Text)
+import VisualHaskell.Semantic (SessionId)
 
 data CompilerInvocation = CompilerInvocation
   { invocationComponentRoot :: !FilePath
@@ -13,6 +14,10 @@ data CompilerInvocation = CompilerInvocation
   , invocationCradleDependencies :: ![FilePath]
   , invocationCompilerLibDir :: !FilePath
   , invocationCompilerVersion :: !Text
+  , invocationPrimaryUnit :: !(Maybe Text)
+  , invocationUnitRoots :: ![(Text, [FilePath])]
+  , invocationSessionIdentity :: !(Maybe SessionId)
+  , invocationUnitDirectories :: ![(Text, FilePath)]
   }
   deriving stock (Eq, Show)
 

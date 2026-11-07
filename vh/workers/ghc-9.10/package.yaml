@@ -11,18 +11,23 @@ copyright: 2026 Visual Haskell contributors
 
 dependencies:
   - async
+  - aeson
+  - bytestring
   - base >= 4.20.2 && < 4.21
   - containers
   - directory
   - filepath
   - ghc == 9.10.3
+  - ghc-boot
   - hie-bios >= 0.21 && < 0.22
   - mtl
   - stm
   - text
   - time
+  - unix
   - visual-haskell-analysis-protocol
   - visual-haskell-semantic-model
+  - visual-haskell-projects
 
 ghc-options:
   - -Wall
@@ -44,6 +49,8 @@ executables:
     source-dirs: app
     dependencies:
       - visual-haskell-analysis-ghc910
+      - visual-haskell-analysis-client
+      - fsnotify
     ghc-options:
       - -threaded
   visual-haskell-project-loading-spike:
@@ -58,6 +65,11 @@ executables:
       - visual-haskell-analysis-ghc910
     ghc-options:
       - -threaded
+  visual-haskell-project-loading-check:
+    main: Main.hs
+    source-dirs: integration
+    dependencies: [temporary, visual-haskell-analysis-ghc910, visual-haskell-analysis-client]
+    ghc-options: [-threaded]
 
 tests:
   visual-haskell-analysis-ghc-910-test:
@@ -78,3 +90,8 @@ extra-source-files:
   - test/fixtures/project-loading/**/*.hs
   - test/fixtures/project-loading/cabal.project
   - test/fixtures/project-loading/stack.yaml
+  - test/fixtures/project-variants/**/*.hs
+  - test/fixtures/project-variants/*.cabal
+  - test/fixtures/project-custom/**/*.hs
+  - test/fixtures/project-custom/*.hs
+  - test/fixtures/project-custom/*.cabal

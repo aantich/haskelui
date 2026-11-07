@@ -29,6 +29,18 @@ extra-source-files:
     test/fixtures/project-loading/upstream/src/Upstream.hs
     test/fixtures/project-loading/cabal.project
     test/fixtures/project-loading/stack.yaml
+    test/fixtures/project-variants/alternate/Selected.hs
+    test/fixtures/project-variants/app/Main.hs
+    test/fixtures/project-variants/bench/Main.hs
+    test/fixtures/project-variants/internal/Details.hs
+    test/fixtures/project-variants/src/Generated.hs
+    test/fixtures/project-variants/src/Variants.hs
+    test/fixtures/project-variants/standard/Selected.hs
+    test/fixtures/project-variants/test/Main.hs
+    test/fixtures/project-variants/project-variants.cabal
+    test/fixtures/project-custom/Setup.hs
+    test/fixtures/project-custom/src/Custom.hs
+    test/fixtures/project-custom/project-custom.cabal
 
 source-repository head
   type: git
@@ -46,24 +58,31 @@ library
       src
   ghc-options: -Wall -Wcompat
   build-depends:
-      async
+      aeson
+    , async
     , base >=4.20.2 && <4.21
+    , bytestring
     , containers
     , directory
     , filepath
     , ghc ==9.10.3
+    , ghc-boot
     , hie-bios ==0.21.*
     , mtl
     , stm
     , text
     , time
+    , unix
     , visual-haskell-analysis-protocol
+    , visual-haskell-projects
     , visual-haskell-semantic-model
   default-language: Haskell2010
 
 executable visual-haskell-analysis-ghc910
   main-is: Main.hs
   other-modules:
+      Coordinator
+      Session
       Paths_visual_haskell_analysis_ghc910
   autogen-modules:
       Paths_visual_haskell_analysis_ghc910
@@ -71,19 +90,60 @@ executable visual-haskell-analysis-ghc910
       app
   ghc-options: -Wall -Wcompat -threaded
   build-depends:
-      async
+      aeson
+    , async
     , base >=4.20.2 && <4.21
+    , bytestring
     , containers
     , directory
     , filepath
+    , fsnotify
     , ghc ==9.10.3
+    , ghc-boot
     , hie-bios ==0.21.*
     , mtl
     , stm
     , text
     , time
+    , unix
+    , visual-haskell-analysis-client
     , visual-haskell-analysis-ghc910
     , visual-haskell-analysis-protocol
+    , visual-haskell-projects
+    , visual-haskell-semantic-model
+  default-language: Haskell2010
+
+executable visual-haskell-project-loading-check
+  main-is: Main.hs
+  other-modules:
+      ProtocolCheck
+      Paths_visual_haskell_analysis_ghc910
+  autogen-modules:
+      Paths_visual_haskell_analysis_ghc910
+  hs-source-dirs:
+      integration
+  ghc-options: -Wall -Wcompat -threaded
+  build-depends:
+      aeson
+    , async
+    , base >=4.20.2 && <4.21
+    , bytestring
+    , containers
+    , directory
+    , filepath
+    , ghc ==9.10.3
+    , ghc-boot
+    , hie-bios ==0.21.*
+    , mtl
+    , stm
+    , temporary
+    , text
+    , time
+    , unix
+    , visual-haskell-analysis-client
+    , visual-haskell-analysis-ghc910
+    , visual-haskell-analysis-protocol
+    , visual-haskell-projects
     , visual-haskell-semantic-model
   default-language: Haskell2010
 
@@ -113,8 +173,10 @@ executable visual-haskell-project-loading-spike
     , temporary
     , text
     , time
+    , unix
     , visual-haskell-analysis-ghc910
     , visual-haskell-analysis-protocol
+    , visual-haskell-projects
     , visual-haskell-semantic-model
   default-language: Haskell2010
 
@@ -129,19 +191,24 @@ test-suite visual-haskell-analysis-ghc-910-test
       test
   ghc-options: -Wall -Wcompat -threaded
   build-depends:
-      async
+      aeson
+    , async
     , base >=4.20.2 && <4.21
+    , bytestring
     , containers
     , directory
     , filepath
     , ghc ==9.10.3
+    , ghc-boot
     , hie-bios ==0.21.*
     , mtl
     , stm
     , text
     , time
+    , unix
     , visual-haskell-analysis-client
     , visual-haskell-analysis-ghc910
     , visual-haskell-analysis-protocol
+    , visual-haskell-projects
     , visual-haskell-semantic-model
   default-language: Haskell2010

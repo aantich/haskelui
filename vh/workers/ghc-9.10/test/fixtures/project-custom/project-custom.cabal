@@ -1,0 +1,12 @@
+cabal-version: 3.0
+name: project-custom
+version: 0.1.0.0
+build-type: Custom
+custom-setup
+  setup-depends: base, directory, Cabal >= 3.12 && < 3.13
+library
+  hs-source-dirs: src
+  exposed-modules: Custom
+  other-modules: Generated
+  build-depends: base >= 4.20 && < 4.21
+  default-language: Haskell2010

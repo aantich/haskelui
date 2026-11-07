@@ -4,9 +4,6 @@ module Main (main) where
 import Distribution.Pretty (prettyShow)
 import Distribution.Simple.Compiler (compilerId)
 import Distribution.Simple.Configure (getPersistBuildConfig)
-import Distribution.Simple.Build (initialBuildSteps)
-import Distribution.Simple.PreProcess (preprocessComponent, knownSuffixHandlers)
-import Distribution.Verbosity (silent)
 import Distribution.Simple.LocalBuildInfo
 import Distribution.PackageDescription (getComponent, hsSourceDirs)
 import Distribution.Types.Component (componentBuildInfo)
@@ -16,18 +13,14 @@ import Distribution.Simple.Utils (cabalVersion)
 import Distribution.Utils.Json
 import qualified Data.ByteString.Lazy.Char8 as Bytes
 import System.Environment (getArgs)
-import Control.Monad (forM_)
 
 main :: IO ()
 main = do
   arguments <- getArgs
   case arguments of
+    _ | "--prepare-only" `elem` arguments -> pure ()
     [root, dist] -> do
       config <- getPersistBuildConfig dist
-      initialBuildSteps dist (localPkgDescr config) config silent
-      forM_ (allComponentsInBuildOrder config) $ \unit ->
-        preprocessComponent (localPkgDescr config) (getComponent (localPkgDescr config) (componentLocalName unit))
-          config unit False silent knownSuffixHandlers
       let describe unit = case snd (mkComponentInfo root (localPkgDescr config) config unit) of
             JsonObject fields -> JsonObject
               (("context-name", JsonString (prettyShow (componentLocalName unit))) :

@@ -10,6 +10,7 @@ import Data.Text (Text)
 import System.Directory
 import System.FilePath
 import System.IO.Temp
+import System.Posix.Signals (nullSignal, signalProcess)
 import VisualHaskell.Projects
 import VisualHaskell.Semantic
 
@@ -33,15 +34,32 @@ main = withSystemTempDirectory "vh-project-contracts" $ \root -> do
   writeFile (root </> "src/Shared.hs") "module Shared where\n"
   writeFile (root </> "app/Main.hs") "main = pure ()\n"
   components <- readPackageComponents profile package
-  check "library and executable are distinct descriptors" (length components == 2 && projectComponentId (head components) /= projectComponentId (last components))
+  check "library and executable are distinct descriptors" (case components of
+    [first, second] -> first.projectComponentId /= second.projectComponentId
+    _ -> False)
   check "shared source preserves both contexts" (length (ownersForPath components (root </> "src/Shared.hs")) == 2)
   check "source prefix does not claim sibling directory" (null (ownersForPath components (root </> "src-other/New.hs")))
   check "local dependency closure contains library" (length (componentDependencyClosure components (last components)) == 2)
+  let internalPackage = root </> "internal.cabal"
+  writeFile internalPackage "cabal-version: 3.0\nname: internal-fixture\nversion: 0.1\nlibrary details\n hs-source-dirs: src\n exposed-modules: Shared\n build-depends: base\n default-language: Haskell2010\nexecutable app\n main-is: Main.hs\n hs-source-dirs: app\n build-depends: base, internal-fixture:details\n default-language: Haskell2010\n"
+  internalComponents <- readPackageComponents profile internalPackage
+  check "internal-library dependency names retain component identity"
+    (length (componentDependencyClosure internalComponents (last internalComponents)) == 2)
   writeFile (root </> "cabal.project") "packages: .\nimport: \"local config.project\"\n"
   writeFile (root </> "local config.project") "import: not-created-yet.config\n"
   configurations <- configurationPaths profile [package]
   check "Cabal's parser finds recursive imported project files, including absent imports"
     (all (`elem` configurations) [root </> "local config.project", root </> "not-created-yet.config"])
+  writeFile (root </> "cabal.project.alternate") "packages: .\n"
+  writeFile (root </> "cabal.project.alternate.local") "import: alternate-extra.config\n"
+  writeFile (root </> "cabal.project.alternate.freeze") "constraints: base installed\n"
+  profiles <- discoverProfiles root
+  check "alternate local/freeze files are not selectable profiles" (length profiles == 3)
+  namedConfigurations <- configurationPaths (profile {profileConfiguration = Just (root </> "cabal.project.alternate")}) [package]
+  check "named Cabal configurations watch their own local/freeze files and imports"
+    (all (`elem` namedConfigurations) [root </> "cabal.project.alternate.local", root </> "cabal.project.alternate.freeze", root </> "alternate-extra.config"])
+  stackConfigurations <- configurationPaths (profile {profileTool = StackProject, profileConfiguration = Just (root </> "stack-alternate.yaml")}) [package]
+  check "named Stack configurations watch their own lock file" (root </> "stack-alternate.yaml.lock" `elem` stackConfigurations)
   process <- async (runTool (const (pure ())) root "sh" ["-c", "sleep 60 & echo ready > ready; wait"])
   let awaitReady 0 = fail "test tool did not start"
       awaitReady attempts = doesFileExist (root </> "ready") >>= \ready ->
@@ -49,6 +67,20 @@ main = withSystemTempDirectory "vh-project-contracts" $ \root -> do
   awaitReady (100 :: Int)
   cancel process
   _ <- waitCatch process
+  orphan <- async (runTool (const (pure ())) root "sh" ["-c", "sleep 60 & echo $! > orphan-pid; exit 0"])
+  let awaitOrphan 0 = fail "test wrapper did not start"
+      awaitOrphan attempts = doesFileExist (root </> "orphan-pid") >>= \ready ->
+        if ready then pure () else threadDelay 10000 >> awaitOrphan (attempts - 1)
+  awaitOrphan (100 :: Int)
+  threadDelay 100000
+  child <- read <$> readFile (root </> "orphan-pid")
+  cancel orphan
+  _ <- waitCatch orphan
+  let awaitExit 0 = fail "cancelled tool left its orphaned child alive"
+      awaitExit attempts = do
+        alive <- try (signalProcess nullSignal child) :: IO (Either IOException ())
+        case alive of Left _ -> pure (); Right () -> threadDelay 10000 >> awaitExit (attempts - 1)
+  awaitExit (100 :: Int)
   missing <- try (runTool (const (pure ())) root "/definitely/missing/vh-tool" []) :: IO (Either IOException Text)
   check "missing tools fail without terminating the IDE" (case missing of Left _ -> True; _ -> False)
   putStrLn "Project discovery, trust, ownership and closure tests passed"

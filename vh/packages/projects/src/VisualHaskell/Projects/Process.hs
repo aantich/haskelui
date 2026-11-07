@@ -29,15 +29,16 @@ runTool progress directory executable arguments = do
       \_ out err child -> do
         pid <- getPid child
         let cleanup = do
+              -- A wrapper can exit before a child which still owns its pipes.
+              -- Keep the original group ID and reap descendants even then.
+              let signal sig = maybe (pure ()) (\group -> signalProcessGroup sig group `catch` ignore) pid
+              signal sigTERM
               status <- getProcessExitCode child
               case status of
-                Nothing -> do
-                  let signal sig = maybe (pure ()) (\group -> signalProcessGroup sig group `catch` ignore) pid
-                  signal sigTERM
-                  threadDelay 100000
-                  signal sigKILL
-                  void (timeout 1000000 (waitForProcess child))
+                Nothing -> threadDelay 100000
                 Just _ -> pure ()
+              signal sigKILL
+              void (timeout 1000000 (waitForProcess child))
         flip finally cleanup $ do
           (output, errors) <- concurrently (drain False out) (drain True err)
           status <- waitForProcess child

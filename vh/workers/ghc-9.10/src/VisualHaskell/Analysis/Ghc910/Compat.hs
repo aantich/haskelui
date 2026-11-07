@@ -14,6 +14,7 @@ module VisualHaskell.Analysis.Ghc910.Compat
   , stopAnalysisEngine
   , queryWithEngine
   , checkCompositionWithEngine
+  , inspectCompilerUnits
   ) where
 
 import Control.Concurrent.Async
@@ -46,7 +47,7 @@ import Data.IORef
   , readIORef
   , writeIORef
   )
-import Data.List (find, sortOn)
+import Data.List (find, sortOn, nub, isSuffixOf)
 import Data.Char (isAlphaNum)
 import qualified Data.Set as Set
 import Data.Map.Strict (Map)
@@ -55,7 +56,7 @@ import Data.Maybe (catMaybes)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as TextIO
-import Data.Time.Clock (UTCTime, getCurrentTime)
+import Data.Time.Clock (UTCTime, getCurrentTime, addUTCTime)
 import qualified GHC
 import qualified GHC.Iface.Ext.Ast as Hie
 import qualified GHC.Iface.Ext.Types as Hie
@@ -95,7 +96,10 @@ import GHC.Core.Type
   )
 import GHC.Data.StringBuffer (stringToStringBuffer)
 import qualified GHC.Data.Strict as Strict
-import GHC.Driver.Monad (pushLogHookM)
+import GHC.Driver.Monad (pushLogHookM, modifySession)
+import GHC.Driver.Env (hscSetActiveUnitId, hsc_all_home_unit_ids, hsc_unit_env)
+import qualified GHC.Driver.Session as DynFlags
+import qualified GHC.Unit.Env as UnitEnv
 import GHC.Types.Error
   ( DiagnosticCode
   , MessageClass (..)
@@ -146,19 +150,35 @@ import GHC.Utils.Logger (LogAction, LogFlags (..))
 import GHC.Data.FastString (unpackFS)
 import GHC.Unit.Types
   ( mkModule
+  , UnitId
   , moduleName
   , moduleUnit
   , toUnitId
   , unitString
+  , stringToUnitId
+  , unitIdString
   )
 import HIE.Bios.Environment (initSession)
 import HIE.Bios.Types (ComponentOptions (..))
 import Language.Haskell.Syntax.Basic (FieldLabelString (..))
 import Language.Haskell.Syntax.Module.Name (moduleNameString)
-import System.FilePath (isAbsolute, normalise, (</>))
+import System.FilePath
+import System.IO (stderr)
 import VisualHaskell.Analysis.Ghc910.Types
 import VisualHaskell.Semantic
 import VisualHaskell.Analysis.Protocol.Queries
+
+-- Ask GHC to interpret the actual flags rather than guessing source roots from
+-- every conditional branch of a .cabal file. This does NOT load source code.
+inspectCompilerUnits :: FilePath -> ComponentOptions -> IO [(Text, FilePath, [FilePath])]
+inspectCompilerUnits libdir options = GHC.runGhc (Just libdir) $ do
+  _ <- initSession options
+  environment <- GHC.getSession
+  pure [let flags = UnitEnv.homeUnitEnv_dflags (UnitEnv.ue_findHomeUnitEnv unit (hsc_unit_env environment))
+            directory = maybe options.componentRoot (absolute options.componentRoot) (DynFlags.workingDirectory flags)
+        in (Text.pack (unitIdString unit), directory, nub (map (absolute directory) (DynFlags.importPaths flags)))
+       | unit <- Set.toList (hsc_all_home_unit_ids environment)]
+  where absolute root path = normalise (if isAbsolute path then path else root </> path)
 
 -- | A single component-scoped GHC session. The worker thread owns the Ghc
 -- monad for its entire lifetime; callers communicate through typed requests.
@@ -217,7 +237,8 @@ startAnalysisEngine invocation = do
                 invocation.invocationCompilerOptions
                 invocation.invocationComponentRoot
                 invocation.invocationCradleDependencies
-        _ <- initSession componentOptions
+        targets <- initSession componentOptions
+        GHC.setTargets targets
         captureReference <- liftIO (newIORef Nothing)
         pushLogHookM (const (captureCurrentLog captureReference))
         liftIO (atomically (putTMVar ready ()))
@@ -302,12 +323,12 @@ engineLoop invocation captureReference requests targetCache queryContext = do
   case request of
     EngineComposition documents document query response -> do
       (currentContext, updatedTargets) <- prepareQueryContext invocation captureReference targetCache documents document False queryContext
-      result <- answerComposition documents document query currentContext
+      result <- answerComposition invocation documents document query currentContext
       liftIO (atomically (putTMVar response result))
       engineLoop invocation captureReference requests updatedTargets currentContext
     EngineQuery documents document query response -> do
       (currentContext, updatedTargets) <- prepareQueryContext invocation captureReference targetCache documents document (query.queryKind == CompletionQuery) queryContext
-      result <- answerQuery invocation.invocationComponentRoot documents document query currentContext
+      result <- answerQuery invocation documents document query currentContext
       liftIO (atomically (putTMVar response result))
       engineLoop invocation captureReference requests updatedTargets currentContext
     EngineRequest {} -> do
@@ -317,7 +338,7 @@ engineLoop invocation captureReference requests targetCache queryContext = do
       freshContext <- case result of
         Right snapshot | snapshot.analysisCompleteness == Typechecked ->
           case Map.lookup request.requestDocument request.requestDocuments of
-            Just document -> GHC.handleSourceError (const (pure Nothing)) (buildQueryContext request.requestDocuments document)
+            Just document -> GHC.handleSourceError (const (pure Nothing)) (buildQueryContext invocation request.requestDocuments document)
             Nothing -> pure Nothing
         _ -> pure Nothing
       let retained = case freshContext of
@@ -342,7 +363,7 @@ prepareQueryContext invocation capture targets documents document allowLastGood 
       (result, updatedTargets) <- analyzeInCurrentSession invocation capture targets documents document (WorkspaceGeneration 0)
       fresh <- case (result, Map.lookup document documents) of
         (Right analysis, Just snapshot) | analysis.analysisCompleteness == Typechecked ->
-          GHC.handleSourceError (const (pure Nothing)) (buildQueryContext documents snapshot)
+          GHC.handleSourceError (const (pure Nothing)) (buildQueryContext invocation documents snapshot)
         _ -> pure Nothing
       pure (case fresh of Just value -> Just value; Nothing -> context, updatedTargets)
 
@@ -372,16 +393,16 @@ checkCompositionWithEngine engine documents document query = do
     Right _ -> Left (failure "ghc-session-terminated" "Compiler composition session stopped" True)
 
 answerComposition
-  :: Map DocumentId DocumentSnapshot -> DocumentId -> CompositionQuery -> Maybe QueryContext
+  :: CompilerInvocation -> Map DocumentId DocumentSnapshot -> DocumentId -> CompositionQuery -> Maybe QueryContext
   -> GHC.Ghc (Either GhcAnalysisFailure CompositionResult)
-answerComposition documents document query context = case (Map.lookup document documents, context) of
+answerComposition invocation documents document query context = case (Map.lookup document documents, context) of
   (Just snapshot, Just current)
     | current.contextDocument == snapshot
     , current.contextVersions == documentVersions documents
     , length query.compositionFunctions >= 2
     , length query.compositionFunctions <= 32 -> do
         graph <- GHC.getModuleGraph
-        case find (\summary -> fmap normalise (GHC.ml_hs_file (GHC.ms_location summary)) == Just (normalise snapshot.snapshotPath)) (GHC.mgModSummaries graph) of
+        case find (summaryMatches invocation snapshot) (GHC.mgModSummaries graph) of
           Nothing -> pure unavailable
           Just summary -> do
             info <- GHC.getModuleInfo (GHC.ms_mod summary)
@@ -391,20 +412,26 @@ answerComposition documents document query context = case (Map.lookup document d
                     sourceRangeFor snapshot (nameSrcSpan name) /= Nothing]
             case traverse (`Map.lookup` declared) query.compositionFunctions of
               Nothing -> pure unavailable
-              Just functions -> GHC.handleSourceError
-                (\exception -> pure (Right (CompositionResult query False Nothing (Just (Text.pack (show exception)))))) $ do
+              Just functions -> do
+                environment <- GHC.getSession
+                GHC.handleSourceError
+                  (\exception -> do
+                    GHC.setSession environment
+                    pure (Right (CompositionResult query False Nothing (Just (Text.pack (show exception)))))) $ do
+                  modifySession (hscSetActiveUnitId (toUnitId (moduleUnit (GHC.ms_mod summary))))
                   GHC.setContext [GHC.IIModule (GHC.ms_mod_name summary)]
                   let body = foldl (\input function -> "(" <> function <> ") (" <> input <> ")") "vhInput" functions
                   inferred <- GHC.exprType GHC.TM_Inst (Text.unpack ("(\\vhInput -> " <> body <> ")"))
+                  GHC.setSession environment
                   pure (Right (CompositionResult query True (Just (renderType inferred)) Nothing))
   _ -> pure unavailable
   where
     unavailable = Left (failure "composition-unavailable" "Composition requires current, successfully typechecked function declarations" True)
 
-buildQueryContext :: Map DocumentId DocumentSnapshot -> DocumentSnapshot -> GHC.Ghc (Maybe QueryContext)
-buildQueryContext documents snapshot = do
+buildQueryContext :: CompilerInvocation -> Map DocumentId DocumentSnapshot -> DocumentSnapshot -> GHC.Ghc (Maybe QueryContext)
+buildQueryContext invocation documents snapshot = do
   graph <- GHC.getModuleGraph
-  case find (\s -> fmap normalise (GHC.ml_hs_file (GHC.ms_location s)) == Just (normalise snapshot.snapshotPath)) (GHC.mgModSummaries graph) of
+  case find (summaryMatches invocation snapshot) (GHC.mgModSummaries graph) of
     Nothing -> pure Nothing
     Just summary -> do
       parsed <- GHC.parseModule summary
@@ -458,9 +485,9 @@ buildQueryContext documents snapshot = do
           pure (Just (QueryContext snapshot (documentVersions documents) occurrences (concat candidates) locals))
 
 answerQuery
-  :: FilePath -> Map DocumentId DocumentSnapshot -> DocumentId -> PositionQuery -> Maybe QueryContext
+  :: CompilerInvocation -> Map DocumentId DocumentSnapshot -> DocumentId -> PositionQuery -> Maybe QueryContext
   -> GHC.Ghc (Either GhcAnalysisFailure PositionResult)
-answerQuery root documents document query context = case (Map.lookup document documents, context) of
+answerQuery invocation documents document query context = case (Map.lookup document documents, context) of
   (Just snapshot, Just current)
     | current.contextDocument.snapshotDocumentId == document
     , query.queryOffset >= 0 && query.queryOffset <= Text.length snapshot.snapshotText
@@ -482,7 +509,7 @@ answerQuery root documents document query context = case (Map.lookup document do
               (maybe "" renderType inferred) (Text.pack . moduleNameString . moduleName <$> nameModule_maybe name) a (b-a)))
           [] -> pure Nothing
         definitions <- case (query.queryKind, matches) of
-          (DefinitionQuery, (_,_,name,_) : _) -> liftIO (definitionForName root documents name)
+          (DefinitionQuery, (_,_,name,_) : _) -> liftIO (definitionForName invocation documents name)
           _ -> pure []
         let completions = take 200 . Map.elems . Map.fromList $
               [ (candidate.completionLabel, candidate)
@@ -500,11 +527,14 @@ answerQuery root documents document query context = case (Map.lookup document do
   where
     identifierChar character = isAlphaNum character || character `elem` ("_'." :: String)
 
-definitionForName :: FilePath -> Map DocumentId DocumentSnapshot -> Name -> IO [DefinitionTarget]
-definitionForName root documents name = case nameSrcSpan name of
+definitionForName :: CompilerInvocation -> Map DocumentId DocumentSnapshot -> Name -> IO [DefinitionTarget]
+definitionForName invocation documents name = case nameSrcSpan name of
   RealSrcSpan spanValue _ -> do
     let sourcePath = unpackFS (srcSpanFile spanValue)
-        path = normalise (if isAbsolute sourcePath then sourcePath else root </> sourcePath)
+        directory = case nameModule_maybe name >>= (\modul -> lookup (Text.pack (unitIdString (toUnitId (moduleUnit modul)))) invocation.invocationUnitDirectories) of
+          Just root -> root
+          Nothing -> invocation.invocationComponentRoot
+        path = normalise (if isAbsolute sourcePath then sourcePath else directory </> sourcePath)
         open = find ((== path) . normalise . snapshotPath) (Map.elems documents)
     content <- case open of
       Just snapshot -> pure (Right (snapshot.snapshotRevision, snapshot.snapshotContentHash))
@@ -554,23 +584,31 @@ analyzeInCurrentSession invocation captureReference previousTargets documents re
       let targetCache = refreshTargetCache now previousTargets documents
       diagnosticReference <- liftIO (newIORef [])
       liftIO (writeIORef captureReference (Just (requestedSnapshot, diagnosticReference)))
-      targets <-
-        traverse
-          (\snapshot -> snapshotTarget (targetTimestamp targetCache snapshot) snapshot)
-          (Map.elems documents)
+      previous <- GHC.getTargets
+      overlays <- fmap concat $ forM (Map.elems documents) $ \snapshot -> do
+        let units = [stringToUnitId (Text.unpack identifier) | (identifier, roots) <- invocation.invocationUnitRoots,
+              any (\root -> pathWithin root snapshot.snapshotPath) roots]
+        if null invocation.invocationUnitRoots
+          then pure <$> snapshotTarget (targetTimestamp targetCache snapshot) snapshot Nothing
+          else traverse (snapshotTarget (targetTimestamp targetCache snapshot) snapshot . Just) (nub units)
+      let merged = [case find (sameTarget target) overlays of
+              Just overlay -> overlay
+              Nothing -> target {GHC.targetContents = Nothing} | target <- previous]
+            <> [overlay | overlay <- overlays, not (any (`sameTarget` overlay) previous)]
+          targets = concat [filter ((== unit) . GHC.targetUnitId) merged | unit <- nub (map GHC.targetUnitId merged)]
       GHC.setTargets targets
       -- Keep every open buffer in the module graph so dependencies can use
       -- their unsaved contents, but load only the requested module and its
       -- dependency closure. Loading every target also recompiles unrelated
       -- reverse dependants (often the largest application module) whenever a
       -- small leaf module is inspected.
-      loadResult <- loadRequestedModule requestedSnapshot
+      loadResult <- loadRequestedModule invocation requestedSnapshot
       liftIO (writeIORef captureReference Nothing)
       diagnostics <- liftIO (readIORef diagnosticReference)
       (declarations, typeTable) <-
         case loadResult of
           GHC.Failed -> pure ([], Map.empty)
-          GHC.Succeeded -> declarationsFor requestedSnapshot
+          GHC.Succeeded -> declarationsFor invocation requestedSnapshot
       pure
         ( Right
             AnalysisSnapshot
@@ -591,13 +629,13 @@ analyzeInCurrentSession invocation captureReference previousTargets documents re
         , targetCache
         )
 
-loadRequestedModule :: DocumentSnapshot -> GHC.Ghc GHC.SuccessFlag
-loadRequestedModule requestedSnapshot =
+loadRequestedModule :: CompilerInvocation -> DocumentSnapshot -> GHC.Ghc GHC.SuccessFlag
+loadRequestedModule invocation requestedSnapshot =
   GHC.handleSourceError
-    (const (pure GHC.Failed))
-    $ do
+    (\exception -> liftIO (TextIO.hPutStrLn stderr (Text.pack (show exception))) >> pure GHC.Failed)
+    $ if length invocation.invocationUnitRoots > 1 then GHC.load GHC.LoadAllTargets else do
       graph <- GHC.depanal [] False
-      case find requestedSummary (GHC.mgModSummaries graph) of
+      case find (summaryMatches invocation requestedSnapshot) (GHC.mgModSummaries graph) of
         Nothing ->
           -- This should only be reachable for an unusual target that GHC
           -- cannot associate with a source location. Preserve correctness in
@@ -610,11 +648,24 @@ loadRequestedModule requestedSnapshot =
                   (toUnitId (moduleUnit sourceModule))
                   (moduleName sourceModule)
            in GHC.load (GHC.LoadUpTo homeModule)
-  where
-    requestedPath = normalise requestedSnapshot.snapshotPath
-    requestedSummary summary =
-      (normalise <$> GHC.ml_hs_file (GHC.ms_location summary))
-        == Just requestedPath
+
+summaryMatches :: CompilerInvocation -> DocumentSnapshot -> GHC.ModSummary -> Bool
+summaryMatches invocation snapshot summary =
+  fmap normalise (GHC.ml_hs_file (GHC.ms_location summary)) == Just (normalise snapshot.snapshotPath)
+    && maybe True (== Text.pack (unitIdString (toUnitId (moduleUnit (GHC.ms_mod summary)))) ) invocation.invocationPrimaryUnit
+
+pathWithin :: FilePath -> FilePath -> Bool
+pathWithin root path = let relative = makeRelative (normalise root) (normalise path)
+  in not (isAbsolute relative) && case splitDirectories relative of ".." : _ -> False; _ -> True
+
+-- A source may be a named module in the cradle targets but a file in an
+-- overlay. Replace that target in the SAME home unit, never globally by name.
+sameTarget :: GHC.Target -> GHC.Target -> Bool
+sameTarget old new = GHC.targetUnitId old == GHC.targetUnitId new && case (GHC.targetId old, GHC.targetId new) of
+  (GHC.TargetFile left _, GHC.TargetFile right _) -> normalise left == normalise right
+  (GHC.TargetModule name, GHC.TargetFile path _) ->
+    addTrailingPathSeparator (joinPath (Text.unpack <$> Text.splitOn "." (Text.pack (GHC.moduleNameString name)))) `isSuffixOf` addTrailingPathSeparator (dropExtension path)
+  _ -> GHC.targetId old == GHC.targetId new
 
 refreshTargetCache
   :: UTCTime
@@ -627,7 +678,8 @@ refreshTargetCache now previous =
      in case Map.lookup document previous of
           Just (previousVersion, timestamp)
             | previousVersion == version -> (version, timestamp)
-          _ -> (version, now)
+            | otherwise -> (version, max now (addUTCTime 1 timestamp))
+          _ -> (version, addUTCTime 1 now)
 
 targetVersion :: DocumentSnapshot -> TargetVersion
 targetVersion snapshot =
@@ -643,9 +695,9 @@ targetTimestamp targetCache snapshot =
     Just (_, timestamp) -> timestamp
     Nothing -> error "Visual Haskell invariant: target cache omitted an open document"
 
-snapshotTarget :: GHC.GhcMonad monad => UTCTime -> DocumentSnapshot -> monad GHC.Target
-snapshotTarget now snapshot = do
-  target <- GHC.guessTarget snapshot.snapshotPath Nothing Nothing
+snapshotTarget :: GHC.GhcMonad monad => UTCTime -> DocumentSnapshot -> Maybe UnitId -> monad GHC.Target
+snapshotTarget now snapshot unit = do
+  target <- GHC.guessTarget snapshot.snapshotPath unit Nothing
   pure
     target
       { GHC.targetAllowObjCode = False
@@ -674,7 +726,12 @@ captureCurrentLog captureReference logFlags messageClass sourceSpan message = do
   case current of
     Nothing -> pure ()
     Just (snapshot, diagnosticReference) ->
-      captureLog diagnosticReference snapshot logFlags messageClass sourceSpan message
+      do
+        captureLog diagnosticReference snapshot logFlags messageClass sourceSpan message
+        case messageClass of
+          MCDiagnostic SevError _ _ -> TextIO.hPutStrLn stderr (Text.pack (renderWithContext logFlags.log_default_user_context message))
+          MCFatal -> TextIO.hPutStrLn stderr (Text.pack (renderWithContext logFlags.log_default_user_context message))
+          _ -> pure ()
 
 diagnosticFor
   :: DocumentSnapshot
@@ -711,13 +768,14 @@ diagnosticFor snapshot logFlags severity code sourceSpan message = do
 
 declarationsFor
   :: GHC.GhcMonad monad
-  => DocumentSnapshot
+  => CompilerInvocation
+  -> DocumentSnapshot
   -> monad ([Declaration RevisionedSourceRange], TypeTable)
-declarationsFor snapshot = do
+declarationsFor invocation snapshot = do
   graph <- GHC.getModuleGraph
   let summaries =
         filter
-          (\summary -> fmap normalise (GHC.ml_hs_file (GHC.ms_location summary)) == Just (normalise snapshot.snapshotPath))
+          (summaryMatches invocation snapshot)
           (GHC.mgModSummaries graph)
   case summaries of
     [] -> pure ([], Map.empty)
@@ -1032,7 +1090,9 @@ realSourceRange revision realSpan =
 
 invocationSession :: CompilerInvocation -> SessionId
 invocationSession invocation =
-  SessionId
+  case invocation.invocationSessionIdentity of
+   Just identity -> identity
+   Nothing -> SessionId
     ( "ghc-9.10.3:"
         <> Text.pack (show (contentHash (Text.pack (invocation.invocationComponentRoot <> show invocation.invocationCompilerOptions))))
     )

@@ -57,6 +57,9 @@ data ResolvedContext = ResolvedContext
   , resolvedSourceRoots :: ![FilePath]
   , resolvedSourceFiles :: ![FilePath]
   , resolvedSession :: !SessionId
+  , resolvedPrimaryUnit :: !(Maybe Text)
+  , resolvedUnitRoots :: ![(Text, [FilePath])]
+  , resolvedUnitDirectories :: ![(Text, FilePath)]
   } deriving (Eq, Show, Generic)
 
 emptyProjectCatalog :: ProjectCatalog
@@ -105,7 +108,10 @@ instance FromJSON ProjectCatalog where
 instance ToJSON ResolvedContext where
   toJSON c = object ["component" .= c.resolvedComponent, "root" .= c.resolvedRoot, "arguments" .= c.resolvedArguments,
     "libdir" .= c.resolvedCompilerLibDir, "compiler" .= c.resolvedCompilerVersion, "configurationFiles" .= c.resolvedConfigurationFiles,
-    "sourceRoots" .= c.resolvedSourceRoots, "files" .= c.resolvedSourceFiles, "session" .= c.resolvedSession]
+    "sourceRoots" .= c.resolvedSourceRoots, "files" .= c.resolvedSourceFiles, "session" .= c.resolvedSession,
+    "primaryUnit" .= c.resolvedPrimaryUnit, "unitRoots" .= c.resolvedUnitRoots, "unitDirectories" .= c.resolvedUnitDirectories]
 instance FromJSON ResolvedContext where
   parseJSON = withObject "resolved context" $ \o -> ResolvedContext <$> o .: "component" <*> o .: "root" <*> o .: "arguments"
     <*> o .: "libdir" <*> o .: "compiler" <*> o .: "configurationFiles" <*> o .: "sourceRoots" <*> o .: "files" <*> o .: "session"
+    <*> o .:? "primaryUnit" <*> o .:? "unitRoots" .!= []
+    <*> o .:? "unitDirectories" .!= []

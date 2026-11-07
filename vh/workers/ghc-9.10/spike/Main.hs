@@ -36,7 +36,7 @@ import System.IO.Temp (withSystemTempDirectory)
 import System.Process (CreateProcess (..), proc, readCreateProcessWithExitCode)
 import System.Timeout (timeout)
 import VisualHaskell.Analysis.Ghc910
-import VisualHaskell.Semantic
+import VisualHaskell.Semantic hiding (BuildTool)
 
 data BuildTool = Cabal | Stack deriving (Eq, Show)
 
@@ -74,7 +74,7 @@ runProjectProbe tool root = do
   -- Use the real production engine too, not just the raw-GHC proof below.
   source <- TextIO.readFile downstream
   let invocation = CompilerInvocation implicitOptions.componentRoot implicitOptions.componentOptions
-        implicitOptions.componentDependencies libdir (Text.pack version)
+        implicitOptions.componentDependencies libdir (Text.pack version) Nothing [] Nothing []
       snapshot = document "Downstream" downstream source
   started <- startAnalysisEngine invocation >>= either (fail . show) pure
   flip finally (stopAnalysisEngine started) $ do

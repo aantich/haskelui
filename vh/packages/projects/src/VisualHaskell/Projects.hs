@@ -9,11 +9,11 @@ module VisualHaskell.Projects
   ) where
 
 import Control.Monad (filterM, forM)
-import Data.Aeson
+import Data.Aeson hiding (object)
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
-import Data.List (nub, sort, isPrefixOf)
+import Data.List (nub, sort, isPrefixOf, isSuffixOf)
 import Data.Maybe (listToMaybe, maybeToList)
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -25,7 +25,8 @@ import qualified Distribution.Fields as Fields
 import qualified Data.ByteString.Char8 as BSC
 import Distribution.Pretty (prettyShow)
 import Distribution.Types.CondTree
-import Distribution.Types.Dependency (depPkgName)
+import Distribution.Types.Dependency (depPkgName, depLibraries)
+import qualified Distribution.Compat.NonEmptySet as NonEmptySet
 import Distribution.Utils.Path (getSymbolicPath)
 import System.Directory
 import System.FilePath
@@ -46,7 +47,7 @@ discoverProfiles requested = do
     files <- sort <$> listDirectory directory
     let stackFiles = [directory </> file | file <- files, "stack" `isPrefixOf` file, takeExtension file == ".yaml"]
         cabalFiles = [directory </> file | file <- files, file == "cabal.project" ||
-          ("cabal.project." `isPrefixOf` file && file `notElem` ["cabal.project.local", "cabal.project.freeze"])]
+          ("cabal.project." `isPrefixOf` file && not (any (`isSuffixOf` file) [".local", ".freeze"]))]
     pure ([makeProfile root StackProject directory (Just file) | file <- stackFiles]
       <> [makeProfile root CabalProject directory (Just file) | file <- cabalFiles])
   if null found
@@ -160,12 +161,19 @@ componentPlanName component = case component.projectComponentKind of
   CradleComponent -> ""
 
 effectiveComponents :: [PlanUnit] -> [ProjectComponent] -> [ProjectComponent]
-effectiveComponents units declared =
-  [ component {projectComponentDependencies =
-      [dependency.projectComponentTarget | dependency <- declared,
-        Just dependencyUnit <- [findUnit dependency], dependencyUnit.planUnitId `elem` unit.planDependencies]}
-  | component <- declared, Just unit <- [findUnit component]]
+effectiveComponents units declared = concatMap effective declared
   where
+    effective :: ProjectComponent -> [ProjectComponent]
+    effective component = case findUnit component of
+      Just unit -> [component {projectComponentDependencies =
+        [dependency.projectComponentTarget | dependency <- declared,
+          Just dependencyUnit <- [findUnit dependency], dependencyUnit.planUnitId `elem` unit.planDependencies]}]
+      -- Custom Setup uses whole-package plan nodes, not per-component nodes.
+      -- Keep its Cabal-parsed descriptors; hie-bios/Setup supply the actual
+      -- selected-component environment during preparation.
+      Nothing | any (\unit -> unit.planPackage == component.projectComponentPackage &&
+                  unit.planComponent == Nothing && unit.planSourceRoot /= Nothing) units -> [component]
+      Nothing -> []
     findUnit :: ProjectComponent -> Maybe PlanUnit
     findUnit component = listToMaybe [unit | unit <- units,
       unit.planPackage == component.projectComponentPackage,
@@ -173,10 +181,15 @@ effectiveComponents units declared =
 
 configurationPaths :: ProjectProfile -> [FilePath] -> IO [FilePath]
 configurationPaths profile packageFiles = do
+  let selectedConfiguration = maybe (profile.profileRoot </> "cabal.project") id profile.profileConfiguration
+      associated = case profile.profileTool of
+        CabalProject -> [selectedConfiguration <> suffix | suffix <- [".local", ".freeze"]]
+        StackProject -> [selectedConfiguration <> ".lock"]
+        CradleProject -> []
   imports <- case profile.profileTool of
-    CabalProject -> projectImports Set.empty (maybe (profile.profileRoot </> "cabal.project") id profile.profileConfiguration)
+    CabalProject -> concat <$> traverse (projectImports Set.empty) (selectedConfiguration : associated)
     _ -> pure []
-  pure . nub $ imports <> maybeToList profile.profileConfiguration <> packageFiles
+  pure . nub $ imports <> associated <> maybeToList profile.profileConfiguration <> packageFiles
     <> [takeDirectory path </> "package.yaml" | path <- packageFiles]
     <> [profile.profileRoot </> path | path <- ["hie.yaml", "cabal.project", "cabal.project.local", "cabal.project.freeze", "stack.yaml.lock"]]
 
@@ -221,7 +234,9 @@ readPackageComponents profile path = do
         files <- filterM doesFileExist candidates
         pure $ ProjectComponent (ComponentId (profile.profileId <> ":" <> Text.pack (makeRelative profile.profileRoot root) <> ":" <> target))
           package name target kind root roots (nub files)
-          (nub [Text.pack (prettyShow (depPkgName dependency)) | info <- infos, dependency <- Cabal.targetBuildDepends info])
+          (nub [targetName profile.profileTool (Text.pack (prettyShow (depPkgName dependency))) LibraryComponent
+                  (case libraryName of Cabal.LMainLibName -> "library"; Cabal.LSubLibName name' -> Text.pack (prettyShow name'))
+               | info <- infos, dependency <- Cabal.targetBuildDepends info, libraryName <- NonEmptySet.toList (depLibraries dependency)])
       library name tree = let libraries = treeValues tree in describe LibraryComponent name (map Cabal.libBuildInfo libraries) [] (concatMap (map prettyShow . Cabal.exposedModules) libraries)
   mainLibraries <- traverse (library "library") (maybeToList (Cabal.condLibrary description))
   subLibraries <- traverse (\(name, tree) -> library (Text.pack (prettyShow name)) tree) (Cabal.condSubLibraries description)

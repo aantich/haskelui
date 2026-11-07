@@ -35,7 +35,8 @@ main = do
       component = ProjectComponent (ComponentId "pkg:lib") "pkg" "library" "lib:pkg" LibraryComponent "/project/pkg" ["/project/pkg/src"] [] []
       catalog = ProjectCatalog [profile] (Just "cabal:root") [component] ["/project/cabal.project"] []
       context = ResolvedContext (ComponentId "pkg:lib") "/project" ["-Wall"] "/ghc/lib" (CompilerVersion "9.10.3")
-        ["/project/cabal.project"] ["/project/pkg/src"] [] (SessionId "context-1")
+        ["/project/cabal.project"] ["/project/pkg/src"] [] (SessionId "context-1") (Just "pkg-unit")
+        [("pkg-unit", ["/project/pkg/src"])] [("pkg-unit", "/project/pkg")]
   mapM_ (\payload -> assertEqual "project request round trip" (Just payload) (decode (encode payload)))
     [DiscoverProject Nothing, PrepareComponent (ComponentId "pkg:lib"), ConfigureContext context]
   mapM_ (\payload -> assertEqual "project event round trip" (Just payload) (decode (encode payload)))

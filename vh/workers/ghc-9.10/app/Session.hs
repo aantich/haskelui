@@ -1,0 +1,448 @@
+{-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+
+module Session (main) where
+
+import Control.Exception (SomeException, displayException, try, IOException)
+import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async (withAsync)
+import Control.Monad (void)
+import qualified Data.Map.Strict as Map
+import Data.Map.Strict (Map)
+import qualified Data.Text as Text
+import Data.Time.Clock (UTCTime, diffUTCTime, getCurrentTime)
+import System.Directory (doesFileExist)
+import System.Environment (getArgs)
+import System.Posix.Process (getProcessID, getParentProcessID, exitImmediately)
+import System.Posix.Signals (signalProcessGroup, sigKILL)
+import System.Exit (ExitCode (ExitFailure), exitFailure, exitWith)
+import System.IO
+  ( BufferMode (NoBuffering)
+  , hPutStrLn
+  , hSetBinaryMode
+  , hSetBuffering
+  , stderr
+  , stdin
+  , stdout
+  )
+import VisualHaskell.Analysis.Ghc910
+import VisualHaskell.Analysis.Protocol
+import VisualHaskell.Semantic
+
+data WorkerState = WorkerState
+  { workerWorkspace :: !(Maybe WorkspaceId)
+  , workerRoot :: !(Maybe FilePath)
+  , workerSession :: !(Maybe SessionId)
+  , workerComponent :: !(Maybe ComponentInfo)
+  , workerDocuments :: !(Map DocumentId DocumentSnapshot)
+  , workerAnalysisEngine :: !(Maybe AnalysisEngine)
+  , workerContext :: !(Maybe ResolvedContext)
+  }
+
+data WorkerOptions = WorkerOptions
+  { crashOnceMarker :: !(Maybe FilePath)
+  , workerDebugEnabled :: !Bool
+  }
+
+main :: IO ()
+main = do
+  parent <- getParentProcessID
+  own <- getProcessID
+  let monitor = do
+        threadDelay 1000000
+        current <- getParentProcessID
+        if current == parent then monitor else do
+          -- The coordinator may have been killed, not merely shut down. Each
+          -- compiler has its own process group; reap its subprocesses too.
+          void (try (signalProcessGroup sigKILL own) :: IO (Either IOException ()))
+          exitImmediately (ExitFailure 87)
+  withAsync monitor (const runSessionMain)
+
+runSessionMain :: IO ()
+runSessionMain = do
+  options <- parseWorkerOptions <$> getArgs
+  hSetBinaryMode stdin True
+  hSetBinaryMode stdout True
+  hSetBuffering stdout NoBuffering
+  workerDebug options "worker.start" []
+  first <- readFrame defaultFrameLimits stdin
+  case first of
+    Right envelope@(ProtocolEnvelope {envelopePayload = ClientHelloMessage _}) -> do
+      workerDebug options "handshake.received" []
+      send envelope $
+        WorkerHelloMessage
+          WorkerHello
+            { workerAcceptedProtocol = protocolV2
+            , workerVersion = "visual-haskell-analysis-ghc910/0.1.0"
+            , workerCompilerVersion = Just (CompilerVersion "9.10.3")
+            , workerCapabilities =
+                [ WorkspaceLoadingCapability
+                , ComponentDiscoveryCapability
+                , FullDocumentSnapshotsCapability
+                , DiagnosticsCapability
+                , DocumentDeclarationsCapability
+                , StructuredTypesCapability
+                , PositionQueriesCapability
+                , CompositionChecksCapability
+                ]
+            , workerMaximumFrameBytes = maximumFrameBytes defaultFrameLimits
+            }
+      workerDebug options "handshake.complete" []
+      loop options (WorkerState Nothing Nothing Nothing Nothing Map.empty Nothing Nothing)
+    Right _ -> failWorker "first frame was not ClientHello"
+    Left failure -> failWorker ("could not read ClientHello: " <> show failure)
+
+loop :: WorkerOptions -> WorkerState -> IO ()
+loop options state = do
+  incoming <- readFrame defaultFrameLimits stdin
+  case incoming of
+    Left FrameEndOfInput -> stopWorkerAnalysisEngine state
+    Left failure -> failWorker ("protocol read failed: " <> show failure)
+    Right envelope -> do
+      workerDebug options "command.received" (clientMessageFields envelope.envelopePayload)
+      case envelope.envelopePayload of
+        ClientHelloMessage _ -> do
+          sendFailure envelope "duplicate-client-hello" "ClientHello may only be sent once" False
+          loop options state
+        OpenWorkspace request ->
+          case request.workspaceRequestTrust of
+            UntrustedWorkspace -> do
+              let rejected = RequestFailure "workspace-untrusted" "Direct GHC analysis requires explicit workspace trust" True
+              send envelope (WorkspaceFailed request.workspaceRequestId rejected)
+              loop options state
+            TrustedWorkspace -> do
+              stopWorkerAnalysisEngine state
+              workerDebug options "workspace.open"
+                [ ("workspace", request.workspaceRequestId.unWorkspaceId)
+                , ("root", Text.pack request.workspaceRequestRoot)
+                ]
+              let session = SessionId ("workspace:" <> request.workspaceRequestId.unWorkspaceId)
+                  updated =
+                    WorkerState
+                      (Just request.workspaceRequestId)
+                      (Just request.workspaceRequestRoot)
+                      (Just session)
+                      Nothing
+                      Map.empty
+                      Nothing
+                      Nothing
+              send envelope (WorkspaceLoading request.workspaceRequestId)
+              send envelope (WorkspaceReady request.workspaceRequestId session)
+              loop options updated
+        SelectComponent component ->
+          case state.workerComponent of
+            Just info | info.componentId == component -> do
+              send envelope (ComponentSelected info)
+              loop options state
+            _ -> do
+              sendFailure envelope "component-unavailable" "The requested component has not been discovered" True
+              loop options state
+        OpenDocument snapshot ->
+          loop options state {workerDocuments = Map.insert snapshot.snapshotDocumentId snapshot state.workerDocuments}
+        UpdateDocumentSnapshot snapshot ->
+          loop options state {workerDocuments = Map.insert snapshot.snapshotDocumentId snapshot state.workerDocuments}
+        CloseDocument document ->
+          loop options state {workerDocuments = Map.delete document state.workerDocuments}
+        AnalyzeDocument document -> do
+          crashOnceIfRequested options
+          updated <- analyze options envelope state document
+          loop options updated
+        QueryPosition query -> do
+          case (envelope.envelopeDocument, state.workerAnalysisEngine) of
+            (Just document, Just engine)
+              | envelope.envelopeWorkspace == state.workerWorkspace
+              , Just snapshot <- Map.lookup document state.workerDocuments
+              , envelope.envelopeRevision == Just snapshot.snapshotRevision
+              , envelope.envelopeContentHash == Just snapshot.snapshotContentHash
+              , Just component <- state.workerComponent
+              , envelope.envelopeSession == Just component.componentSession -> do
+                  attempted <- try (queryWithEngine engine state.workerDocuments document query)
+                  case attempted of
+                    Left (exception :: SomeException) ->
+                      sendFailure envelope "query-exception" (Text.pack (displayException exception)) True
+                    Right (Left failure) ->
+                      sendFailure envelope failure.failureCode failure.failureMessage failure.failureRecoverable
+                    Right (Right result) -> send envelope (PositionQueryCompleted result)
+            _ -> sendFailure envelope "stale-query" "The queried document or compiler session has changed" True
+          loop options state
+        CheckComposition query -> do
+          case (envelope.envelopeDocument, state.workerAnalysisEngine) of
+            (Just document, Just engine)
+              | envelope.envelopeWorkspace == state.workerWorkspace
+              , Just snapshot <- Map.lookup document state.workerDocuments
+              , envelope.envelopeRevision == Just snapshot.snapshotRevision
+              , envelope.envelopeContentHash == Just snapshot.snapshotContentHash
+              , Just component <- state.workerComponent
+              , envelope.envelopeSession == Just component.componentSession -> do
+                  attempted <- try (checkCompositionWithEngine engine state.workerDocuments document query)
+                  case attempted of
+                    Left (exception :: SomeException) -> sendFailure envelope "composition-exception" (Text.pack (displayException exception)) True
+                    Right (Left failure) -> sendFailure envelope failure.failureCode failure.failureMessage failure.failureRecoverable
+                    Right (Right result) -> send envelope (CompositionChecked result)
+            _ -> sendFailure envelope "stale-composition" "The composed document or session changed" True
+          loop options state
+        CancelRequest _ -> do
+          sendFailure envelope "cancellation-unsupported" "This feasibility worker completes one request at a time" True
+          loop options state
+        DiscoverProject _ -> send envelope (ProjectDiscovered emptyProjectCatalog) >> loop options state
+        PrepareComponent _ -> sendFailure envelope "unsupported" "Project preparation is not configured" True >> loop options state
+        ConfigureContext context -> do
+          stopWorkerAnalysisEngine state
+          now <- getCurrentTime
+          pid <- getProcessID
+          let fresh = context {resolvedSession = SessionId (context.resolvedSession.unSessionId <> ":" <> Text.pack (show pid <> ":" <> show now))}
+              component = ComponentInfo fresh.resolvedComponent fresh.resolvedRoot fresh.resolvedCompilerVersion fresh.resolvedSession
+          send envelope (ComponentSelected component)
+          loop options state {workerContext = Just fresh, workerComponent = Just component, workerAnalysisEngine = Nothing}
+        ReloadConfiguration -> do
+          stopWorkerAnalysisEngine state
+          send envelope (WorkerHealthChanged WorkerHealthy)
+          loop options state {workerComponent = Nothing, workerAnalysisEngine = Nothing}
+        ShutdownWorker -> stopWorkerAnalysisEngine state
+
+parseWorkerOptions :: [String] -> WorkerOptions
+parseWorkerOptions = go (WorkerOptions Nothing False)
+  where
+    go options [] = options
+    go options ("--debug" : rest) = go options {workerDebugEnabled = True} rest
+    go options ("--crash-once-marker" : marker : rest) =
+      go options {crashOnceMarker = Just marker} rest
+    go options (_ : rest) = go options rest
+
+-- Test-only process fault injection. The marker lives outside the worker, so
+-- the replacement process observes it and completes replayed work normally.
+crashOnceIfRequested :: WorkerOptions -> IO ()
+crashOnceIfRequested options =
+  case options.crashOnceMarker of
+    Nothing -> pure ()
+    Just marker -> do
+      alreadyCrashed <- doesFileExist marker
+      if alreadyCrashed
+        then pure ()
+        else do
+          writeFile marker "crashed\n"
+          hPutStrLn stderr "forced GHC worker crash before analysis result"
+          exitWith (ExitFailure 86)
+
+analyze
+  :: WorkerOptions
+  -> ProtocolEnvelope ClientMessage
+  -> WorkerState
+  -> DocumentId
+  -> IO WorkerState
+analyze options envelope state document =
+  case (state.workerWorkspace, state.workerRoot, state.workerSession) of
+    (Just _, Just root, Just _) -> do
+      started <- getCurrentTime
+      let sessionCandidate = maybe "cold" (const "warm") state.workerAnalysisEngine
+      workerDebug options "analysis.start"
+        [ ("document", document.unDocumentId)
+        , ("root", Text.pack root)
+        , ("openDocuments", Text.pack (show (Map.size state.workerDocuments)))
+        , ("session", sessionCandidate)
+        ]
+      ensuredAttempt <- try (ensureAnalysisEngine state document)
+      case ensuredAttempt of
+        Left (exception :: SomeException) -> do
+          finishAnalysisDebug options started document False "exception"
+          sendFailure envelope "worker-exception" (Text.pack (displayException exception)) True
+          pure state {workerAnalysisEngine = Nothing}
+        Right (Left failure) -> do
+          finishAnalysisDebug options started document False "failure"
+          sendFailure envelope failure.failureCode failure.failureMessage failure.failureRecoverable
+          pure state
+        Right (Right (engine, reused)) -> do
+          workerDebug options "analysis.session"
+            [("document", document.unDocumentId), ("reuse", if reused then "warm" else "cold")]
+          attempted <-
+            try
+              ( analyzeWithEngine
+                  engine
+                  state.workerDocuments
+                  document
+                  envelope.envelopeWorkspaceGeneration
+              )
+          running <- analysisEngineIsRunning engine
+          if running then pure () else stopAnalysisEngine engine
+          let retainedEngine = if running then Just engine else Nothing
+          case attempted of
+            Left (exception :: SomeException) -> do
+              finishAnalysisDebug options started document reused "exception"
+              sendFailure envelope "worker-exception" (Text.pack (displayException exception)) True
+              pure state {workerAnalysisEngine = retainedEngine}
+            Right (Left failure) -> do
+              finishAnalysisDebug options started document reused "failure"
+              sendFailure envelope failure.failureCode failure.failureMessage failure.failureRecoverable
+              pure state {workerAnalysisEngine = retainedEngine}
+            Right (Right snapshot) -> do
+              finishAnalysisDebug options started document reused "success"
+              let component =
+                    ComponentInfo
+                      { componentId = maybe (ComponentId snapshot.analysisSession.unSessionId) resolvedComponent state.workerContext
+                      , componentRoot = root
+                      , componentCompilerVersion = CompilerVersion "9.10.3"
+                      , componentSession = snapshot.analysisSession
+                      }
+              send envelope (ComponentDiscovered component)
+              send envelope (ComponentSelected component)
+              send envelope (AnalysisCompleted snapshot)
+              pure
+                state
+                  { workerComponent = Just component
+                  , workerAnalysisEngine = retainedEngine
+                  }
+    _ ->
+      sendFailure envelope "workspace-unavailable" "Open a trusted workspace before analysis" True
+        >> pure state
+
+ensureAnalysisEngine
+  :: WorkerState
+  -> DocumentId
+  -> IO (Either GhcAnalysisFailure (AnalysisEngine, Bool))
+ensureAnalysisEngine state requestedDocument
+  | Just engine <- state.workerAnalysisEngine = do
+      running <- analysisEngineIsRunning engine
+      if running
+        then pure (Right (engine, True))
+        else stopAnalysisEngine engine >> createAnalysisEngine state requestedDocument
+ensureAnalysisEngine state requestedDocument = createAnalysisEngine state requestedDocument
+
+createAnalysisEngine
+  :: WorkerState
+  -> DocumentId
+  -> IO (Either GhcAnalysisFailure (AnalysisEngine, Bool))
+createAnalysisEngine state requestedDocument =
+  case Map.lookup requestedDocument state.workerDocuments of
+    Nothing ->
+      pure
+        ( Left
+            GhcAnalysisFailure
+              { failureCode = "document-unavailable"
+              , failureMessage = "The requested Haskell document is not open"
+              , failureRecoverable = True
+              }
+        )
+    Just primary -> do
+      let paths = fmap snapshotPath (Map.elems state.workerDocuments)
+      discovered <- case state.workerContext of
+        Nothing -> discoverCompilerInvocation primary.snapshotPath paths
+        Just context -> pure (Right (CompilerInvocation context.resolvedRoot context.resolvedArguments context.resolvedConfigurationFiles
+          context.resolvedCompilerLibDir context.resolvedCompilerVersion.unCompilerVersion context.resolvedPrimaryUnit context.resolvedUnitRoots (Just context.resolvedSession) context.resolvedUnitDirectories))
+      case discovered of
+        Left failure -> pure (Left failure)
+        Right invocation -> fmap (fmap (\engine -> (engine, False))) (startAnalysisEngine invocation)
+
+finishAnalysisDebug
+  :: WorkerOptions
+  -> UTCTime
+  -> DocumentId
+  -> Bool
+  -> Text.Text
+  -> IO ()
+finishAnalysisDebug options started document reused result = do
+  finished <- getCurrentTime
+  workerDebug options "analysis.finish"
+    [ ("document", document.unDocumentId)
+    , ("milliseconds", Text.pack (show (round (diffUTCTime finished started * 1000) :: Integer)))
+    , ("session", if reused then "warm" else "cold")
+    , ("result", result)
+    ]
+
+stopWorkerAnalysisEngine :: WorkerState -> IO ()
+stopWorkerAnalysisEngine state =
+  case state.workerAnalysisEngine of
+    Nothing -> pure ()
+    Just engine -> stopAnalysisEngine engine
+
+send
+  :: ProtocolEnvelope ClientMessage
+  -> WorkerMessage
+  -> IO ()
+send incoming payload = do
+  let outgoing =
+        ProtocolEnvelope
+          { envelopeProtocolVersion = protocolV2
+          , envelopeRequestId = incoming.envelopeRequestId
+          , envelopeWorkspace = incoming.envelopeWorkspace
+          , envelopeWorkspaceGeneration = incoming.envelopeWorkspaceGeneration
+          , envelopeSession = case messageSession payload of
+              Just session -> Just session
+              Nothing -> incoming.envelopeSession
+          , envelopeDocument = incoming.envelopeDocument
+          , envelopeRevision = incoming.envelopeRevision
+          , envelopeContentHash = incoming.envelopeContentHash
+          , envelopeInputHash = incoming.envelopeInputHash
+          , envelopePayload = payload
+          }
+  result <- writeFrame defaultFrameLimits stdout outgoing
+  case result of
+    Right () -> pure ()
+    Left failure -> failWorker ("protocol write failed: " <> show failure)
+
+workerDebug :: WorkerOptions -> Text.Text -> [(Text.Text, Text.Text)] -> IO ()
+workerDebug options operation fields =
+  if options.workerDebugEnabled
+    then
+      hPutStrLn stderr . Text.unpack $
+        "vh-ghc-worker "
+          <> operation
+          <> foldMap (\(name, value) -> " " <> name <> "=" <> value) fields
+    else pure ()
+
+clientMessageFields :: ClientMessage -> [(Text.Text, Text.Text)]
+clientMessageFields message =
+  case message of
+    DiscoverProject _ -> [("kind", "discover-project")]
+    PrepareComponent _ -> [("kind", "prepare-component")]
+    ConfigureContext _ -> [("kind", "configure-context")]
+    ClientHelloMessage {} -> [("kind", "client-hello")]
+    OpenWorkspace request ->
+      [ ("kind", "open-workspace")
+      , ("workspace", request.workspaceRequestId.unWorkspaceId)
+      , ("root", Text.pack request.workspaceRequestRoot)
+      , ("trust", Text.pack (show request.workspaceRequestTrust))
+      ]
+    SelectComponent component -> [("kind", "select-component"), ("component", component.unComponentId)]
+    OpenDocument snapshot -> snapshotFields "open-document" snapshot
+    UpdateDocumentSnapshot snapshot -> snapshotFields "update-document" snapshot
+    CloseDocument document -> [("kind", "close-document"), ("document", document.unDocumentId)]
+    AnalyzeDocument document -> [("kind", "analyze-document"), ("document", document.unDocumentId)]
+    QueryPosition query -> [("kind", "query-position"), ("query", Text.pack (show query))]
+    CheckComposition query -> [("kind", "check-composition"), ("query", Text.pack (show query))]
+    CancelRequest request -> [("kind", "cancel-request"), ("request", Text.pack (show request))]
+    ReloadConfiguration -> [("kind", "reload-configuration")]
+    ShutdownWorker -> [("kind", "shutdown-worker")]
+  where
+    snapshotFields
+      :: Text.Text
+      -> DocumentSnapshot
+      -> [(Text.Text, Text.Text)]
+    snapshotFields kind snapshot =
+      [ ("kind", kind)
+      , ("document", snapshot.snapshotDocumentId.unDocumentId)
+      , ("path", Text.pack snapshot.snapshotPath)
+      , ("revision", Text.pack (show snapshot.snapshotRevision.unTextRevision))
+      , ("contentHash", Text.pack (show snapshot.snapshotContentHash.unContentHash))
+      , ("characters", Text.pack (show (Text.length snapshot.snapshotText)))
+      ]
+
+messageSession :: WorkerMessage -> Maybe SessionId
+messageSession message =
+  case message of
+    ComponentDiscovered component -> Just component.componentSession
+    ComponentSelected component -> Just component.componentSession
+    AnalysisCompleted snapshot -> Just snapshot.analysisSession
+    _ -> Nothing
+
+sendFailure
+  :: ProtocolEnvelope ClientMessage
+  -> Text.Text
+  -> Text.Text
+  -> Bool
+  -> IO ()
+sendFailure envelope code message recoverable =
+  send envelope (WorkerRequestFailed envelope.envelopeRequestId (RequestFailure code message recoverable))
+
+failWorker :: String -> IO value
+failWorker message = hPutStrLn stderr message >> exitFailure

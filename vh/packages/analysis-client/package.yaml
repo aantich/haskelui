@@ -17,6 +17,7 @@ dependencies:
   - process
   - stm
   - text
+  - unix
   - visual-haskell-analysis-protocol
   - visual-haskell-semantic-model
 

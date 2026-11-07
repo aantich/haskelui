@@ -40,6 +40,9 @@ import Control.Exception
   , displayException
   , try
   )
+import Control.Concurrent (threadDelay)
+import System.Posix.Signals (signalProcessGroup, sigTERM, sigKILL)
+import System.Posix.Types (ProcessID)
 import Control.Monad (unless, void, when)
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Char8 as ByteStringChar8
@@ -64,10 +67,10 @@ import System.Process
   , ProcessHandle
   , StdStream (CreatePipe)
   , createProcess
-  , getProcessExitCode
   , proc
   , terminateProcess
   , waitForProcess
+  , getPid
   )
 import System.Timeout (timeout)
 import VisualHaskell.Analysis.Protocol
@@ -147,6 +150,7 @@ data WorkerSession = WorkerSession
   , sessionOutput :: !Handle
   , sessionError :: !Handle
   , sessionProcess :: !ProcessHandle
+  , sessionProcessGroup :: !(Maybe ProcessID)
   , sessionReader :: !(Async ())
   , sessionLogger :: !(Async ())
   , sessionWatcher :: !(Async ())
@@ -278,14 +282,15 @@ startWorkerSession launch hello emit control replay nextSequence generation = do
   case created of
     Left exception -> pure (Left (Text.pack (displayException (exception :: IOException))))
     Right (Just input, Just output, Just errorOutput, processHandle) -> do
+      group <- getPid processHandle
       traverse_ prepareHandle [input, output, errorOutput]
       helloWritten <- writeFrame launch.workerFrameLimits input hello
       case helloWritten of
-        Left failure -> startupFailure processHandle [input, output, errorOutput] (Text.pack (show failure))
+        Left failure -> startupFailure group processHandle [input, output, errorOutput] (Text.pack (show failure))
         Right () -> do
           helloResult <- timeout launch.workerHandshakeTimeoutMicroseconds (readFrame launch.workerFrameLimits output)
           case validateHello helloResult of
-            Left failure -> startupFailure processHandle [input, output, errorOutput] failure
+            Left failure -> startupFailure group processHandle [input, output, errorOutput] failure
             Right workerHello -> do
               let inputLimits =
                     FrameLimits
@@ -300,6 +305,7 @@ startWorkerSession launch hello emit control replay nextSequence generation = do
                       output
                       errorOutput
                       processHandle
+                      group
                       reader
                       logger
                       watcher
@@ -321,6 +327,7 @@ startWorkerSession launch hello emit control replay nextSequence generation = do
         , std_in = CreatePipe
         , std_out = CreatePipe
         , std_err = CreatePipe
+        , create_group = True
         }
 
 validateHello
@@ -401,6 +408,7 @@ retainForReplay stored replayState =
     OpenWorkspace _ ->
       ReplayState (Just stored) Nothing Nothing Map.empty Map.empty
     DiscoverProject _ -> replayState {replayProject = Just stored}
+    PrepareComponent _ -> replayState {replayComponent = Just stored}
     ConfigureContext _ -> replayState {replayComponent = Just stored}
     SelectComponent _ ->
       replayState {replayComponent = Just stored}
@@ -427,7 +435,8 @@ retainForReplay stored replayState =
         , replayAnalyses = Map.delete document replayState.replayAnalyses
         }
     AnalyzeDocument document ->
-      replayState {replayAnalyses = Map.insert document stored replayState.replayAnalyses}
+      replayState {replayAnalyses = Map.singleton document stored}
+    CancelRequest _ -> replayState {replayAnalyses = Map.empty, replayComponent = Nothing}
     _ -> replayState
 
 replayManaged :: ClientMessage -> Bool
@@ -435,6 +444,7 @@ replayManaged message =
   case message of
     DiscoverProject _ -> True
     ConfigureContext _ -> True
+    PrepareComponent _ -> True
     OpenWorkspace _ -> True
     SelectComponent _ -> True
     OpenDocument _ -> True
@@ -454,20 +464,30 @@ gracefulStop session = do
 stopWorkerSession :: WorkerSession -> IO ()
 stopWorkerSession session = do
   traverse_ cancel [session.sessionReader, session.sessionLogger, session.sessionWatcher]
-  exitCode <- getProcessExitCode session.sessionProcess
-  when (exitCode == Nothing) $ do
-    terminateProcess session.sessionProcess
-    void (waitForProcess session.sessionProcess)
+  -- Signal the whole compiler process group even if its leader already exited.
+  -- Custom preprocessors, Setup and TH subprocesses must not outlive a context.
+  let signal sig = forMGroup session.sessionProcessGroup (\group -> void (try (signalProcessGroup sig group) :: IO (Either IOException ())))
+  signal sigTERM
+  threadDelay 50000
+  signal sigKILL
+  void (timeout 1000000 (waitForProcess session.sessionProcess))
   traverse_ closeIgnoring [session.sessionInput, session.sessionOutput, session.sessionError]
+  where forMGroup Nothing _ = pure (); forMGroup (Just group) operation = operation group
 
 startupFailure
-  :: ProcessHandle
+  :: Maybe ProcessID
+  -> ProcessHandle
   -> [Handle]
   -> Text
   -> IO (Either Text value)
-startupFailure processHandle handles message = do
-  terminateProcess processHandle
-  void (waitForProcess processHandle)
+startupFailure group processHandle handles message = do
+  let signal sig = case group of
+        Nothing -> void (try (terminateProcess processHandle) :: IO (Either IOException ()))
+        Just identifier -> void (try (signalProcessGroup sig identifier) :: IO (Either IOException ()))
+  signal sigTERM
+  threadDelay 50000
+  signal sigKILL
+  void (timeout 1000000 (waitForProcess processHandle))
   traverse_ closeIgnoring handles
   pure (Left message)
 

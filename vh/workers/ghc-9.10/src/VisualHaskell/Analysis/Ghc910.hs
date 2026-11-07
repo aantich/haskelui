@@ -6,6 +6,7 @@ module VisualHaskell.Analysis.Ghc910
   , analyzeWorkspace
   , analysisEngineIsRunning
   , discoverCompilerInvocation
+  , prepareProjectContext
   , startAnalysisEngine
   , stopAnalysisEngine
   , queryWithEngine
