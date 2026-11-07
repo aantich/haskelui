@@ -22,8 +22,9 @@ preserved rather than overwritten.
 - Open one or several UTF-8 files through the native AppKit Open panel or Command-O.
 - Choose a project root with **File > Open Folder…**. The sidebar renders a
   native folder hierarchy with open/closed folder icons and file icons.
-- Explicit **Open Folder…** selection trusts that workspace for compiler
-  tooling. `.vihs` records the restoration preference and a separate per-user
+- **Open Folder…** does not execute project tooling. Choose **Trust…** in the
+  sidebar or **File > Trust Workspace for Haskell Analysis** to authorize it.
+  `.vihs` records the restoration preference and a separate per-user
   registry authorizes the normalized path. Automatically restored workspaces
   regain trust only when both records agree; a repository cannot self-trust.
 - Load directory children lazily when a folder is expanded, instead of
@@ -141,10 +142,11 @@ Visual Haskell now has a compiler-independent analysis spine under
 ```text
 semantic-model     stable identities, snapshots, diagnostics, declarations,
                    structured types, and Unicode coordinate conversion
-analysis-protocol  explicit V1 JSON messages and bounded length framing
+analysis-protocol  explicit V2 JSON messages and bounded length framing
 analysis-client    child-process supervision, generations, restart, and replay
+projects           GHC-free Stack/Cabal inventory, ownership and tool execution
 workers/fake       deterministic real-process integration worker
-workers/ghc-9.10   hie-bios project discovery and direct GHC 9.10.3 analysis
+workers/ghc-9.10   project coordinator and isolated direct GHC 9.10.3 sessions
 ```
 
 The production editor registers the process client through
@@ -153,8 +155,58 @@ workspace configures the component cradle, and every open Haskell buffer is
 sent as a revision/hash-bound full snapshot. The status bar reports worker,
 workspace, component, and diagnostic state. Visual Haskell accepts a semantic
 result only if worker generation, workspace generation, component session,
-document identity, revision, and content hash still match the current pure
+document identity, revision, content hash, and all open dependency-buffer inputs still match the current pure
 model.
+
+## Stack and Cabal projects
+
+1. Open a folder and explicitly trust it. Project configuration, Custom Setup,
+   preprocessors, Template Haskell and plugins can run code; trust is not a sandbox.
+2. Choose **Stack · stack.yaml** or **Cabal · cabal.project** in the sidebar.
+   When both tools or named alternative configurations exist, the IDE asks you
+   to choose. Standalone `.cabal` packages and Stack's Hpack `package.yaml` are
+   supported; no generated `hie.yaml` is required.
+3. Open a Haskell file. Its owning component is selected automatically if
+   unambiguous. For shared sources, select a library, internal library,
+   executable, test or benchmark in the component selector.
+4. Use **Project** in the inspector for bounded preparation logs and errors.
+   **Cancel** stops preparation/analysis and its child processes without closing
+   buffers. **Reload** retries discovery/preparation. **File > Revoke Workspace
+   Analysis Trust** stops tooling and removes the saved authorization.
+
+Each selected component retains its actual compiler flags, CPP definitions,
+source directories, generated inputs, package environment and local-library
+home units. Unsaved edits in an open local dependency participate in downstream
+analysis; they are never written to disk for GHC. Configuration changes and
+closed-source changes trigger a fresh context; open buffers remain authoritative.
+Profile, component and per-file context choices are restored from `.vihs` v3.
+
+Cabal uses `Cabal-syntax` inventory plus hie-bios 0.21 unit environments. Stack
+uses its own preparation hooks and a small helper compiled against the
+project's configured Cabal library to read per-unit metadata. Neither requires
+HLS/ghcide or rewrites project configuration. Analysis outputs live in IDE-owned
+caches, separate from Stack's build artifacts. A single live compiler session
+and at most two prepared contexts bound memory; changing component can incur a
+cold analysis.
+
+The current compiler worker supports **GHC 9.10.3**, with Stack metadata tested
+against Cabal **3.12.x**, on macOS. Other project compilers report an actionable
+error and leave editing available; additional worker versions are not silently
+substituted. Build tools and dependencies must be available in the environment.
+This is project loading/semantic editing, not a build/run/debug UI or a complete
+project-wide symbol index.
+
+Run the real toolchain acceptance matrix outside an enclosing `stack exec`:
+
+```console
+tests/visual-haskell/validate-project-loading.sh          # Stack and Cabal
+tests/visual-haskell/validate-project-loading.sh self-host
+```
+
+The matrix covers local-package unsaved edits, distinct/shared component
+contexts, crash replay, cancellation, atomic configuration replacement, Hpack,
+internal libraries, benchmarks, paths with spaces, conditional source roots,
+named configurations, Custom Setup-generated sources and standalone Cabal.
 
 ## Semantic universe inspectors
 

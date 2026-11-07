@@ -1,14 +1,14 @@
 # Visual Haskell analysis spine
 
-Status: Phase 1A, Phase 1B, and diagnostic presentation slice implemented
+Status: native semantic editing and Stack/Cabal project loading implemented
 
-Date: 2026-08-07
+Updated: 2026-11-07
 
 This document describes the implemented boundary between the Visual Haskell
-product and compiler-specific workers. It is narrower than the
-[long-term vision](visual-haskell-vision.md): current diagnostic overlays,
-Problems UI, and keyed navigation are live; declaration presentation and
-position queries remain the next Phase 2 work.
+product and compiler-specific workers. Sections 1–9 record the original
+foundation and its staged roadmap; section 10 records the feasibility gate.
+Section 11 describes the current project-loading implementation and limits.
+The [long-term vision](visual-haskell-vision.md) remains broader than this work.
 
 ## 1. Dependency direction
 
@@ -269,6 +269,9 @@ be added only after profiling the current correct full-snapshot path.
 
 ## 10. Project-loading Stage 0
 
+This section records the original feasibility investigation. The production
+implementation and its current compatibility boundary are in section 11 below.
+
 Investigation date: 2026-11-06.
 
 The compatibility investigation upgrades the pinned dependency from
@@ -385,3 +388,116 @@ Primary references:
 - [GHC multiple home units and closure invariant](https://downloads.haskell.org/ghc/9.10.3/docs/users_guide/using.html#multiple-home-units)
 - [Cabal build-info JSON](https://cabal.readthedocs.io/en/3.12/cabal-commands.html)
 - [Stack maintainer discussion of build-info generation](https://github.com/commercialhaskell/stack/issues/6154)
+
+## 11. Production project/context loading
+
+Implemented in November 2026 on the native HaskeLUI editor, without HLS, LSP or
+ghcide. Stage 0's prototype build-info opt-in is superseded by the configured
+Cabal helper; no `configure-options`, `hie.yaml`, or user project edits are
+required.
+
+### Discovery and environment providers
+
+`visual-haskell-projects` is GHC-free and uses `Cabal-syntax`, not handwritten
+`.cabal` or project-file parsers. It discovers nearest Stack/Cabal roots and
+named configurations, stops at repository boundaries, and exposes stable
+profile/package/component identities. More than one possible profile requires
+explicit selection. Package inventory includes conditional candidate roots;
+these are not mistaken for the finalized analysis environment.
+
+Cabal discovery reads an IDE-owned dry-run plan, including local dependencies,
+internal libraries and Custom Setup package nodes. Preparation constructs an
+in-memory explicit hie-bios Cabal cradle with the selected local dependency
+closure and requests `LoadUnitsFromCradle`. GHC interprets the returned flags
+to obtain actual finalized unit roots and directories. Standalone `.cabal`
+packages use Cabal's implicit project without creating `cabal.project`.
+
+Stack discovery uses `stack ide packages --cabal-files`, including Hpack output.
+Preparation queries the real compiler version/libdir, then uses Stack's repl
+initial-build-steps for its actual dependencies, Setup hooks and preprocessing.
+The final GHCi launch is replaced with the helper's no-op mode using Stack's
+documented `--with-ghc` option: a flattened Stack environment is neither loaded
+nor used as analysis metadata. Internal libraries use package-level Stack
+preparation targets because Stack does not accept Cabal's `pkg:lib:name`
+syntax. The selected analysis unit remains exact.
+
+The helper is compiled with the project's GHC and boot `Cabal` library and reads
+`setup-config` using Cabal's APIs. It exports real component unit IDs, compiler
+arguments, modules, entry points, finalized source roots and dependency unit
+IDs. Version checks currently require GHC 9.10.3/Cabal 3.12.x. Dependency-first
+`-unit @response-file` environments preserve the local-library closure. Main
+source paths resolve against configured `hs-source-dirs`, not just the package
+directory. Interfaces/objects/HIE/stubs go into IDE-owned unit directories so
+unsaved analyses cannot contaminate Stack's build products.
+
+### Scheduling, isolation and correctness
+
+The outer worker is an asynchronous coordinator: trust, discovery, preparation,
+watch events and newest pending analysis are handled independently of compiler
+work. Tool stdout/stderr are drained concurrently with bounded output and a
+15-minute operation limit. Cancellation kills the whole tool/compiler process
+group. One live child GHC session and two cached prepared contexts are the
+initial memory budget. Switching context starts a fresh child/session nonce;
+crashes replay the workspace, exact selected environment, latest open buffers
+and latest analysis intent.
+
+The compiler retains hie-bios's target order and explicit unit identities.
+Buffer overlays use unit-qualified targets with in-memory contents and logical
+monotonic timestamps. The same physical shared source can be compiled under
+different component CPP/options without mixing snapshots. Local-library
+buffers are loaded as home units rather than stale installed interfaces.
+Queries and visual composition activate the exact primary unit, restoring
+the prior environment after successful or failed checks.
+
+Protocol v2 includes an all-open-input stamp as well as document revision/hash,
+component session and worker/workspace generations. Any dependency-buffer edit,
+open or close invalidates the UI's dependent semantic snapshots, assistance and
+composition. Results computed against older dependency inputs are rejected even
+when the requested file itself has not changed.
+
+Native filesystem subscriptions watch project/configuration dependencies,
+recursive Cabal imports (including absent files), and closed source inputs.
+Atomic replacements are supported; events are deduplicated by content and
+generated-source rewrites during preparation do not cause reload loops. Open
+buffers remain authoritative. A watch failure is visible with manual Reload as
+the fallback. Configuration changes discard prepared contexts and compiler
+sessions; buffers are retained.
+
+### Native editor and trust
+
+The sidebar provides profile/component selectors plus Trust, Reload and Cancel;
+the Project inspector shows bounded progress and actionable failures. Choices
+are stored in `.vihs` v3, including per-file shared-source contexts. v1/v2 files
+migrate without granting trust. Opening a folder does not execute tools. Trust
+requires a separate per-user canonical-path registry, and can be revoked while
+the editor is running. Unsupported compilers/tool failures leave text editing
+available. Trust authorizes arbitrary project build/compiler code; it does not
+claim to sandbox Custom Setup, preprocessors, plugins or Template Haskell.
+
+### Acceptance and limits
+
+`tests/visual-haskell/validate-project-loading.sh` builds the worker and real
+acceptance executable, releases Stack's outer lock, and runs copied fixtures
+under Cabal and Stack. It checks unsaved cross-package break/recovery, separate
+and shared Main/module contexts, compiler restart replay, cancel/retry,
+configuration atomic replacement, dependency close, Hpack, internal libraries,
+benchmarks, conditional flags/roots, named configurations, paths with spaces,
+Custom Setup-generated source and standalone `.cabal`. The `self-host` argument
+loads this repository's actual editor library and model-test component with
+their local home-unit closures. Focused model/protocol/client/project/worker,
+service/persistence and native AppKit suites complement those end-to-end tests.
+
+Verified on macOS aarch64 with GHC 9.10.3, Stack 3.11.1, cabal-install 3.16.1.0
+and Cabal 3.12.1.0: both real-tool matrices, all ten focused/native suites, and
+self-hosting pass. The editor library loads seven local home units; its model
+test loads eight. A native smoke test loaded the same workspace under Cabal
+and Stack through the real trust/profile controls and reached clean typed
+analysis. Native regression counters finish with no live windows, controls,
+action targets or test failures. The retained legacy self-hosting path also
+passes (one observed warm in-memory edit: 63 ms; not a performance guarantee).
+
+Supported compiler compatibility is intentionally explicit: GHC 9.10.3 and the
+tested Stack/Cabal metadata boundary above, not every installed compiler. There
+is no automatic compiler download or HLS dependency. Windows process/watch
+adapters, additional compiler workers, a complete project-wide index, build/run
+commands, dependency installation UI and debugging remain separate work.

@@ -31,14 +31,14 @@ standard per-user state location.
 The last-workspace entry is only a locator. Portable editor preferences remain
 in `.vihs`; security authority remains outside project-controlled files.
 
-## Version 2 format
+## Version 3 format
 
 `.vihs` is UTF-8 JSON so it is inspectable, diffable, and extensible:
 
 ```json
 {
   "format": "visual-haskell-workspace",
-  "version": 2,
+  "version": 3,
   "openFiles": ["src/Main.hs", "README.md"],
   "activeFile": "src/Main.hs",
   "expandedFolders": [".", "src", "packages/haskelui-core"],
@@ -47,7 +47,10 @@ in `.vihs`; security authority remains outside project-controlled files.
     "navigator": { "visibility": "visible", "extent": 230 },
     "inspector": { "visibility": "visible", "extent": 270 }
   },
-  "analysisTrusted": true
+  "analysisTrusted": true,
+  "projectProfile": "stack:stack.yaml",
+  "projectComponent": "stack:stack.yaml:.:example:lib",
+  "fileContexts": [["src/Main.hs", "stack:stack.yaml:.:example:exe:app"]]
 }
 ```
 
@@ -61,6 +64,10 @@ optional and is ignored if it is not present in `openFiles`. Files opened from
 outside the workspace are intentionally not persisted in that workspace.
 
 The pane entries record the state currently represented by the surface API.
+`projectProfile` and `projectComponent` retain stable choices, not compiler
+sessions or cached GHC flags. `fileContexts` retains explicit component choices
+for shared sources; its paths obey the same validation as `openFiles`. A missing
+or renamed profile/component is rediscovered instead of trusting stale flags.
 Future versions may add window geometry, editor selections, scroll positions,
 or multiple tab groups through another explicitly versioned migration.
 
@@ -73,7 +80,8 @@ never grant trust by itself. Visual Haskell enables compiler tooling only when
 the normalized workspace root is also present in the user-owned trust
 registry. This two-key rule lets the editor restore the requested state while
 preventing a cloned repository from declaring itself trusted. Version 1 files
-remain readable and default this field to `false`.
+remain readable and default this field to `false`. Version 2 files retain their
+trust preference; both older versions default the new project choices to empty.
 
 ## Lifecycle
 
@@ -87,12 +95,13 @@ Opening a folder performs these operations in order:
 5. Select the saved active document and restore pane/explorer state.
 6. Restore compiler trust only when `.vihs` requests it and the user registry
    independently authorizes the workspace path.
-7. If `.vihs` was absent, atomically create a version 2 snapshot.
+7. If `.vihs` was absent, atomically create a version 3 snapshot.
 8. Update the per-user `last-workspace` locator.
 
 Relevant state changes atomically replace `.vihs` immediately: tab open,
 close, selection or ordering; folder expansion or explorer selection; and
-pane visibility or extent. Because the persisted state is always current,
+pane visibility or extent; project profile/component and per-file context
+choices. Because the persisted state is always current,
 normal termination requires no special last-second write.
 
 Invoking **Trust Workspace for Haskell Analysis** atomically requests trust in
@@ -100,6 +109,10 @@ Invoking **Trust Workspace for Haskell Analysis** atomically requests trust in
 changes immediately; compiler workspace loading does not wait for either disk
 write to complete. On restart, the two files reconstruct the same trusted
 state.
+
+Opening a fresh folder does not grant trust. **Trust…** in the sidebar invokes
+the same explicit command. **Revoke Workspace Analysis Trust** clears both
+records and stops compiler/project tools while leaving buffers open.
 
 An unreadable, malformed, unsupported, or unsafe `.vihs` never blocks opening
 the folder itself. Visual Haskell reports the problem and disables writes to

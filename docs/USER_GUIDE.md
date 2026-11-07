@@ -1822,7 +1822,8 @@ as a declarative subscription.
 Visual Haskell is the complete persistence implementation. It uses an optional startup
 read for the per-user `last-workspace` locator and user-owned trust registry,
 then restores the selected folder's versioned `.vihs` file. Tabs, active file,
-expanded folders, explorer selection, pane state, and the requested analysis
+expanded folders, explorer selection, pane state, project profile/component,
+per-file shared-source contexts, and the requested analysis
 trust mode are stored as safe portable state. Compiler trust is enabled only
 when `.vihs` requests it and the independent user registry authorizes the
 normalized root, so project-controlled metadata cannot self-trust. See
